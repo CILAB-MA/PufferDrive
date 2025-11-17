@@ -1034,6 +1034,7 @@ class WandbLogger:
             project=args["wandb_project"],
             group=args["wandb_group"],
             allow_val_change=True,
+            entity=args["wandb_entity"],
             save_code=False,
             resume=resume,
             config=args,
@@ -1216,6 +1217,63 @@ def eval(env_name, args=None, vecenv=None, policy=None):
             imageio.mimsave(args["gif_path"], frames, fps=args["fps"], loop=0)
             frames.append("Done")
 
+def zero_shot(env_name, args=None, vecenv=None, policy=None):
+    args = args or load_config(env_name)
+    wosac_enabled = args["wosac"]["enabled"]
+    backend = args["wosac"]["backend"] if wosac_enabled else args["vec"]["backend"]
+    assert backend == "PufferEnv" or not wosac_enabled, "WOSAC evaluation only supports PufferEnv backend."
+    args["vec"] = dict(backend=backend, num_envs=1)
+    args["env"]["num_agents"] = 64
+    args["env"]["init_mode"] = args["wosac"]["init_mode"] if wosac_enabled else args["env"]["init_mode"]
+    args["env"]["control_mode"] = args["wosac"]["control_mode"] if wosac_enabled else args["env"]["control_mode"]
+    args["env"]["init_steps"] = args["wosac"]["init_steps"] if wosac_enabled else args["env"]["init_steps"]
+    args["env"]["goal_behavior"] = args["wosac"]["goal_behavior"] if wosac_enabled else args["env"]["goal_behavior"]
+    args["env"]["goal_radius"] = args["wosac"]["goal_radius"] if wosac_enabled else args["env"]["goal_radius"]
+
+    vecenv = vecenv or load_env(env_name, args)
+    policies = []
+    print(args["load_id"], args["load_multiple_model_path"])
+    for load_path in args["load_multiple_model_path"]:
+        args["load_model_path"] = load_path
+        policy = policy or load_policy(args, vecenv, env_name)
+        policies.append(policy)
+    print(policies)
+    ob, info = vecenv.reset()
+    driver = vecenv.driver_env
+    num_agents = vecenv.observation_space.shape[0]
+    device = args["train"]["device"]
+
+    state = {}
+    if args["train"]["use_rnn"]:
+        state_ego = dict(
+            lstm_h=torch.zeros(1, policies[0].hidden_size, device=device),
+            lstm_c=torch.zeros(1, policies[0].hidden_size, device=device),
+        )
+        state_other = dict(
+            lstm_h=torch.zeros(num_agents - 1, policies[1].hidden_size, device=device),
+            lstm_c=torch.zeros(num_agents - 1, policies[1].hidden_size, device=device),
+        )
+
+    frames = []
+    while True:
+        with torch.no_grad():
+            ob = torch.as_tensor(ob).to(device)
+            ob_ego = ob[0].unsqueeze(0)
+            ob_other = ob[1:]
+            logits_ego, value_ego = policy.forward_eval(ob_ego, state_ego)
+            action_ego, logprob_ego, _ = pufferlib.pytorch.sample_logits(logits_ego)
+            action_ego = action_ego.cpu().numpy()
+
+            logits_other, value_other = policy.forward_eval(ob_other, state_other)
+            action_other, logprob_other, _ = pufferlib.pytorch.sample_logits(logits_other)
+            action_other = action_other.cpu().numpy()
+
+        if isinstance(logits_ego, torch.distributions.Normal):
+            action_ego = np.clip(action_ego, vecenv.action_space.low, vecenv.action_space.high)
+        if isinstance(logits_other, torch.distributions.Normal):  
+            action_other = np.clip(action_other, vecenv.action_space.low, vecenv.action_space.high)
+        actions = np.concatenate([action_ego, action_other], axis=0)
+        ob, rew, done, truncated, info = vecenv.step(actions)
 
 def sweep(args=None, env_name=None):
     args = args or load_config(env_name)
@@ -1377,7 +1435,6 @@ def load_policy(args, vecenv, env_name=""):
 
     return policy
 
-
 def load_config(env_name, config_dir=None):
     parser = argparse.ArgumentParser(
         description=f":blowfish: PufferLib [bright_cyan]{pufferlib.__version__}[/]"
@@ -1386,6 +1443,9 @@ def load_config(env_name, config_dir=None):
         add_help=False,
     )
     parser.add_argument("--load-model-path", type=str, default=None, help="Path to a pretrained checkpoint")
+    parser.add_argument("--load-multiple-model-path", type=str, default=[], 
+        nargs="+",
+        help="Path to multiple pretrained checkpoints")
     parser.add_argument(
         "--load-id", type=str, default=None, help="Kickstart/eval from from a finished Wandb/Neptune run"
     )
@@ -1399,6 +1459,7 @@ def load_config(env_name, config_dir=None):
     parser.add_argument("--wandb", action="store_true", help="Use wandb for logging")
     parser.add_argument("--wandb-project", type=str, default="pufferlib")
     parser.add_argument("--wandb-group", type=str, default="debug")
+    parser.add_argument("--wandb-entity", type=str, default=None)
     parser.add_argument("--neptune", action="store_true", help="Use neptune for logging")
     parser.add_argument("--neptune-name", type=str, default="pufferai")
     parser.add_argument("--neptune-project", type=str, default="ablations")
@@ -1471,6 +1532,8 @@ def main():
         train(env_name=env_name)
     elif mode == "eval":
         eval(env_name=env_name)
+    elif mode == "zeroshot":
+        zero_shot(env_name=env_name)
     elif mode == "sweep":
         sweep(env_name=env_name)
     elif mode == "autotune":
