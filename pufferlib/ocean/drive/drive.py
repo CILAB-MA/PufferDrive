@@ -139,7 +139,6 @@ class Drive(pufferlib.PufferEnv):
             max_controlled_agents=self.max_controlled_agents,
             goal_behavior=self.goal_behavior,
         )
-
         self.num_agents = num_agents
         self.agent_offsets = agent_offsets
         self.map_ids = map_ids
@@ -178,13 +177,13 @@ class Drive(pufferlib.PufferEnv):
                 control_mode=self.control_mode,
             )
             env_ids.append(env_id)
-
         self.c_envs = binding.vectorize(*env_ids)
 
     def reset(self, seed=0):
         binding.vec_reset(self.c_envs, seed)
         self.tick = 0
-        return self.observations, []
+        info = [{"agent_offsets": self.agent_offsets}]
+        return self.observations, info
 
     def step(self, actions):
         self.terminals[:] = 0
@@ -196,7 +195,6 @@ class Drive(pufferlib.PufferEnv):
             log = binding.vec_log(self.c_envs)
             if log:
                 info.append(log)
-                # print(log)
         if self.tick > 0 and self.resample_frequency > 0 and self.tick % self.resample_frequency == 0:
             self.tick = 0
             will_resample = 1
@@ -211,6 +209,10 @@ class Drive(pufferlib.PufferEnv):
                     max_controlled_agents=self.max_controlled_agents,
                     goal_behavior=self.goal_behavior,
                 )
+                if log:
+                    info[0]['num_envs'] = num_envs
+                    info[0]['map_ids'] = map_ids
+                    info[0]['agent_offsets'] = agent_offsets
                 env_ids = []
                 seed = np.random.randint(0, 2**32 - 1)
                 for i in range(num_envs):
@@ -246,7 +248,6 @@ class Drive(pufferlib.PufferEnv):
                     )
                     env_ids.append(env_id)
                 self.c_envs = binding.vectorize(*env_ids)
-
                 binding.vec_reset(self.c_envs, seed)
                 self.terminals[:] = 1
         return (self.observations, self.rewards, self.terminals, self.truncations, info)

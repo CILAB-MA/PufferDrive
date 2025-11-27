@@ -20,7 +20,7 @@ import importlib
 import configparser
 from threading import Thread
 from collections import defaultdict, deque
-
+import json
 import numpy as np
 import psutil
 
@@ -1210,7 +1210,6 @@ def eval(env_name, args=None, vecenv=None, policy=None):
             action = np.clip(action, vecenv.action_space.low, vecenv.action_space.high)
 
         ob = vecenv.step(action)[0]
-
         if len(frames) > 0 and len(frames) == args["save_frames"]:
             import imageio
 
@@ -1219,11 +1218,13 @@ def eval(env_name, args=None, vecenv=None, policy=None):
 
 def zero_shot(env_name, args=None, vecenv=None, policy=None):
     args = args or load_config(env_name)
+    num_test_env = 1000
+    num_iter = 0
     wosac_enabled = args["wosac"]["enabled"]
     backend = args["wosac"]["backend"] if wosac_enabled else args["vec"]["backend"]
     assert backend == "PufferEnv" or not wosac_enabled, "WOSAC evaluation only supports PufferEnv backend."
-    args["vec"] = dict(backend=backend, num_envs=1)
-    args["env"]["num_agents"] = 64
+    args["vec"] = dict(backend=backend, num_envs=24)
+    args["env"]["num_agents"] = 1 if args["zero_shot_mode"] == "log-replay" else 64
     args["env"]["init_mode"] = args["wosac"]["init_mode"] if wosac_enabled else args["env"]["init_mode"]
     args["env"]["control_mode"] = args["wosac"]["control_mode"] if wosac_enabled else args["env"]["control_mode"]
     args["env"]["init_steps"] = args["wosac"]["init_steps"] if wosac_enabled else args["env"]["init_steps"]
@@ -1232,48 +1233,107 @@ def zero_shot(env_name, args=None, vecenv=None, policy=None):
 
     vecenv = vecenv or load_env(env_name, args)
     policies = []
-    print(args["load_id"], args["load_multiple_model_path"])
     for load_path in args["load_multiple_model_path"]:
         args["load_model_path"] = load_path
         policy = policy or load_policy(args, vecenv, env_name)
         policies.append(policy)
-    print(policies)
-    ob, info = vecenv.reset()
+    ob, infos = vecenv.reset(seed=args["train"]["seed"])
     driver = vecenv.driver_env
     num_agents = vecenv.observation_space.shape[0]
     device = args["train"]["device"]
-
-    state = {}
+    ego_indices = []
+    for i, info in enumerate(infos):
+        agent_offsets = info['agent_offsets']
+        ego_idx = agent_offsets[:-1]
+        ego_indices += [idx + args["env"]["num_agents"] * i for idx in ego_idx]
+    other_mask = torch.ones(ob.shape[0], dtype=torch.bool, device=device)
+    other_mask[ego_indices] = False
     if args["train"]["use_rnn"]:
         state_ego = dict(
-            lstm_h=torch.zeros(1, policies[0].hidden_size, device=device),
-            lstm_c=torch.zeros(1, policies[0].hidden_size, device=device),
+            lstm_h=torch.zeros(len(ego_indices), policies[0].hidden_size, device=device),
+            lstm_c=torch.zeros(len(ego_indices), policies[0].hidden_size, device=device),
         )
-        state_other = dict(
-            lstm_h=torch.zeros(num_agents - 1, policies[1].hidden_size, device=device),
-            lstm_c=torch.zeros(num_agents - 1, policies[1].hidden_size, device=device),
-        )
-
-    frames = []
+        if args["zero_shot_mode"] != "log-replay":
+            state_other = dict(
+                lstm_h=torch.zeros(ob.shape[0]- len(ego_indices), policies[1].hidden_size, device=device),
+                lstm_c=torch.zeros(ob.shape[0] - len(ego_indices), policies[1].hidden_size, device=device),
+            )
+    
+    num_envs = len(ego_indices)
+    total_dict = dict()
+    ego_action_values = np.zeros(2)
+    step = 0
     while True:
         with torch.no_grad():
+            total_actions = np.zeros((ob.shape[0], 1), dtype=np.int64)
             ob = torch.as_tensor(ob).to(device)
-            ob_ego = ob[0].unsqueeze(0)
-            ob_other = ob[1:]
+            ob_ego = ob[ego_indices]
             logits_ego, value_ego = policy.forward_eval(ob_ego, state_ego)
             action_ego, logprob_ego, _ = pufferlib.pytorch.sample_logits(logits_ego)
             action_ego = action_ego.cpu().numpy()
-
-            logits_other, value_other = policy.forward_eval(ob_other, state_other)
-            action_other, logprob_other, _ = pufferlib.pytorch.sample_logits(logits_other)
-            action_other = action_other.cpu().numpy()
-
-        if isinstance(logits_ego, torch.distributions.Normal):
-            action_ego = np.clip(action_ego, vecenv.action_space.low, vecenv.action_space.high)
-        if isinstance(logits_other, torch.distributions.Normal):  
-            action_other = np.clip(action_other, vecenv.action_space.low, vecenv.action_space.high)
-        actions = np.concatenate([action_ego, action_other], axis=0)
-        ob, rew, done, truncated, info = vecenv.step(actions)
+            if isinstance(logits_ego, torch.distributions.Normal):
+                action_ego = np.clip(action_ego, vecenv.action_space.low, vecenv.action_space.high)
+            if args["zero_shot_mode"] != "log-replay":
+                ob_other = ob[other_mask]
+                logits_other, value_other = policy.forward_eval(ob_other, state_other)
+                action_other, logprob_other, _ = pufferlib.pytorch.sample_logits(logits_other)
+                action_other = action_other.cpu().numpy()
+                if isinstance(logits_other, torch.distributions.Normal):  
+                    action_other = np.clip(action_other, vecenv.action_space.low, vecenv.action_space.high)
+                total_actions[ego_indices] = action_ego
+                total_actions[other_mask.cpu().numpy()] = action_other
+            else:
+                total_actions = action_ego
+        ego_accel, ego_steer = decode_actions_tensor(action_ego)
+        ego_action_values[0] += ego_accel.mean()
+        ego_action_values[1] += ego_steer.mean()
+        ob, rew, done, truncated, infos = vecenv.step(total_actions)
+        step += 1
+        if done.sum() == len(done):
+            ego_indices = []
+            for i, info in enumerate(infos):
+                num_envs += info['num_envs']
+                num_iter += 1
+                agent_offsets = info['agent_offsets']
+                ego_idx = agent_offsets[:-1]
+                ego_indices += [idx + args["env"]["num_agents"] * i for idx in ego_idx]
+                for k, v in info.items():
+                    if type(v) == list:
+                        v = len(v)
+                    if k not in total_dict:
+                        total_dict[k] = v
+                        total_dict["accel_value"] = ego_action_values[0] / step
+                        total_dict["steer_value"] = ego_action_values[1] / step
+                    else:
+                        total_dict[k] += v
+                        total_dict["accel_value"] += ego_action_values[0] / step
+                        total_dict["steer_value"] += ego_action_values[1] / step
+            other_mask = torch.ones(ob.shape[0], dtype=torch.bool, device=device)
+            other_mask[ego_indices] = False
+            if args["train"]["use_rnn"]:
+                state_ego = dict(
+                    lstm_h=torch.zeros(len(ego_indices), policies[0].hidden_size, device=device),
+                    lstm_c=torch.zeros(len(ego_indices), policies[0].hidden_size, device=device),
+                )
+                if args["zero_shot_mode"] != "log-replay":
+                    state_other = dict(
+                        lstm_h=torch.zeros(ob.shape[0]- len(ego_indices), policies[1].hidden_size, device=device),
+                        lstm_c=torch.zeros(ob.shape[0] - len(ego_indices), policies[1].hidden_size, device=device),
+                    )
+        if num_envs >= num_test_env:
+            for k, v in total_dict.items():
+                if "one" in k:
+                    total_dict[k] = total_dict[k] / num_envs 
+                else:
+                    total_dict[k] = total_dict[k] / num_iter
+            vecenv.close()
+            break
+    if args["zero_shot_mode"] == "log-replay":
+        res_dict= {f"{args['load_multiple_model_path'][0][-11:-3]}_vs_log-replay": total_dict}
+    else:
+        res_dict= {f"{args['load_multiple_model_path'][0][-11:-3]}_vs_{args['load_multiple_model_path'][1][-11:-3]}": total_dict}
+    print(res_dict)
+    return res_dict
 
 def sweep(args=None, env_name=None):
     args = args or load_config(env_name)
@@ -1443,11 +1503,15 @@ def load_config(env_name, config_dir=None):
         add_help=False,
     )
     parser.add_argument("--load-model-path", type=str, default=None, help="Path to a pretrained checkpoint")
+    # For zero-shot evaluation
     parser.add_argument("--load-multiple-model-path", type=str, default=[], 
         nargs="+",
         help="Path to multiple pretrained checkpoints")
     parser.add_argument(
         "--load-id", type=str, default=None, help="Kickstart/eval from from a finished Wandb/Neptune run"
+    )
+    parser.add_argument('--zero-shot-mode', type=str, default='zero-shot', 
+        choices=['self-play', 'zero-shot', 'log-replay']
     )
     parser.add_argument(
         "--render-mode", type=str, default="auto", choices=["auto", "human", "ansi", "rgb_array", "raylib", "None"]
@@ -1474,7 +1538,7 @@ def load_config(env_name, config_dir=None):
         puffer_dir = config_dir
 
     # Load defaults and config
-    puffer_config_dir = os.path.join(puffer_dir, "config/**/*.ini")
+    puffer_config_dir = os.path.join(puffer_dir, "config/**/drive.ini")
     puffer_default_config = os.path.join(puffer_dir, "config/default.ini")
     if env_name == "default":
         p = configparser.ConfigParser()
@@ -1518,6 +1582,16 @@ def load_config(env_name, config_dir=None):
     args["train"]["use_rnn"] = args["rnn_name"] is not None
     return args
 
+def decode_actions_tensor(action_index):
+    ACCELERATION_VALUES = np.array([-4.0000, -2.6670, -1.3330, -0.0000, 1.3330, 2.6670, 4.0000], dtype=np.float32)
+    STEERING_VALUES     = np.array([-1.000, -0.833, -0.667, -0.500, -0.333, -0.167,
+                                    0.000, 0.167, 0.333, 0.500, 0.667, 0.833, 1.000], dtype=np.float32)
+
+    accel_idx = action_index // len(STEERING_VALUES)
+    steer_idx = action_index %  len(STEERING_VALUES)
+    accel = ACCELERATION_VALUES[accel_idx]
+    steer = STEERING_VALUES[steer_idx]
+    return accel, steer
 
 def main():
     err = (
@@ -1533,7 +1607,25 @@ def main():
     elif mode == "eval":
         eval(env_name=env_name)
     elif mode == "zeroshot":
-        zero_shot(env_name=env_name)
+        res = zero_shot(env_name=env_name)
+        path = 'zeroshot_v2.json'
+        if not os.path.exists(path):
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump([res], f, ensure_ascii=False, indent=2)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError):
+            data = []
+
+        if isinstance(data, dict):
+            data = [data]
+        elif not isinstance(data, list):
+            data = [data]
+        data.append(res)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
     elif mode == "sweep":
         sweep(env_name=env_name)
     elif mode == "autotune":

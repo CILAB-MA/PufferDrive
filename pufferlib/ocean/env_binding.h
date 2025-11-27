@@ -1,7 +1,6 @@
 #include "env_config.h"
 #include <Python.h>
 #include <numpy/arrayobject.h>
-
 // Forward declarations for env-specific functions supplied by user
 static int my_log(PyObject* dict, Log* log);
 static int my_init(Env* env, PyObject* args, PyObject* kwargs);
@@ -567,11 +566,11 @@ static PyObject* vec_log(PyObject* self, PyObject* args) {
     if (!vec) {
         return NULL;
     }
-
     // Iterates over logs one float at a time. Will break
     // horribly if Log has non-float data.
     Log aggregate = {0};
     int num_keys = sizeof(Log) / sizeof(float);
+    int first_one_index = (int)(offsetof(Log, one_episode_return) / sizeof(float));
     for (int i = 0; i < vec->num_envs; i++) {
         Env* env = vec->envs[i];
         for (int j = 0; j < num_keys; j++) {
@@ -584,10 +583,12 @@ static PyObject* vec_log(PyObject* self, PyObject* args) {
     if (aggregate.n == 0.0f) {
         return dict;
     }
-
     // Average
     float n = aggregate.n;
     for (int i = 0; i < num_keys; i++) {
+        if (i >= first_one_index) {
+            continue;
+        }
         ((float*)&aggregate)[i] /= n;
     }
 

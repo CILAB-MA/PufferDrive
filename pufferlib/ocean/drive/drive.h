@@ -138,7 +138,18 @@ struct Log {
     float expert_static_agent_count;
     float static_agent_count;
     float avg_offroad_per_agent;
-    float avg_collisions_per_agent;
+    float avg_collisions_per_agent; 
+    // only record first agent
+    float one_episode_return;
+    float one_episode_length;
+    float one_score;
+    float one_offroad_rate;
+    float one_collision_rate;
+    float one_num_goals_reached;
+    float one_completion_rate;
+    float one_dnf_rate;
+    float one_lane_alignment_rate;
+    float one_avg_displacement_error;
 };
 
 typedef struct Entity Entity;
@@ -364,6 +375,19 @@ void add_log(Drive* env) {
         env->log.avg_displacement_error += displacement_error;
         env->log.episode_length += env->logs[i].episode_length;
         env->log.episode_return += env->logs[i].episode_return;
+
+        if (i == 0) {
+            env->log.one_completion_rate      = e->reached_goal_this_episode ? 1.0f : 0.0f;
+            env->log.one_offroad_rate         = (float)offroad;
+            env->log.one_collision_rate       = (float)collided;
+            env->log.one_num_goals_reached    = (float)num_goals_reached;
+            env->log.one_score                = (e->reached_goal_this_episode && !e->collided_before_goal) ? 1.0f : 0.0f;
+            env->log.one_dnf_rate             = (!offroad && !collided && !e->reached_goal_this_episode) ? 1.0f : 0.0f;
+            env->log.one_lane_alignment_rate  = (float)lane_aligned;
+            env->log.one_avg_displacement_error = displacement_error;
+            env->log.one_episode_length       = env->logs[i].episode_length;
+            env->log.one_episode_return       = env->logs[i].episode_return;
+        }
         // Log composition counts per agent so vec_log averaging recovers the per-env value
         env->log.active_agent_count += env->active_agent_count;
         env->log.expert_static_agent_count += env->expert_static_agent_count;

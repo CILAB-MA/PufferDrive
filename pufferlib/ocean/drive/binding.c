@@ -75,7 +75,7 @@ static PyObject* my_shared(PyObject* self, PyObject* args, PyObject* kwargs) {
     int init_steps = unpack(kwargs, "init_steps");
     int goal_behavior = unpack(kwargs, "goal_behavior");
     clock_gettime(CLOCK_REALTIME, &ts);
-    srand(ts.tv_nsec);
+    // srand(ts.tv_nsec);
     int total_agent_count = 0;
     int env_count = 0;
     int max_envs = num_agents;
@@ -218,5 +218,16 @@ static int my_log(PyObject* dict, Log* log) {
     assign_to_dict(dict, "score", log->score);
     assign_to_dict(dict, "avg_offroad_per_agent", log->avg_offroad_per_agent);
     assign_to_dict(dict, "avg_collisions_per_agent", log->avg_collisions_per_agent);
+    // log first index
+    assign_to_dict(dict, "one_episode_return",         log->one_episode_return);
+    assign_to_dict(dict, "one_episode_length",         log->one_episode_length);
+    assign_to_dict(dict, "one_score",                  log->one_score);
+    assign_to_dict(dict, "one_offroad_rate",           log->one_offroad_rate);
+    assign_to_dict(dict, "one_collision_rate",         log->one_collision_rate);
+    assign_to_dict(dict, "one_num_goals_reached",      log->one_num_goals_reached);
+    assign_to_dict(dict, "one_completion_rate",        log->one_completion_rate);
+    assign_to_dict(dict, "one_dnf_rate",               log->one_dnf_rate);
+    assign_to_dict(dict, "one_lane_alignment_rate",    log->one_lane_alignment_rate);
+    assign_to_dict(dict, "one_avg_displacement_error", log->one_avg_displacement_error);
     return 0;
 }
