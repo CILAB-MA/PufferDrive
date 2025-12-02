@@ -1218,12 +1218,11 @@ def eval(env_name, args=None, vecenv=None, policy=None):
 
 def zero_shot(env_name, args=None, vecenv=None, policy=None):
     args = args or load_config(env_name)
-    num_test_env = 1000
-    num_iter = 0
+    num_test_env = 200
     wosac_enabled = args["wosac"]["enabled"]
     backend = args["wosac"]["backend"] if wosac_enabled else args["vec"]["backend"]
     assert backend == "PufferEnv" or not wosac_enabled, "WOSAC evaluation only supports PufferEnv backend."
-    args["vec"] = dict(backend=backend, num_envs=24)
+    args["vec"] = dict(backend=backend, num_envs=4)
     args["env"]["num_agents"] = 1 if args["zero_shot_mode"] == "log-replay" else 64
     args["env"]["init_mode"] = args["wosac"]["init_mode"] if wosac_enabled else args["env"]["init_mode"]
     args["env"]["control_mode"] = args["wosac"]["control_mode"] if wosac_enabled else args["env"]["control_mode"]
@@ -1259,9 +1258,10 @@ def zero_shot(env_name, args=None, vecenv=None, policy=None):
                 lstm_c=torch.zeros(ob.shape[0] - len(ego_indices), policies[1].hidden_size, device=device),
             )
     
-    num_envs = len(ego_indices)
-    total_dict = dict()
+    num_envs = 0
+    total_dict = dict(accel_value=0, steer_value=0)
     ego_action_values = np.zeros(2)
+    num_iter = 0
     step = 0
     while True:
         with torch.no_grad():
@@ -1302,12 +1302,11 @@ def zero_shot(env_name, args=None, vecenv=None, policy=None):
                         v = len(v)
                     if k not in total_dict:
                         total_dict[k] = v
-                        total_dict["accel_value"] = ego_action_values[0] / step
-                        total_dict["steer_value"] = ego_action_values[1] / step
                     else:
                         total_dict[k] += v
-                        total_dict["accel_value"] += ego_action_values[0] / step
-                        total_dict["steer_value"] += ego_action_values[1] / step
+            total_dict["accel_value"] += ego_action_values[0] / step
+            total_dict["steer_value"] += ego_action_values[1] / step
+            # print(infos[0], num_iter, num_envs)
             other_mask = torch.ones(ob.shape[0], dtype=torch.bool, device=device)
             other_mask[ego_indices] = False
             if args["train"]["use_rnn"]:
@@ -1320,6 +1319,8 @@ def zero_shot(env_name, args=None, vecenv=None, policy=None):
                         lstm_h=torch.zeros(ob.shape[0]- len(ego_indices), policies[1].hidden_size, device=device),
                         lstm_c=torch.zeros(ob.shape[0] - len(ego_indices), policies[1].hidden_size, device=device),
                     )
+            step = 0
+            ego_action_values = np.zeros(2)
         if num_envs >= num_test_env:
             for k, v in total_dict.items():
                 if "one" in k:

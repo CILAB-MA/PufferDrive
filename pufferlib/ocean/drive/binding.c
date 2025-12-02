@@ -76,10 +76,15 @@ static PyObject* my_shared(PyObject* self, PyObject* args, PyObject* kwargs) {
     int goal_behavior = unpack(kwargs, "goal_behavior");
     clock_gettime(CLOCK_REALTIME, &ts);
     // srand(ts.tv_nsec);
+    int fix_seed = unpack(kwargs, "fix_seed");
     int total_agent_count = 0;
     int env_count = 0;
     int max_envs = num_agents;
     int maps_checked = 0;
+    if (!fix_seed) {
+        int seed = unpack(kwargs, "seed");
+        srand((unsigned int)seed);
+    }
     PyObject* agent_offsets = PyList_New(max_envs+1);
     PyObject* map_ids = PyList_New(max_envs);
     // getting env count

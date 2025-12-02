@@ -138,7 +138,10 @@ class Drive(pufferlib.PufferEnv):
             init_steps=self.init_steps,
             max_controlled_agents=self.max_controlled_agents,
             goal_behavior=self.goal_behavior,
+            seed=seed,
+            fix_seed=False
         )
+        self.seed = seed
         self.num_agents = num_agents
         self.agent_offsets = agent_offsets
         self.map_ids = map_ids
@@ -208,13 +211,15 @@ class Drive(pufferlib.PufferEnv):
                     init_steps=self.init_steps,
                     max_controlled_agents=self.max_controlled_agents,
                     goal_behavior=self.goal_behavior,
+                    fix_seed=True
                 )
                 if log:
                     info[0]['num_envs'] = num_envs
                     info[0]['map_ids'] = map_ids
                     info[0]['agent_offsets'] = agent_offsets
                 env_ids = []
-                seed = np.random.randint(0, 2**32 - 1)
+                # seed = np.random.randint(0, 2**32 - 1)
+                seed = self.seed
                 for i in range(num_envs):
                     cur = agent_offsets[i]
                     nxt = agent_offsets[i + 1]

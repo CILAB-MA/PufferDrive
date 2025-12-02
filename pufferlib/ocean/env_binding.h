@@ -144,7 +144,7 @@ static PyObject* env_init(PyObject* self, PyObject* args, PyObject* kwargs) {
     int seed = PyLong_AsLong(seed_arg);
 
     // Assumes each process has the same number of environments
-    srand(seed);
+    // srand(seed);
 
     // If kwargs is NULL, create a new dictionary
     if (kwargs == NULL) {
@@ -499,7 +499,7 @@ static PyObject* vec_reset(PyObject* self, PyObject* args) {
 
     for (int i = 0; i < vec->num_envs; i++) {
         // Assumes each process has the same number of environments
-        srand(i + seed*vec->num_envs);
+        // srand(i + seed*vec->num_envs);
         c_reset(vec->envs[i]);
     }
     Py_RETURN_NONE;
