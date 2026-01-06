@@ -1,0 +1,1184 @@
+<!DOCTYPE HTML>
+<html lang="en" class="light sidebar-visible" dir="ltr">
+    <head>
+        <!-- Book generated using mdBook -->
+        <meta charset="UTF-8">
+        <title>PufferDrive</title>
+        <meta name="robots" content="noindex">
+
+
+        <!-- Custom HTML head -->
+
+        <meta name="description" content="High-throughput autonomous driving simulator built on PufferLib.">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#ffffff">
+
+        <link rel="icon" href="favicon-de23e50b.svg">
+        <link rel="shortcut icon" href="favicon-8114d1fc.png">
+        <link rel="stylesheet" href="css/variables-8adf115d.css">
+        <link rel="stylesheet" href="css/general-2459343d.css">
+        <link rel="stylesheet" href="css/chrome-ae938929.css">
+        <link rel="stylesheet" href="css/print-9e4910d8.css" media="print">
+
+        <!-- Fonts -->
+        <link rel="stylesheet" href="fonts/fonts-9644e21d.css">
+
+        <!-- Highlight.js Stylesheets -->
+        <link rel="stylesheet" id="mdbook-highlight-css" href="highlight-493f70e1.css">
+        <link rel="stylesheet" id="mdbook-tomorrow-night-css" href="tomorrow-night-4c0ae647.css">
+        <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="ayu-highlight-3fdfc3ac.css">
+
+        <!-- Custom theme stylesheets -->
+        <link rel="stylesheet" href="theme/extra-1e76a9d8.css">
+
+        <!-- MathJax -->
+        <script async src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.1/MathJax.js?config=TeX-AMS-MML_HTMLorMML"></script>
+
+        <!-- Provide site root and default themes to javascript -->
+        <script>
+            const path_to_root = "";
+            const default_light_theme = "light";
+            const default_dark_theme = "navy";
+            window.path_to_searchindex_js = "searchindex-6c58eb4b.js";
+        </script>
+        <!-- Start loading toc.js asap -->
+        <script src="toc-8d227c1c.js"></script>
+    </head>
+    <body>
+    <div id="mdbook-help-container">
+        <div id="mdbook-help-popup">
+            <h2 class="mdbook-help-title">Keyboard shortcuts</h2>
+            <div>
+                <p>Press <kbd>←</kbd> or <kbd>→</kbd> to navigate between chapters</p>
+                <p>Press <kbd>S</kbd> or <kbd>/</kbd> to search in the book</p>
+                <p>Press <kbd>?</kbd> to show this help</p>
+                <p>Press <kbd>Esc</kbd> to hide this help</p>
+            </div>
+        </div>
+    </div>
+    <div id="mdbook-body-container">
+        <!-- Work around some values being stored in localStorage wrapped in quotes -->
+        <script>
+            try {
+                let theme = localStorage.getItem('mdbook-theme');
+                let sidebar = localStorage.getItem('mdbook-sidebar');
+
+                if (theme.startsWith('"') && theme.endsWith('"')) {
+                    localStorage.setItem('mdbook-theme', theme.slice(1, theme.length - 1));
+                }
+
+                if (sidebar.startsWith('"') && sidebar.endsWith('"')) {
+                    localStorage.setItem('mdbook-sidebar', sidebar.slice(1, sidebar.length - 1));
+                }
+            } catch (e) { }
+        </script>
+
+        <!-- Set the theme before any content is loaded, prevents flash -->
+        <script>
+            const default_theme = window.matchMedia("(prefers-color-scheme: dark)").matches ? default_dark_theme : default_light_theme;
+            let theme;
+            try { theme = localStorage.getItem('mdbook-theme'); } catch(e) { }
+            if (theme === null || theme === undefined) { theme = default_theme; }
+            const html = document.documentElement;
+            html.classList.remove('light')
+            html.classList.add(theme);
+            html.classList.add("js");
+        </script>
+
+        <input type="checkbox" id="mdbook-sidebar-toggle-anchor" class="hidden">
+
+        <!-- Hide / unhide sidebar before it is displayed -->
+        <script>
+            let sidebar = null;
+            const sidebar_toggle = document.getElementById("mdbook-sidebar-toggle-anchor");
+            if (document.body.clientWidth >= 1080) {
+                try { sidebar = localStorage.getItem('mdbook-sidebar'); } catch(e) { }
+                sidebar = sidebar || 'visible';
+            } else {
+                sidebar = 'hidden';
+                sidebar_toggle.checked = false;
+            }
+            if (sidebar === 'visible') {
+                sidebar_toggle.checked = true;
+            } else {
+                html.classList.remove('sidebar-visible');
+            }
+        </script>
+
+        <nav id="mdbook-sidebar" class="sidebar" aria-label="Table of contents">
+            <!-- populated by js -->
+            <mdbook-sidebar-scrollbox class="sidebar-scrollbox"></mdbook-sidebar-scrollbox>
+            <noscript>
+                <iframe class="sidebar-iframe-outer" src="toc.html"></iframe>
+            </noscript>
+            <div id="mdbook-sidebar-resize-handle" class="sidebar-resize-handle">
+                <div class="sidebar-resize-indicator"></div>
+            </div>
+        </nav>
+
+        <div id="mdbook-page-wrapper" class="page-wrapper">
+
+            <div class="page">
+                <div id="mdbook-menu-bar-hover-placeholder"></div>
+                <div id="mdbook-menu-bar" class="menu-bar sticky">
+                    <div class="left-buttons">
+                        <label id="mdbook-sidebar-toggle" class="icon-button" for="mdbook-sidebar-toggle-anchor" title="Toggle Table of Contents" aria-label="Toggle Table of Contents" aria-controls="mdbook-sidebar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M0 96C0 78.3 14.3 64 32 64H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32C14.3 128 0 113.7 0 96zM0 256c0-17.7 14.3-32 32-32H416c17.7 0 32 14.3 32 32s-14.3 32-32 32H32c-17.7 0-32-14.3-32-32zM448 416c0 17.7-14.3 32-32 32H32c-17.7 0-32-14.3-32-32s14.3-32 32-32H416c17.7 0 32 14.3 32 32z"/></svg></span>
+                        </label>
+                        <button id="mdbook-theme-toggle" class="icon-button" type="button" title="Change theme" aria-label="Change theme" aria-haspopup="true" aria-expanded="false" aria-controls="mdbook-theme-list">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M371.3 367.1c27.3-3.9 51.9-19.4 67.2-42.9L600.2 74.1c12.6-19.5 9.4-45.3-7.6-61.2S549.7-4.4 531.1 9.6L294.4 187.2c-24 18-38.2 46.1-38.4 76.1L371.3 367.1zm-19.6 25.4l-116-104.4C175.9 290.3 128 339.6 128 400c0 3.9 .2 7.8 .6 11.6c1.8 17.5-10.2 36.4-27.8 36.4H96c-17.7 0-32 14.3-32 32s14.3 32 32 32H240c61.9 0 112-50.1 112-112c0-2.5-.1-5-.2-7.5z"/></svg></span>
+                        </button>
+                        <ul id="mdbook-theme-list" class="theme-popup" aria-label="Themes" role="menu">
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-default_theme">Auto</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-light">Light</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-rust">Rust</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-coal">Coal</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-navy">Navy</button></li>
+                            <li role="none"><button role="menuitem" class="theme" id="mdbook-theme-ayu">Ayu</button></li>
+                        </ul>
+                        <button id="mdbook-search-toggle" class="icon-button" type="button" title="Search (`/`)" aria-label="Toggle Searchbar" aria-expanded="false" aria-keyshortcuts="/ s" aria-controls="mdbook-searchbar">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352c79.5 0 144-64.5 144-144s-64.5-144-144-144S64 128.5 64 208s64.5 144 144 144z"/></svg></span>
+                        </button>
+                    </div>
+
+                    <h1 class="menu-title">PufferDrive</h1>
+
+                    <div class="right-buttons">
+                        <a href="print.html" title="Print this book" aria-label="Print this book">
+                            <span class=fa-svg id="print-button"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M128 0C92.7 0 64 28.7 64 64v96h64V64H354.7L384 93.3V160h64V93.3c0-17-6.7-33.3-18.7-45.3L400 18.7C388 6.7 371.7 0 354.7 0H128zM384 352v32 64H128V384 368 352H384zm64 32h32c17.7 0 32-14.3 32-32V256c0-35.3-28.7-64-64-64H64c-35.3 0-64 28.7-64 64v96c0 17.7 14.3 32 32 32H64v64c0 35.3 28.7 64 64 64H384c35.3 0 64-28.7 64-64V384zm-16-88c-13.3 0-24-10.7-24-24s10.7-24 24-24s24 10.7 24 24s-10.7 24-24 24z"/></svg></span>
+                        </a>
+                        <a href="https://github.com/Emerge-Lab/PufferDrive" title="Git repository" aria-label="Git repository">
+                            <span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 496 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3zm44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/></svg></span>
+                        </a>
+
+                    </div>
+                </div>
+
+                <div id="mdbook-search-wrapper" class="hidden">
+                    <form id="mdbook-searchbar-outer" class="searchbar-outer">
+                        <div class="search-wrapper">
+                            <input type="search" id="mdbook-searchbar" name="searchbar" placeholder="Search this book ..." aria-controls="mdbook-searchresults-outer" aria-describedby="searchresults-header">
+                            <div class="spinner-wrapper">
+                                <span class=fa-svg id="fa-spin"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M304 48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zm0 416c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM48 304c26.5 0 48-21.5 48-48s-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48zm464-48c0-26.5-21.5-48-48-48s-48 21.5-48 48s21.5 48 48 48s48-21.5 48-48zM142.9 437c18.7-18.7 18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zm0-294.2c18.7-18.7 18.7-49.1 0-67.9S93.7 56.2 75 75s-18.7 49.1 0 67.9s49.1 18.7 67.9 0zM369.1 437c18.7 18.7 49.1 18.7 67.9 0s18.7-49.1 0-67.9s-49.1-18.7-67.9 0s-18.7 49.1 0 67.9z"/></svg></span>
+                            </div>
+                        </div>
+                    </form>
+                    <div id="mdbook-searchresults-outer" class="searchresults-outer hidden">
+                        <div id="mdbook-searchresults-header" class="searchresults-header"></div>
+                        <ul id="mdbook-searchresults">
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- Apply ARIA attributes after the sidebar and the sidebar toggle button are added to the DOM -->
+                <script>
+                    document.getElementById('mdbook-sidebar-toggle').setAttribute('aria-expanded', sidebar === 'visible');
+                    document.getElementById('mdbook-sidebar').setAttribute('aria-hidden', sidebar !== 'visible');
+                    Array.from(document.querySelectorAll('#mdbook-sidebar a')).forEach(function(link) {
+                        link.setAttribute('tabIndex', sidebar === 'visible' ? 0 : -1);
+                    });
+                </script>
+
+                <div id="mdbook-content" class="content">
+                    <main>
+                        <h1 id="pufferdrive"><a class="header" href="#pufferdrive">PufferDrive</a></h1>
+<p align="center">
+  <a href="https://github.com/Emerge-Lab/PufferDrive/stargazers"><img src="https://img.shields.io/github/stars/Emerge-Lab/PufferDrive?style=social" alt="GitHub stars"></a>
+  <a href="https://github.com/Emerge-Lab/PufferDrive/network/members"><img src="https://img.shields.io/github/forks/Emerge-Lab/PufferDrive?style=social" alt="GitHub forks"></a>
+  <a href="https://github.com/Emerge-Lab/PufferDrive"><img src="https://img.shields.io/github/watchers/Emerge-Lab/PufferDrive?style=social" alt="GitHub watchers"></a>
+</p>
+
+<div class="hero">
+  <img src="images/pufferdrive.gif" alt="PufferDrive logo">
+  
+<div>
+    
+<p>PufferDrive is a high-throughput autonomous driving simulator built on <a href="https://puffer.ai">PufferLib</a>. Train and evaluate multi-agent driving policies with fast vectorized stepping, streamlined data conversion, and ready-made benchmarks.</p>
+
+    
+<div class="cta">
+      <a class="primary" href="#getting-started">Start here: install &amp; build</a>
+      <a href="#workflow">See the workflow</a>
+    </div>
+
+  </div>
+
+</div>
+
+<blockquote class="blockquote-tag blockquote-tag-note">
+<p class="blockquote-tag-title"><svg viewbox="0 0 16 16" width="18" height="18"><path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm8-6.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM6.5 7.75A.75.75 0 0 1 7.25 7h1a.75.75 0 0 1 .75.75v2.75h.25a.75.75 0 0 1 0 1.5h-2a.75.75 0 0 1 0-1.5h.25v-2h-.25a.75.75 0 0 1-.75-.75ZM8 6a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"></path></svg>Note</p>
+<p>We just released PufferDrive 2.0! Check out the <a href="#pufferdrive-20-a-fast-and-friendly-driving-simulator-for-training-and-evaluating-rl-agents">release post</a>.</p>
+</blockquote>
+<h2 id="try-it-in-your-browser"><a class="header" href="#try-it-in-your-browser">Try it in your browser</a></h2>
+<div class="video-embed">
+<iframe src="assets/game.html" title="PufferDrive Demo" style="border: none;"></iframe>
+</div>
+
+<p style="text-align: center; color: #888; margin-top: 1rem;">
+  Hold <strong>Left Shift</strong> and use arrow keys or <strong>WASD</strong> to control the vehicle. Hold <strong>space</strong> for first-person view and <strong>ctrl</strong> to see what your agent is seeing :)
+</p>
+
+<h2 id="highlights"><a class="header" href="#highlights">Highlights</a></h2>
+<ul>
+<li>Data-driven, multi-agent drive environment that trains agents at <strong>300K steps per second</strong>.</li>
+<li>Integrated <a href="#evaluations-and-benchmarks">benchmarks</a> for distributional realism and human compatibility.</li>
+<li><a href="https://www.raylib.com/">Raylib-based</a> rendering for local or headless render/export.</li>
+</ul>
+<h2 id="quick-start"><a class="header" href="#quick-start">Quick start</a></h2>
+<ul>
+<li>Follow <a href="#getting-started">Getting started</a> to install, build the C extensions, and run <code>puffer train puffer_drive</code>.</li>
+<li>Consult <a href="#pufferdrive-simulator-guide">Simulator</a> for how actions/observations, rewards, and <code>.ini</code> settings map to the underlying C environment and Torch policy.</li>
+<li>Prepare drive map binaries with the steps in <a href="#data">Data</a>.</li>
+<li>Evaluate a policy with the commands in <a href="#evaluations-and-benchmarks">Evaluation</a> and preview runs with the <a href="#visualizer">Visualizer</a>.</li>
+</ul>
+<h2 id="workflow"><a class="header" href="#workflow">Workflow</a></h2>
+<div class="workflow">
+  
+<div class="step-card">
+    
+<div class="badge">Step 1</div>
+
+    
+<h3>Install &amp; Build</h3>
+
+    
+<p>Set up the environment, install dependencies, and compile the native extensions.</p>
+
+    <a href="#getting-started">Open guide</a>
+  </div>
+
+  
+<div class="step-card">
+    
+<div class="badge">Step 2</div>
+
+    
+<h3>Prepare Data</h3>
+
+    
+<p>Download WOMD/Carla data from Hugging Face and convert to map binaries.</p>
+
+    <a href="#data">Open guide</a>
+  </div>
+
+  
+<div class="step-card">
+    
+<div class="badge">Step 3</div>
+
+    
+<h3>Train &amp; Evaluate</h3>
+
+    
+<p>Train agents and evaluate them with WOSAC and human-replay benchmarks.</p>
+
+    <a href="#training-agents">Open guide</a>
+  </div>
+
+</div>
+
+<h2 id="repository-layout"><a class="header" href="#repository-layout">Repository layout</a></h2>
+<ul>
+<li><code>pufferlib/ocean/drive</code>: Drive environment implementation and map processing utilities.</li>
+<li><code>resources/drive/binaries</code>: Expected location for compiled map binaries (outputs of the data conversion step).</li>
+<li><code>scripts/build_ocean.sh</code>: Helper for building the Raylib visualizer and related binaries.</li>
+<li><code>examples</code>, <code>tests</code>, <code>experiments</code>: Reference usage, checks, and research scripts that pair with the docs pages.</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="getting-started"><a class="header" href="#getting-started">Getting started</a></h1>
+<p>This page walks through installing PufferDrive from source, building the native extensions, and running a first training job.</p>
+<h2 id="prerequisites"><a class="header" href="#prerequisites">Prerequisites</a></h2>
+<ul>
+<li>Python 3.9+ with a virtual environment manager (<code>uv</code>, <code>venv</code>, or <code>conda</code>).</li>
+<li>A C/C++ toolchain for building the bundled extensions (GCC/Clang + make).</li>
+<li><a href="https://pytorch.org/">PyTorch</a> installed inside your environment (pick the CPU/GPU wheel that matches your setup).</li>
+</ul>
+<h2 id="installation"><a class="header" href="#installation">Installation</a></h2>
+<p>Clone and set up an isolated environment:</p>
+<pre><code class="language-bash">git clone https://github.com/Emerge-Lab/PufferDrive.git
+cd PufferDrive
+uv venv .venv &amp;&amp; source .venv/bin/activate
+uv pip install -e .
+</code></pre>
+<p>Build the C extensions in place:</p>
+<pre><code class="language-bash">python setup.py build_ext --inplace --force
+</code></pre>
+<p>Run this with your virtual environment activated so the compiled extension links against the correct Python.</p>
+<h3 id="when-to-rebuild-the-extension"><a class="header" href="#when-to-rebuild-the-extension">When to rebuild the extension</a></h3>
+<ul>
+<li>Re-run <code>python setup.py build_ext --inplace --force</code> after changing any C/Raylib sources in <code>pufferlib/ocean/drive</code> (e.g., <code>drive.c</code>, <code>drive.h</code>, <code>binding.c</code>, <code>visualize.c</code>) or after pulling upstream changes that touch those files. This regenerates the <code>binding.cpython-*.so</code> used by <code>Drive</code>.</li>
+<li>Pure Python edits (training scripts, docs, data utilities) do not require a rebuild; just restart your Python process.</li>
+</ul>
+<h2 id="verify-the-setup"><a class="header" href="#verify-the-setup">Verify the setup</a></h2>
+<p>Once map binaries are available (see <a href="#data">Data</a>), launch a quick training run to confirm the environment, data, and bindings are wired up correctly:</p>
+<pre><code class="language-bash">puffer train puffer_drive
+</code></pre>
+<p>For multi-node training (only uses Data Parallelism with torch ddp)</p>
+<pre><code class="language-bash">torchrun --standalone --nnodes=1 --nproc-per-node=6 -m puffer train puffer_drive
+</code></pre>
+<p>If map binaries are missing, follow the steps in <a href="#data">Data</a> to generate them before training. See <a href="#visualizer">Visualizer</a> for rendering runs and <a href="#evaluations-and-benchmarks">Evaluation</a> for benchmark commands.</p>
+<h2 id="logging-with-weights--biases"><a class="header" href="#logging-with-weights--biases">Logging with Weights &amp; Biases</a></h2>
+<p>Enable W&amp;B logging with the built-in CLI flags (the package is already a dependency in <code>setup.py</code>):</p>
+<pre><code class="language-bash">puffer train puffer_drive --wandb --wandb-project pufferdrive --wandb-group local-dev
+</code></pre>
+<ul>
+<li>Add <code>--wandb</code> to turn on logging; <code>--wandb-project</code> and <code>--wandb-group</code> set the destination in W&amp;B.</li>
+<li>Checkpoint uploads and evaluation helpers (<code>pufferlib/utils.py</code>) will log WOSAC/human-replay metrics and rendered videos when W&amp;B is enabled.</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="training-agents"><a href="#training-agents" class="header">Training agents</a></h1>
+<h2 id="training"><a class="header" href="#training">Training</a></h2>
+<h3 id="basic-training"><a class="header" href="#basic-training">Basic training</a></h3>
+<p>Launch a training run with Weights &amp; Biases logging:</p>
+<pre><code class="language-bash">puffer train puffer_drive --wandb --wandb-project "pufferdrive"
+</code></pre>
+<h3 id="environment-configurations"><a class="header" href="#environment-configurations">Environment configurations</a></h3>
+<p><strong>Default configuration (Waymo maps)</strong></p>
+<p>The default settings in <code>drive.ini</code> are optimized for:</p>
+<ul>
+<li>Training in thousands of Waymo maps</li>
+<li>Short episodes (91 steps)</li>
+</ul>
+<p><strong>Carla maps configuration</strong></p>
+<p>For training agents to drive indefinitely in larger Carla maps, we recommend modifying <code>drive.ini</code> as follows:</p>
+<pre><code class="language-ini">[env]
+goal_speed = 10.0  # Target speed in m/s at the goal. Lower values discourage excessive speeding
+goal_behavior = 1  # 0: respawn, 1: generate_new_goals, 2: stop
+goal_target_distance = 30.0  # Distance to new goal when using generate_new_goals
+
+# Episode settings
+episode_length = 300 # Increase for longer episode horizon
+resample_frequency = 100000 # No resampling needed (there are only a few Carla maps)
+termination_mode = 0  # 0: terminate at episode_length, 1: terminate after all agents reset
+
+# Map settings
+map_dir = "resources/drive/binaries/carla"
+num_maps = 2
+</code></pre>
+<p>this should give a good starting point. With these settings, you’ll need about 2-3 billion steps to get an agent that reaches most of it’s goals (&gt; 95%) and has a combined collsion / off-road rate of 3 % per episode of 300 steps.</p>
+<blockquote class="blockquote-tag blockquote-tag-note">
+<p class="blockquote-tag-title"><svg viewbox="0 0 16 16" width="18" height="18"><path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm8-6.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM6.5 7.75A.75.75 0 0 1 7.25 7h1a.75.75 0 0 1 .75.75v2.75h.25a.75.75 0 0 1 0 1.5h-2a.75.75 0 0 1 0-1.5h.25v-2h-.25a.75.75 0 0 1-.75-.75ZM8 6a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"></path></svg>Note</p>
+<p>The default training hyperparameters work well for both configurations and typically don’t need adjustment.</p>
+</blockquote>
+<blockquote class="blockquote-tag blockquote-tag-note">
+<p class="blockquote-tag-title"><svg viewbox="0 0 16 16" width="18" height="18"><path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm8-6.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM6.5 7.75A.75.75 0 0 1 7.25 7h1a.75.75 0 0 1 .75.75v2.75h.25a.75.75 0 0 1 0 1.5h-2a.75.75 0 0 1 0-1.5h.25v-2h-.25a.75.75 0 0 1-.75-.75ZM8 6a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"></path></svg>Note</p>
+<p>The checkpoint at <code>resources/drive/puffer_drive_weights_carla_town12.bin</code> is an agent trained on Carla town 01 and 02 with these settings. This is the one used in the interactive demo.</p>
+</blockquote>
+<h2 id="controlled-experiments"><a class="header" href="#controlled-experiments">Controlled experiments</a></h2>
+<p>Aside from <code>train</code> and <code>sweep</code>, we support a third mode for running controlled experiments over lists of values:</p>
+<pre><code class="language-bash">puffer controlled_exp puffer_drive --wandb --wandb-project "pufferdrive2.0_carla" --tag speed
+</code></pre>
+<p>Define parameter sweeps in <code>drive.ini</code>:</p>
+<pre><code class="language-ini">[controlled_exp.env.goal_speed]
+values = [10, 20, 30]
+</code></pre>
+<p>This will launch separate training runs for each value in the list, which cab be useful for:</p>
+<ul>
+<li>Hyperparameter tuning</li>
+<li>Architecture search</li>
+<li>Running multiple random seeds</li>
+<li>Ablation studies</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="interact-with-agents"><a href="#interact-with-agents" class="header">Interact with agents</a></h1>
+<h2 id="drive-with-trained-agents"><a class="header" href="#drive-with-trained-agents">Drive with trained agents</a></h2>
+<p>You can take manual control of an agent in the simulator by holding <strong>LEFT SHIFT</strong> and using the keyboard controls. When you’re in control, the action values displayed on screen will turn <strong>yellow</strong>.</p>
+<h3 id="local-rendering"><a class="header" href="#local-rendering">Local rendering</a></h3>
+<p>To launch an interactive renderer, first build:</p>
+<pre><code class="language-bash">bash scripts/build_ocean.sh drive local
+</code></pre>
+<p>then launch:</p>
+<pre><code class="language-bash">./drive
+</code></pre>
+<p>This will run <code>demo()</code> with an existing model checkpoint.</p>
+<h3 id="controls"><a class="header" href="#controls">Controls</a></h3>
+<p><strong>General:</strong></p>
+<ul>
+<li><strong>LEFT SHIFT + Arrow Keys/WASD</strong> - Take manual control</li>
+<li><strong>SPACE</strong> - First-person camera view</li>
+<li><strong>Mouse Drag</strong> - Pan camera</li>
+<li><strong>Mouse Wheel</strong> - Zoom</li>
+</ul>
+<p><strong>Classic dynamics model</strong></p>
+<ul>
+<li><strong>SHIFT + UP/W</strong> - Increase acceleration</li>
+<li><strong>SHIFT + DOWN/S</strong> - Decrease acceleration (brake)</li>
+<li><strong>SHIFT + LEFT/A</strong> - Steer left</li>
+<li><strong>SHIFT + RIGHT/D</strong> - Steer right</li>
+</ul>
+<p>Each key press increments or decrements the action level. For example, tapping W multiple times increases acceleration from neutral (index 3) → 5 → 6 (maximum acceleration). We assume <strong>no friction</strong>, so releasing all keys maintains constant speed and heading.</p>
+<p><strong>Jerk dynamics model</strong></p>
+<ul>
+<li><strong>SHIFT + UP/W</strong> - Accelerate (+4.0 m/s³ jerk)</li>
+<li><strong>SHIFT + DOWN/S</strong> - Brake (-15.0 m/s³ jerk)</li>
+<li><strong>SHIFT + LEFT/A</strong> - Turn left (+4.0 m/s³ lateral jerk)</li>
+<li><strong>SHIFT + RIGHT/D</strong> - Turn right (-4.0 m/s³ lateral jerk)</li>
+</ul>
+<p>Actions are applied directly when keys are pressed. Pressing W always applies +4.0 m/s³ longitudinal jerk, regardless of how long the key is held.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="pufferdrive-simulator-guide"><a class="header" href="#pufferdrive-simulator-guide">PufferDrive simulator guide</a></h1>
+<p>A high-performance autonomous driving simulator in C with Python bindings.</p>
+<p><strong>Entry point:</strong> <code>pufferlib/ocean/drive/drive.py</code> wraps <code>pufferlib/ocean/drive/drive.h</code></p>
+<h2 id="configuration"><a class="header" href="#configuration">Configuration</a></h2>
+<h3 id="basic-settings"><a class="header" href="#basic-settings">Basic settings</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Parameter</th><th>Default</th><th>Description</th></tr>
+</thead>
+<tbody>
+<tr><td><code>num_maps</code></td><td>-</td><td>Map binaries to load</td></tr>
+<tr><td><code>num_agents</code></td><td>32</td><td>Policy-controlled agents (max 64)</td></tr>
+<tr><td><code>episode_length</code></td><td>91</td><td>Steps per episode</td></tr>
+<tr><td><code>resample_frequency</code></td><td>910</td><td>Steps between map resampling</td></tr>
+</tbody>
+</table>
+</div>
+<blockquote class="blockquote-tag blockquote-tag-tip">
+<p class="blockquote-tag-title"><svg viewbox="0 0 16 16" width="18" height="18"><path d="M8 1.5c-2.363 0-4 1.69-4 3.75 0 .984.424 1.625.984 2.304l.214.253c.223.264.47.556.673.848.284.411.537.896.621 1.49a.75.75 0 0 1-1.484.211c-.04-.282-.163-.547-.37-.847a8.456 8.456 0 0 0-.542-.68c-.084-.1-.173-.205-.268-.32C3.201 7.75 2.5 6.766 2.5 5.25 2.5 2.31 4.863 0 8 0s5.5 2.31 5.5 5.25c0 1.516-.701 2.5-1.328 3.259-.095.115-.184.22-.268.319-.207.245-.383.453-.541.681-.208.3-.33.565-.37.847a.751.751 0 0 1-1.485-.212c.084-.593.337-1.078.621-1.489.203-.292.45-.584.673-.848.075-.088.147-.173.213-.253.561-.679.985-1.32.985-2.304 0-2.06-1.637-3.75-4-3.75ZM5.75 12h4.5a.75.75 0 0 1 0 1.5h-4.5a.75.75 0 0 1 0-1.5ZM6 15.25a.75.75 0 0 1 .75-.75h2.5a.75.75 0 0 1 0 1.5h-2.5a.75.75 0 0 1-.75-.75Z"></path></svg>Tip</p>
+<p>Set <code>episode_length = 91</code> to match Waymo log length for single-goal tasks. Use longer episodes (e.g., 200+) with <code>goal_behavior=1</code> for multi-goal driving.</p>
+</blockquote>
+<h3 id="control-modes"><a class="header" href="#control-modes">Control modes</a></h3>
+<ul>
+<li><code>control_vehicles</code>: Only vehicles</li>
+<li><code>control_agents</code>: All agent types (vehicles, cyclists, pedestrians)</li>
+<li><code>control_tracks_to_predict</code>: WOMD evaluation mode</li>
+<li><code>control_sdc_only</code>: Self-driving car only</li>
+</ul>
+<blockquote class="blockquote-tag blockquote-tag-note">
+<p class="blockquote-tag-title"><svg viewbox="0 0 16 16" width="18" height="18"><path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm8-6.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM6.5 7.75A.75.75 0 0 1 7.25 7h1a.75.75 0 0 1 .75.75v2.75h.25a.75.75 0 0 1 0 1.5h-2a.75.75 0 0 1 0-1.5h.25v-2h-.25a.75.75 0 0 1-.75-.75ZM8 6a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"></path></svg>Note</p>
+<p><code>control_vehicles</code> filters out agents marked as “expert” and those too close to their goal (&lt;2m). For full WOMD evaluation, use <code>control_tracks_to_predict</code>.</p>
+</blockquote>
+<h3 id="goal-behaviors"><a class="header" href="#goal-behaviors">Goal behaviors</a></h3>
+<p>Three modes determine what happens when an agent reaches its goal:</p>
+<p><strong>Mode 0 (Respawn) - Default:</strong></p>
+<ul>
+<li>Agent teleports back to starting position</li>
+<li>Other agents removed from environment (prevents post-respawn collisions)</li>
+<li>Useful for maximizing environment interaction per episode</li>
+</ul>
+<p><strong>Mode 1 (Generate new) - Multi-goal:</strong></p>
+<ul>
+<li>Agent receives a new goal sampled from the road network</li>
+<li>Can complete multiple goals per episode</li>
+<li>Tests long-horizon driving competence</li>
+</ul>
+<p><strong>Mode 2 (Stop):</strong></p>
+<ul>
+<li>Agent stops in place after reaching goal</li>
+<li>Episode continues until <code>episode_length</code></li>
+<li>Simplest setting for evaluation</li>
+</ul>
+<blockquote class="blockquote-tag blockquote-tag-important">
+<p class="blockquote-tag-title"><svg viewbox="0 0 16 16" width="18" height="18"><path d="M0 1.75C0 .784.784 0 1.75 0h12.5C15.216 0 16 .784 16 1.75v9.5A1.75 1.75 0 0 1 14.25 13H8.06l-2.573 2.573A1.458 1.458 0 0 1 3 14.543V13H1.75A1.75 1.75 0 0 1 0 11.25Zm1.75-.25a.25.25 0 0 0-.25.25v9.5c0 .138.112.25.25.25h2a.75.75 0 0 1 .75.75v2.19l2.72-2.72a.749.749 0 0 1 .53-.22h6.5a.25.25 0 0 0 .25-.25v-9.5a.25.25 0 0 0-.25-.25Zm7 2.25v2.5a.75.75 0 0 1-1.5 0v-2.5a.75.75 0 0 1 1.5 0ZM9 9a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z"></path></svg>Important</p>
+<p>Goal behavior fundamentally changes what “success” means:</p>
+<ul>
+<li><strong>Mode 0/2 (single goal):</strong> Success = reaching the one goal without collision/off-road</li>
+<li><strong>Mode 1 (multi-goal):</strong> Success = completing ≥X% of sampled goals cleanly</li>
+</ul>
+</blockquote>
+<p><strong>Config files:</strong> <code>pufferlib/config/ocean/drive.ini</code> (loaded first), then <code>pufferlib/config/default.ini</code></p>
+<h2 id="episode-flow"><a class="header" href="#episode-flow">Episode flow</a></h2>
+<ol>
+<li><strong>Initialize</strong>: Load maps, select agents, set start positions</li>
+<li><strong>Step loop</strong> (until <code>episode_length</code>):
+<ul>
+<li>Move expert replay agents (if they exist)</li>
+<li>Apply policy actions to controlled agents</li>
+<li>Update simulator</li>
+<li>Check collisions</li>
+<li>Assign rewards</li>
+<li>Handle goal completion/respawns</li>
+<li>Compute observations</li>
+</ul>
+</li>
+<li><strong>End</strong>: Log metrics, reset</li>
+</ol>
+<blockquote class="blockquote-tag blockquote-tag-note">
+<p class="blockquote-tag-title"><svg viewbox="0 0 16 16" width="18" height="18"><path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm8-6.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM6.5 7.75A.75.75 0 0 1 7.25 7h1a.75.75 0 0 1 .75.75v2.75h.25a.75.75 0 0 1 0 1.5h-2a.75.75 0 0 1 0-1.5h.25v-2h-.25a.75.75 0 0 1-.75-.75ZM8 6a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"></path></svg>Note</p>
+<p>Maps are resampled every <code>resample_frequency</code> steps (~10 episodes with default settings) to increase map diversity.</p>
+</blockquote>
+<blockquote class="blockquote-tag blockquote-tag-caution">
+<p class="blockquote-tag-title"><svg viewbox="0 0 16 16" width="18" height="18"><path d="M4.47.22A.749.749 0 0 1 5 0h6c.199 0 .389.079.53.22l4.25 4.25c.141.14.22.331.22.53v6a.749.749 0 0 1-.22.53l-4.25 4.25A.749.749 0 0 1 11 16H5a.749.749 0 0 1-.53-.22L.22 11.53A.749.749 0 0 1 0 11V5c0-.199.079-.389.22-.53Zm.84 1.28L1.5 5.31v5.38l3.81 3.81h5.38l3.81-3.81V5.31L10.69 1.5ZM8 4a.75.75 0 0 1 .75.75v3.5a.75.75 0 0 1-1.5 0v-3.5A.75.75 0 0 1 8 4Zm0 8a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"></path></svg>Caution</p>
+<p>No early termination - episodes always run to <code>episode_length</code> regardless of goal completion or collisions with the default settings.</p>
+</blockquote>
+<h2 id="actions"><a class="header" href="#actions">Actions</a></h2>
+<h3 id="discrete-actions"><a class="header" href="#discrete-actions">Discrete actions</a></h3>
+<ul>
+<li><strong>Classic</strong>: 91 options (7 accel × 13 steer)
+<ul>
+<li>Accel: <code>[-4.0, -2.67, -1.33, 0.0, 1.33, 2.67, 4.0]</code> m/s²</li>
+<li>Steer: 13 values from -1.0 to 1.0</li>
+</ul>
+</li>
+<li><strong>Jerk</strong>: 12 options (4 long × 3 lat)
+<ul>
+<li>Long jerk: <code>[-15, -4, 0, 4]</code> m/s³</li>
+<li>Lat jerk: <code>[-4, 0, 4]</code> m/s³</li>
+</ul>
+</li>
+</ul>
+<blockquote class="blockquote-tag blockquote-tag-note">
+<p class="blockquote-tag-title"><svg viewbox="0 0 16 16" width="18" height="18"><path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm8-6.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM6.5 7.75A.75.75 0 0 1 7.25 7h1a.75.75 0 0 1 .75.75v2.75h.25a.75.75 0 0 1 0 1.5h-2a.75.75 0 0 1 0-1.5h.25v-2h-.25a.75.75 0 0 1-.75-.75ZM8 6a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"></path></svg>Note</p>
+<p>Discrete actions are decoded as: <code>action_idx → (accel_idx, steer_idx)</code> using division and modulo.</p>
+</blockquote>
+<h3 id="continuous-actions"><a class="header" href="#continuous-actions">Continuous actions</a></h3>
+<ul>
+<li>2D Box <code>[-1, 1]</code></li>
+<li><strong>Classic</strong>: Scaled to ±4 m/s² accel, ±1 steer</li>
+<li><strong>Jerk</strong>: Asymmetric long (brake -15, accel +4), symmetric lat (±4)</li>
+</ul>
+<h3 id="dynamics-models"><a class="header" href="#dynamics-models">Dynamics models</a></h3>
+<p><strong>Classic (bicycle model):</strong></p>
+<ul>
+<li>Integrates accel/steer with dt=0.1s</li>
+<li>Wheelbase = 60% of vehicle length</li>
+<li>Standard kinematic bicycle model</li>
+</ul>
+<p><strong>Jerk (physics-based):</strong></p>
+<ul>
+<li>Integrates jerk → accel → velocity → pose</li>
+<li>Steering limited to ±0.55 rad</li>
+<li>Speed clipped to [0, 20] m/s</li>
+<li>More realistic comfort and control constraints</li>
+</ul>
+<blockquote class="blockquote-tag blockquote-tag-important">
+<p class="blockquote-tag-title"><svg viewbox="0 0 16 16" width="18" height="18"><path d="M0 1.75C0 .784.784 0 1.75 0h12.5C15.216 0 16 .784 16 1.75v9.5A1.75 1.75 0 0 1 14.25 13H8.06l-2.573 2.573A1.458 1.458 0 0 1 3 14.543V13H1.75A1.75 1.75 0 0 1 0 11.25Zm1.75-.25a.25.25 0 0 0-.25.25v9.5c0 .138.112.25.25.25h2a.75.75 0 0 1 .75.75v2.19l2.72-2.72a.749.749 0 0 1 .53-.22h6.5a.25.25 0 0 0 .25-.25v-9.5a.25.25 0 0 0-.25-.25Zm7 2.25v2.5a.75.75 0 0 1-1.5 0v-2.5a.75.75 0 0 1 1.5 0ZM9 9a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z"></path></svg>Important</p>
+<p>Jerk dynamics adds 3 extra observation features (steering angle, long accel, lat accel) compared to classic.</p>
+</blockquote>
+<h2 id="observations"><a class="header" href="#observations">Observations</a></h2>
+<h3 id="size"><a class="header" href="#size">Size</a></h3>
+<ul>
+<li><strong>Classic</strong>: 1848 floats = 7 (ego) + 217 (partners) + 1624 (roads)</li>
+<li><strong>Jerk</strong>: 1851 floats = 10 (ego) + 217 (partners) + 1624 (roads)</li>
+</ul>
+<p>Where partners = <code>MAX_AGENTS - 1</code> agents × 7 features, roads = 232 segments × 7 features</p>
+<blockquote class="blockquote-tag blockquote-tag-important">
+<p class="blockquote-tag-title"><svg viewbox="0 0 16 16" width="18" height="18"><path d="M0 1.75C0 .784.784 0 1.75 0h12.5C15.216 0 16 .784 16 1.75v9.5A1.75 1.75 0 0 1 14.25 13H8.06l-2.573 2.573A1.458 1.458 0 0 1 3 14.543V13H1.75A1.75 1.75 0 0 1 0 11.25Zm1.75-.25a.25.25 0 0 0-.25.25v9.5c0 .138.112.25.25.25h2a.75.75 0 0 1 .75.75v2.19l2.72-2.72a.749.749 0 0 1 .53-.22h6.5a.25.25 0 0 0 .25-.25v-9.5a.25.25 0 0 0-.25-.25Zm7 2.25v2.5a.75.75 0 0 1-1.5 0v-2.5a.75.75 0 0 1 1.5 0ZM9 9a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z"></path></svg>Important</p>
+<p>All observations are in the <strong>ego vehicle’s reference frame</strong> (agent-centric) and are normalized. Positions rotate with the agent’s heading.</p>
+</blockquote>
+<h3 id="ego-features-ego-frame"><a class="header" href="#ego-features-ego-frame">Ego features (ego frame)</a></h3>
+<p><strong>Classic (7):</strong> goal_x, goal_y, speed, width, length, collision_flag, respawn_flag</p>
+<p><strong>Jerk adds (3):</strong> steering_angle, long_accel, lat_accel</p>
+<h3 id="partner-features-up-to-max_agents---1-agents-7-each"><a class="header" href="#partner-features-up-to-max_agents---1-agents-7-each">Partner features (up to <code>MAX_AGENTS - 1</code> agents, 7 each)</a></h3>
+<p>rel_x, rel_y, width, length, heading_cos, heading_sin, speed</p>
+<ul>
+<li>Within 50m of ego</li>
+<li>Active agents first, then static experts</li>
+<li>Zero-padded if fewer agents</li>
+</ul>
+<blockquote class="blockquote-tag blockquote-tag-tip">
+<p class="blockquote-tag-title"><svg viewbox="0 0 16 16" width="18" height="18"><path d="M8 1.5c-2.363 0-4 1.69-4 3.75 0 .984.424 1.625.984 2.304l.214.253c.223.264.47.556.673.848.284.411.537.896.621 1.49a.75.75 0 0 1-1.484.211c-.04-.282-.163-.547-.37-.847a8.456 8.456 0 0 0-.542-.68c-.084-.1-.173-.205-.268-.32C3.201 7.75 2.5 6.766 2.5 5.25 2.5 2.31 4.863 0 8 0s5.5 2.31 5.5 5.25c0 1.516-.701 2.5-1.328 3.259-.095.115-.184.22-.268.319-.207.245-.383.453-.541.681-.208.3-.33.565-.37.847a.751.751 0 0 1-1.485-.212c.084-.593.337-1.078.621-1.489.203-.292.45-.584.673-.848.075-.088.147-.173.213-.253.561-.679.985-1.32.985-2.304 0-2.06-1.637-3.75-4-3.75ZM5.75 12h4.5a.75.75 0 0 1 0 1.5h-4.5a.75.75 0 0 1 0-1.5ZM6 15.25a.75.75 0 0 1 .75-.75h2.5a.75.75 0 0 1 0 1.5h-2.5a.75.75 0 0 1-.75-.75Z"></path></svg>Tip</p>
+<p>Partner heading is encoded as <code>(cos, sin)</code> of relative angle to avoid discontinuities at ±π.</p>
+</blockquote>
+<h3 id="road-features-up-to-232-segments-7-each"><a class="header" href="#road-features-up-to-232-segments-7-each">Road features (up to 232 segments, 7 each)</a></h3>
+<p>mid_x, mid_y, length, width, dir_cos, dir_sin, type</p>
+<ul>
+<li>Retrieved from 21×21 grid (5m cells, ~105m × 105m area)</li>
+<li>Types: ROAD_LANE=0, ROAD_LINE=1, ROAD_EDGE=2</li>
+<li>Pre-cached for efficiency</li>
+</ul>
+<blockquote class="blockquote-tag blockquote-tag-note">
+<p class="blockquote-tag-title"><svg viewbox="0 0 16 16" width="18" height="18"><path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm8-6.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM6.5 7.75A.75.75 0 0 1 7.25 7h1a.75.75 0 0 1 .75.75v2.75h.25a.75.75 0 0 1 0 1.5h-2a.75.75 0 0 1 0-1.5h.25v-2h-.25a.75.75 0 0 1-.75-.75ZM8 6a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"></path></svg>Note</p>
+<p>Road observations use a spatial grid with 5m cells. The 21×21 vision range gives ~105m visibility in all directions.</p>
+</blockquote>
+<h2 id="rewards--metrics"><a class="header" href="#rewards--metrics">Rewards &amp; metrics</a></h2>
+<h3 id="per-step-rewards"><a class="header" href="#per-step-rewards">Per-step rewards</a></h3>
+<ul>
+<li>Vehicle collision: -1.0</li>
+<li>Off-road: -1.0</li>
+<li>Goal reached: +1.0 (or +0.25 after respawn in mode 0)</li>
+<li>Jerk penalty (classic only): -0.0002 × Δv/dt</li>
+</ul>
+<blockquote class="blockquote-tag blockquote-tag-tip">
+<p class="blockquote-tag-title"><svg viewbox="0 0 16 16" width="18" height="18"><path d="M8 1.5c-2.363 0-4 1.69-4 3.75 0 .984.424 1.625.984 2.304l.214.253c.223.264.47.556.673.848.284.411.537.896.621 1.49a.75.75 0 0 1-1.484.211c-.04-.282-.163-.547-.37-.847a8.456 8.456 0 0 0-.542-.68c-.084-.1-.173-.205-.268-.32C3.201 7.75 2.5 6.766 2.5 5.25 2.5 2.31 4.863 0 8 0s5.5 2.31 5.5 5.25c0 1.516-.701 2.5-1.328 3.259-.095.115-.184.22-.268.319-.207.245-.383.453-.541.681-.208.3-.33.565-.37.847a.751.751 0 0 1-1.485-.212c.084-.593.337-1.078.621-1.489.203-.292.45-.584.673-.848.075-.088.147-.173.213-.253.561-.679.985-1.32.985-2.304 0-2.06-1.637-3.75-4-3.75ZM5.75 12h4.5a.75.75 0 0 1 0 1.5h-4.5a.75.75 0 0 1 0-1.5ZM6 15.25a.75.75 0 0 1 .75-.75h2.5a.75.75 0 0 1 0 1.5h-2.5a.75.75 0 0 1-.75-.75Z"></path></svg>Tip</p>
+<p>Goal completion requires both distance &lt; <code>goal_radius</code> (default 2m) AND speed ≤ <code>goal_speed</code>.</p>
+</blockquote>
+<h3 id="episode-metrics"><a class="header" href="#episode-metrics">Episode metrics</a></h3>
+<p><strong>Core metrics</strong></p>
+<ul>
+<li>
+<p><strong><code>score</code></strong> - Aggregate success metric (threshold-based):</p>
+<ul>
+<li><strong>Single-goal setting (modes 0, 2):</strong> Binary 1.0 if goal reached cleanly
+<ul>
+<li><strong>Mode 0 (respawn):</strong> No collision/off-road before first goal (post-respawn collisions ignored)</li>
+<li><strong>Mode 2 (stop):</strong> No collision/off-road throughout entire episode</li>
+</ul>
+</li>
+<li><strong>Multi-goal setting (mode 1):</strong> Fractional based on completion rate with no collisions throughout episode:
+<ul>
+<li>1 goal: ≥99% required</li>
+<li>2 goals: ≥50% required</li>
+<li>3-4 goals: ≥80% required</li>
+<li>5+ goals: ≥90% required</li>
+</ul>
+</li>
+</ul>
+</li>
+<li>
+<p><strong><code>collision_rate</code></strong> - Fraction of agents with ≥1 vehicle collision this episode</p>
+</li>
+<li>
+<p><strong><code>offroad_rate</code></strong> - Fraction of agents with ≥1 off-road event this episode</p>
+</li>
+<li>
+<p><strong><code>completion_rate</code></strong> - Fraction of goals reached this episode</p>
+</li>
+<li>
+<p><strong><code>lane_alignment_rate</code></strong> - Fraction of time agents spent aligned with lane headings</p>
+</li>
+</ul>
+<p><strong>In-depth metrics</strong></p>
+<ul>
+<li>
+<p><strong><code>avg_collisions_per_agent</code></strong> - Mean collision count per agent (captures repeated collisions)</p>
+</li>
+<li>
+<p><strong><code>avg_offroad_per_agent</code></strong> - Mean off-road count per agent (captures repeated off-road events)</p>
+</li>
+</ul>
+<blockquote class="blockquote-tag blockquote-tag-note">
+<p class="blockquote-tag-title"><svg viewbox="0 0 16 16" width="18" height="18"><path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm8-6.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM6.5 7.75A.75.75 0 0 1 7.25 7h1a.75.75 0 0 1 .75.75v2.75h.25a.75.75 0 0 1 0 1.5h-2a.75.75 0 0 1 0-1.5h.25v-2h-.25a.75.75 0 0 1-.75-.75ZM8 6a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"></path></svg>Note</p>
+<p>The “rate” metrics are binary flags (did it happen?), while “avg_per_agent” metrics count total occurrences. An agent can have <code>collision_rate=1</code> but <code>avg_collisions_per_agent=3</code> if they collided three times.</p>
+</blockquote>
+<ul>
+<li>
+<p><strong><code>goals_reached_this_episode</code></strong> - Total goals completed across all agents</p>
+</li>
+<li>
+<p><strong><code>goals_sampled_this_episode</code></strong> - Total goals assigned (&gt;1 in multi-goal mode)</p>
+</li>
+</ul>
+<h4 id="metrics-interpretation-by-goal-behavior"><a class="header" href="#metrics-interpretation-by-goal-behavior">Metrics interpretation by goal behavior</a></h4>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Metric</th><th>Respawn (0)</th><th>Multi-Goal (1)</th><th>Stop (2)</th></tr>
+</thead>
+<tbody>
+<tr><td><code>score</code></td><td>Reached goal before any collision/off-road?</td><td>Reached X% of goals with no collisions?</td><td>Reached goal with no collisions?</td></tr>
+<tr><td><code>completion_rate</code></td><td>Reached the goal?</td><td>Fraction of sampled goals reached</td><td>Reached the goal?</td></tr>
+<tr><td><code>goals_reached</code></td><td>Always ≤1</td><td>Can be &gt;1</td><td>Always ≤1</td></tr>
+<tr><td><code>collision_rate</code></td><td>Any collision before first goal?</td><td>Any collision in episode?</td><td>Any collision in episode?</td></tr>
+</tbody>
+</table>
+</div>
+<blockquote class="blockquote-tag blockquote-tag-warning">
+<p class="blockquote-tag-title"><svg viewbox="0 0 16 16" width="18" height="18"><path d="M6.457 1.047c.659-1.234 2.427-1.234 3.086 0l6.082 11.378A1.75 1.75 0 0 1 14.082 15H1.918a1.75 1.75 0 0 1-1.543-2.575Zm1.763.707a.25.25 0 0 0-.44 0L1.698 13.132a.25.25 0 0 0 .22.368h12.164a.25.25 0 0 0 .22-.368Zm.53 3.996v2.5a.75.75 0 0 1-1.5 0v-2.5a.75.75 0 0 1 1.5 0ZM9 11a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z"></path></svg>Warning</p>
+<p><strong>Respawn mode (0) scoring:</strong> Score only considers collisions/off-road events that occurred before reaching the first goal. Post-respawn collisions do not disqualify the agent from receiving a score of 1.0.</p>
+</blockquote>
+<blockquote class="blockquote-tag blockquote-tag-warning">
+<p class="blockquote-tag-title"><svg viewbox="0 0 16 16" width="18" height="18"><path d="M6.457 1.047c.659-1.234 2.427-1.234 3.086 0l6.082 11.378A1.75 1.75 0 0 1 14.082 15H1.918a1.75 1.75 0 0 1-1.543-2.575Zm1.763.707a.25.25 0 0 0-.44 0L1.698 13.132a.25.25 0 0 0 .22.368h12.164a.25.25 0 0 0 .22-.368Zm.53 3.996v2.5a.75.75 0 0 1-1.5 0v-2.5a.75.75 0 0 1 1.5 0ZM9 11a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z"></path></svg>Warning</p>
+<p><strong>Respawn mode (0) side effect:</strong> After respawn, all other agents are removed from the environment. This means vehicle collisions become impossible post-respawn, but off-road collisions can still occur.</p>
+</blockquote>
+<h2 id="source-files"><a class="header" href="#source-files">Source files</a></h2>
+<h3 id="c-core"><a class="header" href="#c-core">C core</a></h3>
+<ul>
+<li><code>drive.h</code>: Main simulator (stepping, observations, collisions)</li>
+<li><code>drive.c</code>: Demo and testing</li>
+<li><code>binding.c</code>: Python interface</li>
+<li><code>visualize.c</code>: Raylib renderer</li>
+<li><code>drivenet.h</code>: C inference network</li>
+</ul>
+<h3 id="python"><a class="header" href="#python">Python</a></h3>
+<ul>
+<li><code>drive.py</code>: Gymnasium wrapper</li>
+<li><code>torch.py</code>: Neural network (ego/partner/road encoders → actor/critic)</li>
+</ul>
+<h2 id="neural-network"><a class="header" href="#neural-network">Neural network</a></h2>
+<p>Three MLP encoders (ego, partners, roads) → concatenate → actor/critic heads</p>
+<ul>
+<li>Partner and road outputs are max-pooled (permutation invariant)</li>
+<li>Discrete actions: logits per dimension</li>
+<li>Continuous actions: Gaussian (mean + std)</li>
+<li>Optional LSTM wrapper for recurrence</li>
+</ul>
+<blockquote class="blockquote-tag blockquote-tag-tip">
+<p class="blockquote-tag-title"><svg viewbox="0 0 16 16" width="18" height="18"><path d="M8 1.5c-2.363 0-4 1.69-4 3.75 0 .984.424 1.625.984 2.304l.214.253c.223.264.47.556.673.848.284.411.537.896.621 1.49a.75.75 0 0 1-1.484.211c-.04-.282-.163-.547-.37-.847a8.456 8.456 0 0 0-.542-.68c-.084-.1-.173-.205-.268-.32C3.201 7.75 2.5 6.766 2.5 5.25 2.5 2.31 4.863 0 8 0s5.5 2.31 5.5 5.25c0 1.516-.701 2.5-1.328 3.259-.095.115-.184.22-.268.319-.207.245-.383.453-.541.681-.208.3-.33.565-.37.847a.751.751 0 0 1-1.485-.212c.084-.593.337-1.078.621-1.489.203-.292.45-.584.673-.848.075-.088.147-.173.213-.253.561-.679.985-1.32.985-2.304 0-2.06-1.637-3.75-4-3.75ZM5.75 12h4.5a.75.75 0 0 1 0 1.5h-4.5a.75.75 0 0 1 0-1.5ZM6 15.25a.75.75 0 0 1 .75-.75h2.5a.75.75 0 0 1 0 1.5h-2.5a.75.75 0 0 1-.75-.75Z"></path></svg>Tip</p>
+<p>The architecture is modular - you can easily swap out encoders or add new observation types without changing the policy head.</p>
+</blockquote>
+<h2 id="constants-reference"><a class="header" href="#constants-reference">Constants reference</a></h2>
+<blockquote class="blockquote-tag blockquote-tag-warning">
+<p class="blockquote-tag-title"><svg viewbox="0 0 16 16" width="18" height="18"><path d="M6.457 1.047c.659-1.234 2.427-1.234 3.086 0l6.082 11.378A1.75 1.75 0 0 1 14.082 15H1.918a1.75 1.75 0 0 1-1.543-2.575Zm1.763.707a.25.25 0 0 0-.44 0L1.698 13.132a.25.25 0 0 0 .22.368h12.164a.25.25 0 0 0 .22-.368Zm.53 3.996v2.5a.75.75 0 0 1-1.5 0v-2.5a.75.75 0 0 1 1.5 0ZM9 11a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z"></path></svg>Warning</p>
+<p>These constants are hardcoded in the C implementation. Changing them requires recompiling.</p>
+</blockquote>
+<h3 id="limits"><a class="header" href="#limits">Limits</a></h3>
+<ul>
+<li><code>MAX_AGENTS = 32</code> (compile-time, can be overridden with <code>-DMAX_AGENTS=64</code>)</li>
+<li><code>MAX_ROAD_OBSERVATIONS = 232</code></li>
+<li><code>TRAJECTORY_LENGTH = 91</code></li>
+<li><code>MIN_DISTANCE_TO_GOAL = 2.0</code> m (agents closer than this won’t be controlled)</li>
+</ul>
+<h3 id="spatial"><a class="header" href="#spatial">Spatial</a></h3>
+<ul>
+<li><code>GRID_CELL_SIZE = 5.0</code> m</li>
+<li><code>VISION_RANGE = 21</code> cells (~105m × 105m)</li>
+<li>Partner observation range: 50m</li>
+</ul>
+<h3 id="physics"><a class="header" href="#physics">Physics</a></h3>
+<ul>
+<li><code>DEFAULT_DT = 0.1</code> s</li>
+<li>Jerk long clip: <code>[-15, 4]</code> m/s³</li>
+<li>Jerk lat clip: <code>[-4, 4]</code> m/s³</li>
+<li>Steering limit: <code>[-0.55, 0.55]</code> rad (~31.5°)</li>
+<li>Speed clip (jerk): <code>[0, 20]</code> m/s</li>
+</ul>
+<h3 id="normalization"><a class="header" href="#normalization">Normalization</a></h3>
+<ul>
+<li><code>MAX_SPEED = 100</code> m/s</li>
+<li><code>MAX_VEH_LEN = 30</code> m</li>
+<li><code>MAX_VEH_WIDTH = 15</code> m</li>
+<li><code>MAX_ROAD_SEGMENT_LENGTH = 100</code> m</li>
+</ul>
+<blockquote class="blockquote-tag blockquote-tag-note">
+<p class="blockquote-tag-title"><svg viewbox="0 0 16 16" width="18" height="18"><path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm8-6.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM6.5 7.75A.75.75 0 0 1 7.25 7h1a.75.75 0 0 1 .75.75v2.75h.25a.75.75 0 0 1 0 1.5h-2a.75.75 0 0 1 0-1.5h.25v-2h-.25a.75.75 0 0 1-.75-.75ZM8 6a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"></path></svg>Note</p>
+<p>Normalization scales are chosen to map reasonable driving scenarios to ~[-1, 1] range for neural network stability.</p>
+</blockquote>
+<hr>
+<p><strong>Version:</strong> PufferDrive v2.0</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="interactive-scenario-editor"><a class="header" href="#interactive-scenario-editor">Interactive scenario editor</a></h1>
+<p>A browser-based playground for inspecting and editing Waymo Open Motion Dataset (WOMD) scenes. The tool runs fully client-side at <a href="https://womd-editor.vercel.app/">https://womd-editor.vercel.app/</a> and works directly with the JSON format produced by Waymo/ScenarioMax exports and PufferDrive conversions.</p>
+<h2 id="video-walkthrough"><a class="header" href="#video-walkthrough">Video walkthrough</a></h2>
+<div class="video-embed">
+  <iframe width="560" height="315" src="https://www.youtube.com/embed/kzJptblJ4Kw?si=1lVRHmM1HjwCkgP5" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen=""></iframe>
+</div>
+
+<h2 id="quick-start-1"><a class="header" href="#quick-start-1">Quick start</a></h2>
+<ul>
+<li>Open <a href="https://emerge-scenario-editor.vercel.app/">https://emerge-scenario-editor.vercel.app/</a> in a modern Chromium/Firefox browser.</li>
+<li>Click <strong>Import JSON…</strong> in the left sidebar and drop one or more scenario files (Waymo/ScenarioMax JSON or editor exports).</li>
+<li>The app stores everything in-memory only; nothing is uploaded to a server.</li>
+</ul>
+<h2 id="what-you-can-do"><a class="header" href="#what-you-can-do">What you can do</a></h2>
+<ul>
+<li><strong>Inspect</strong>: Top-down canvas with zoom/pan/rotate, agent labels, and a playback timeline with variable speed.</li>
+<li><strong>Edit trajectories</strong>: Select an agent and tweak paths via drag handles, draw a polyline with the Line tool, freehand record a path, or drive the agent with keyboard controls (WASD/arrow keys, Space to brake, Enter to save, Esc to cancel).</li>
+<li><strong>Edit roads</strong>: Switch to Road mode to draw or refine lane/edge/crosswalk geometry, recolor vertices by elevation, and view the lane connectivity overlay when ROAD_LANE/ROAD_LINE data exists.</li>
+<li><strong>Configure metadata</strong>: Rename the scenario, toggle label mode (ID vs. array index), mark agents as experts, and choose which agents belong to <code>tracks_to_predict</code>.</li>
+<li><strong>Export</strong>: Preview changes versus the import baseline, then download either Waymo-style JSON or a compact <code>.bin</code> suitable for PufferDrive’s loader.</li>
+</ul>
+<h2 id="editing-workflow"><a class="header" href="#editing-workflow">Editing workflow</a></h2>
+<ol>
+<li><strong>Load a scene</strong>: Import one or multiple JSONs; each appears as a row in the Scenarios list with a quick delete button.</li>
+<li><strong>Playback</strong>: Use the timeline to scrub frames or Space/Arrow keys to play/pause/step. Agent labels and trajectory visibility can be toggled in the editor panel.</li>
+<li><strong>Trajectory tools</strong> (Trajectory mode):
+<ul>
+<li><strong>Adjust Path</strong>: Drag existing vertices/handles on the canvas.</li>
+<li><strong>Line Tool</strong>: Click to lay out a polyline, set per-segment duration (seconds), then <strong>Apply Path</strong> to rebuild timestamps/velocity.</li>
+<li><strong>Record Path</strong>: Freehand capture a path with the pointer; playback resets to frame 0.</li>
+<li><strong>Drive Agent</strong>: Enter a lightweight driving loop; W/A/S/D or arrow keys steer, Space brakes, Enter saves, Esc cancels. Tunable speed/accel/steer sliders live under “Drive Tune.”</li>
+</ul>
+</li>
+<li><strong>Road tools</strong> (Road mode):
+<ul>
+<li><strong>Edit Geometry</strong>: Select segments/vertices to move, insert, split, or delete (Shift/Ctrl-click to insert on-canvas; Alt/Cmd-click to delete).</li>
+<li><strong>Draw Road</strong>: Click to add vertices; Enter finishes, Esc cancels. Set the default Z used for new vertices in the right-hand panel.</li>
+<li><strong>Type &amp; overlays</strong>: Tag segments as ROAD_LANE / ROAD_EDGE / ROAD_LINE / CROSSWALK / OTHER. Enable <strong>Color by Z</strong> to visualize elevation and <strong>Lane Graph</strong> to see lane entry/exit nodes plus downstream arrows.</li>
+</ul>
+</li>
+<li><strong>Export &amp; diff</strong>: Hit <strong>Export</strong> to open a preview modal that summarizes changes (metadata, agents, roads, tracks_to_predict, bounds, frames). Download JSON for round-tripping or <code>.bin</code> for simulator ingestion.</li>
+</ol>
+<h2 id="using-exports-with-pufferdrive"><a class="header" href="#using-exports-with-pufferdrive">Using exports with PufferDrive</a></h2>
+<ul>
+<li>JSON exports retain the Waymo layout (<code>objects</code>, <code>roads</code>, <code>tracks_to_predict</code>, <code>tl_states</code>, <code>metadata</code>) and can be converted or re-imported.</li>
+<li><code>.bin</code> exports match the compact format read by <code>pufferlib/ocean/drive/drive.py</code>; drop them into <code>resources/drive/binaries</code> (e.g., <code>map_000.bin</code>) to test inside the simulator.</li>
+<li>The editor auto-fills missing headings/speeds and clamps degenerate lanes to keep bounds reasonable; always spot-check via the Export preview before committing.</li>
+</ul>
+<h2 id="notes"><a class="header" href="#notes">Notes</a></h2>
+<ul>
+<li>The app is currently work-in-progress; there is no persistent storage or backend sync.</li>
+<li>Large scenes may render slowly on low-power GPUs—hide trajectories or road overlays to keep the canvas responsive.</li>
+<li>Source lives in the <code>WOMD-Editor/web</code> directory of this repo if you want to run it locally with <code>npm install &amp;&amp; npm run dev</code>.</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="visualizer"><a class="header" href="#visualizer">Visualizer</a></h1>
+<p>PufferDrive ships a Raylib-based visualizer for replaying scenes, exporting videos, and debugging policies.</p>
+<h2 id="dependencies"><a class="header" href="#dependencies">Dependencies</a></h2>
+<p>Install the minimal system packages for headless render/export:</p>
+<pre><code class="language-bash">sudo apt update
+sudo apt install ffmpeg xvfb
+</code></pre>
+<p>On environments without sudo, install them into your conda/venv:</p>
+<pre><code class="language-bash">conda install -c conda-forge xorg-x11-server-xvfb-cos6-x86_64 ffmpeg
+</code></pre>
+<h2 id="build"><a class="header" href="#build">Build</a></h2>
+<p>Compile the visualizer binary from the repo root:</p>
+<pre><code class="language-bash">bash scripts/build_ocean.sh visualize local
+</code></pre>
+<p>If you need to force a rebuild, remove the cached binary first (<code>rm ./visualize</code>).</p>
+<h2 id="run-headless"><a class="header" href="#run-headless">Run headless</a></h2>
+<p>Launch the visualizer with a virtual display and export an <code>.mp4</code>:</p>
+<pre><code class="language-bash">xvfb-run -s "-screen 0 1280x720x24" ./visualize
+</code></pre>
+<p>Adjust the screen size and color depth as needed. The <code>xvfb-run</code> wrapper allows Raylib to render without an attached display, which is convenient for servers and CI jobs.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="data"><a class="header" href="#data">Data</a></h1>
+<p>PufferDrive consumes map binaries generated from multiple data sources, including the <a href="https://github.com/waymo-research/waymo-open-dataset">Waymo Open Motion Dataset (WOMD)</a> JSON files, <a href="https://github.com/valeoai/V-Max">ScenarioMax</a>, and <a href="https://carla.org/">CARLA</a>. This page covers how to obtain data and convert it into the binary format expected by the simulator.</p>
+<h2 id="download-options"><a class="header" href="#download-options">Download options</a></h2>
+<ul>
+<li><a href="https://huggingface.co/datasets/daphne-cornelisse/pufferdrive_womd_train"><code>pufferdrive_womd_train</code></a>: <strong>10k scenarios</strong> from the Waymo Open Motion <em>training</em> dataset.</li>
+<li><a href="https://huggingface.co/datasets/daphne-cornelisse/pufferdrive_womd_val"><code>pufferdrive_womd_val</code></a>: <strong>10k scenarios</strong> from the Waymo Open Motion <em>validation</em> dataset.</li>
+<li><a href="https://huggingface.co/datasets/daphne-cornelisse/pufferdrive_womd_train_carla_mixed"><code>pufferdrive_mixed</code></a>: <strong>10,200</strong> scenarios. The 10K from the WOMD train set above + Towns 1 and 2 duplicated 100x each.</li>
+<li>Additional compatible sources: <a href="https://github.com/valeoai/ScenarioMax">ScenarioMax</a> exports JSON in the same format.</li>
+<li>Included <a href="https://carla.org/">CARLA</a> maps: Readily available CARLA maps live in <code>data_utils/carla/carla_data</code>.</li>
+</ul>
+<h3 id="download-via-hugging-face"><a class="header" href="#download-via-hugging-face">Download via Hugging Face</a></h3>
+<p>Install the CLI once:</p>
+<pre><code class="language-bash">uv pip install -U "huggingface_hub[cli]"
+</code></pre>
+<p>Download:</p>
+<pre><code class="language-bash">huggingface-cli download daphne-cornelisse/pufferdrive_womd_train \
+  --repo-type dataset \
+  --local-dir data/processed/training
+</code></pre>
+<p>Place raw JSON files under <code>data/processed/training</code> (default location read by the conversion script).</p>
+<h2 id="convert-json-to-map-binaries"><a class="header" href="#convert-json-to-map-binaries">Convert JSON to map binaries</a></h2>
+<p>The conversion script writes compact <code>.bin</code> maps to <code>resources/drive/binaries</code>:</p>
+<pre><code class="language-bash">python pufferlib/ocean/drive/drive.py
+</code></pre>
+<p>Notes:</p>
+<ul>
+<li>The script iterates every JSON file in <code>data/processed/training</code> and emits <code>map_XXX.bin</code> files.</li>
+<li><code>resources/drive/binaries/map_000.bin</code> ships with the repo for quick smoke tests; generate additional bins for training/eval.</li>
+<li>If you want to point at a different dataset location or limit the number of maps, adjust <code>process_all_maps</code> in <code>pufferlib/ocean/drive/drive.py</code> before running.</li>
+</ul>
+<h2 id="map-binary-format-reference"><a class="header" href="#map-binary-format-reference">Map binary format reference</a></h2>
+<p>The simulator reads the compact binary layout produced by <code>save_map_binary</code> in <code>pufferlib/ocean/drive/drive.py</code> and parsed by <code>load_map_binary</code> in <code>pufferlib/ocean/drive/drive.h</code>:</p>
+<ul>
+<li><strong>Header</strong>: <code>sdc_track_index</code> (int), <code>num_tracks_to_predict</code> (int) followed by that many <code>track_index</code> ints, <code>num_objects</code> (int), <code>num_roads</code> (int).</li>
+<li><strong>Objects (vehicles/pedestrians/cyclists)</strong>: For each object, the writer stores <code>scenario_id</code> (<code>unique_map_id</code> passed to <code>load_map</code>), <code>type</code> (<code>1</code> vehicle, <code>2</code> pedestrian, <code>3</code> cyclist), <code>id</code>, <code>array_size</code> (<code>TRAJECTORY_LENGTH = 91</code>), positions <code>x/y/z[91]</code>, velocities <code>vx/vy/vz[91]</code>, <code>heading[91]</code>, <code>valid[91]</code>, and scalars <code>width/length/height</code>, <code>goalPosition (x, y, z)</code>, <code>mark_as_expert</code> (int). Missing trajectory entries are zero-padded by the converter.</li>
+<li><strong>Road elements</strong>: Each road entry stores <code>scenario_id</code>, a remapped <code>type</code> (<code>4</code> lane, <code>5</code> road line, <code>6</code> road edge, <code>7</code> stop sign, <code>8</code> crosswalk, <code>9</code> speed bump, <code>10</code> driveway), <code>id</code>, <code>array_size</code> (#points), then <code>x/y/z</code> arrays of that length and scalars <code>width/length/height</code>, <code>goalPosition</code>, <code>mark_as_expert</code>. <code>save_map_binary</code> also simplifies long polylines (<code>len(geometry) &gt; 10</code> and <code>type &lt;= 16</code>) with a 0.1 area threshold to keep files small.</li>
+<li><strong>Control hints</strong>: <code>tracks_to_predict</code> and <code>mark_as_expert</code> influence which agents are controllable (<code>control_mode</code> in the simulator) versus replayed as experts or static actors (<code>set_active_agents</code> in <code>drive.h</code>).</li>
+</ul>
+<p>Refer to <a href="#pufferdrive-simulator-guide">Simulator</a> for how the binaries are consumed during resets, observation construction, and reward logging.</p>
+<h2 id="verifying-data-availability"><a class="header" href="#verifying-data-availability">Verifying data availability</a></h2>
+<ul>
+<li>After conversion, <code>ls resources/drive/binaries | head</code> should show numbered <code>.bin</code> files.</li>
+<li>If you see <code>Required directory resources/drive/binaries/map_000.bin not found</code> during training, rerun the conversion or check paths.</li>
+<li>With binaries in place, run <code>puffer train puffer_drive</code> from <a href="#getting-started">Getting Started</a> as a smoke test that the build, data, and bindings are wired together.</li>
+<li>To inspect the binary output, convert a single JSON file with <code>load_map(&lt;json&gt;, &lt;id&gt;, &lt;output_path&gt;)</code> inside <code>drive.py</code>.</li>
+</ul>
+<h2 id="interactive-scenario-editor-1"><a class="header" href="#interactive-scenario-editor-1">Interactive scenario editor</a></h2>
+<p>See <a href="#interactive-scenario-editor">Interactive scenario editor</a> for a browser-based workflow to inspect, edit, and export Waymo/ScenarioMax JSON into the <code>.bin</code> format consumed by the simulator.</p>
+<h2 id="generate-carla-agent-trajectories"><a class="header" href="#generate-carla-agent-trajectories">Generate CARLA agent trajectories</a></h2>
+<p>The agent trajectories in the provided CARLA maps are procedurally generated assuming a general velocity range without a valid initial state (no collision/offroad). The repository uses an external submodule for CARLA XODR processing (<code>pyxodr</code>).</p>
+<p>To generate your own CARLA agent trajectories, install the submodules and developer requirements (editable install) before running the generator:</p>
+<pre><code class="language-bash">git submodule update --init --recursive
+
+python -m pip install -e . -r requirements-dev.txt
+</code></pre>
+<p>Run the generator script. Important optional args:</p>
+<ul>
+<li><code>--num_objects</code>: how many agents to initialize in a map (default: map-dependent)</li>
+<li><code>--num_data_per_map</code>: number of data files to generate per map</li>
+<li><code>--avg_speed</code>: controls the gap between subsequent points in the trajectory</li>
+</ul>
+<pre><code class="language-bash">python data_utils/carla/generate_carla_agents.py --num_objects 32 --num_data_per_map 8 --avg_speed 2
+</code></pre>
+<p>There is also a visualizer for inspecting initial agent positions on the map:</p>
+<pre><code class="language-bash">python data_utils/carla/plot.py
+</code></pre>
+<p>Notes:</p>
+<ul>
+<li>Base Carla maps that agents are spawned live under <code>data_utils/carla/carla_py123d</code> and the Carla XODRs are at <code>data/CarlaXODRs</code> to interact with the <code>pyxodr</code> submodule for XODR parsing and agent traj generation.</li>
+<li>If you encounter missing binary or map errors, ensure the submodule was initialized and the required packages from <code>requirements-dev.txt</code> are installed.</li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="evaluations-and-benchmarks"><a class="header" href="#evaluations-and-benchmarks">Evaluations and benchmarks</a></h1>
+<p>Driving is a safety-critical multi-agent application, making careful evaluation and risk assessment essential. Mistakes in the real world are costly, so simulations are used to catch errors before deployment. To support rapid iteration, evaluations should ideally run efficiently. This is why we also paid attention to optimizing the speed of the evaluations. This page contains an overview of the available benchmarks and evals.</p>
+<h2 id="sanity-maps-"><a class="header" href="#sanity-maps-">Sanity maps 🐛</a></h2>
+<p>Quickly test the training on curated, lightweight scenarios without downloading the full dataset. Each sanity map tests a specific behavior.</p>
+<pre><code class="language-bash">puffer sanity puffer_drive --wandb --wandb-name sanity-demo --sanity-maps forward_goal_in_front s_curve
+</code></pre>
+<p>Or run them all at once:</p>
+<pre><code class="language-bash">puffer sanity puffer_drive --wandb --wandb-name sanity-all
+</code></pre>
+<ul>
+<li>Tip: turn learning-rate annealing off for these short runs (<code>--train.anneal_lr False</code>) to keep the sanity checks from decaying the optimizer mid-run.</li>
+</ul>
+<p>Available maps:</p>
+<ul>
+<li><code>forward_goal_in_front</code>: Straight approach to a goal in view.</li>
+<li><code>reverse_goal_behind</code>: Backward start with a behind-the-ego goal.</li>
+<li><code>two_agent_forward_goal_in_front</code>: Two agents advancing to forward goals.</li>
+<li><code>two_agent_reverse_goal_behind</code>: Two agents reversing to rear goals.</li>
+<li><code>simple_turn</code>: Single, gentle turn to a nearby goal.</li>
+<li><code>s_curve</code>: S-shaped path with alternating curvature.</li>
+<li><code>u_turn</code>: U-shaped turn to a goal behind the start.</li>
+<li><code>one_or_two_point_turn</code>: Tight turn requiring a small reversal.</li>
+<li><code>three_or_four_point_turn</code>: Even tighter turn needing multiple reversals.</li>
+<li><code>goal_out_of_sight</code>: Goal starts without direct path; needs some planning.</li>
+</ul>
+<p><img src="images/maps_screenshot.png" alt="Sanity map gallery placeholder"></p>
+<h2 id="distributional-realism-benchmark-"><a class="header" href="#distributional-realism-benchmark-">Distributional realism benchmark 📊</a></h2>
+<p>We provide a PufferDrive implementation of the Waymo Open Sim Agents Challenge (WOSAC) for fast, easy evaluation of how well your trained agent matches distributional properties of human behavior.</p>
+<pre><code class="language-bash">puffer eval puffer_drive --eval.wosac-realism-eval True
+</code></pre>
+<p>Add <code>--load-model-path &lt;path_to_checkpoint&gt;.pt</code> to score a trained policy, instead of a random baseline.</p>
+<p>See <a href="#waymo-open-sim-agent-challenge-wosac-benchmark">the WOSAC benchmark page</a> for the metric pipeline and all the details.</p>
+<h2 id="human-compatibility-benchmark-"><a class="header" href="#human-compatibility-benchmark-">Human-compatibility benchmark 🤝</a></h2>
+<p>You may be interested in how compatible your agent is with human partners. For this purpose, we support an eval where your policy only controls the self-driving car (SDC). The rest of the agents in the scene are stepped using the logs. While it is not a perfect eval since the human partners here are static, it will still give you a sense of how closely aligned your agent’s behavior is to how people drive. You can run it like this:</p>
+<pre><code class="language-bash">puffer eval puffer_drive --eval.human-replay-eval True --load-model-path &lt;path_to_checkpoint&gt;.pt
+</code></pre>
+<p>During this evaluation the self-driving car (SDC) is controlled by your policy while other agents replay log trajectories.</p>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="waymo-open-sim-agent-challenge-wosac-benchmark"><a class="header" href="#waymo-open-sim-agent-challenge-wosac-benchmark">Waymo Open Sim Agent Challenge (WOSAC) benchmark</a></h1>
+<p>We provide a re-implementation of the <a href="https://waymo.com/research/the-waymo-open-sim-agents-challenge/">Waymo Open Sim Agent Challenge (WOSAC)</a>, which measures <em>distributional realism</em> of simulated trajectories compared to logged human trajectories. Our version preserves the original logic and metric weighting but uses PyTorch on GPU for the metrics computation, unlike the original TensorFlow CPU implementation. The exact speedup depends on the setup and hardware, but in practice this leads to a substantial speedup (around 30–100×). Evaluating 100 scenarios (32 rollouts + metrics computation) currently completes in under a minute.</p>
+<p>Besides speed benefits, the code is also simplified to make it easier to understand and extend.</p>
+<blockquote>
+<p><strong>Note:</strong> In PufferDrive, agents are conditioned on a “goal” represented as a single (x, y) position, reflecting that drivers typically have a high-level destination in mind. Evaluating whether an agent matches human distributional properties can be decomposed into: (1) inferring a person’s intended direction from context (1 second in WOSAC) and (2) navigating toward that goal in a human-like manner. We focus on the second component, though the evaluation could be adapted to include behavior prediction as in the original WOSAC.</p>
+</blockquote>
+<p><img src="images/wosac_implementation_pufferdrive.png" alt="WOSAC implementation in PufferDrive"></p>
+<p><em>Illustration of WOSAC implementation in PufferDrive (RHS) vs. the original challenge (LHS).</em></p>
+<h2 id="usage"><a class="header" href="#usage">Usage</a></h2>
+<h3 id="running-a-single-evaluation-from-a-checkpoint"><a class="header" href="#running-a-single-evaluation-from-a-checkpoint">Running a single evaluation from a checkpoint</a></h3>
+<p>The <code>[eval]</code> section in <code>drive.ini</code> contains all relevant configurations. To run the WOSAC eval once:</p>
+<pre><code class="language-bash">puffer eval puffer_drive --eval.wosac-realism-eval True --load-model-path &lt;your-trained-policy&gt;.pt
+</code></pre>
+<p>The default configs aim to emulate the WOSAC settings as closely as possible, but you can adjust them:</p>
+<pre><code class="language-ini">[eval]
+map_dir = "resources/drive/binaries/validation" # Dataset to use
+num_maps = 100  # Number of maps to run evaluation on. (It will always be the first num_maps maps of the map_dir)
+wosac_num_rollouts = 32      # Number of policy rollouts per scene
+wosac_init_steps = 10        # When to start the simulation
+wosac_control_mode = "control_wosac"  # Control the tracks to predict
+wosac_init_mode = "create_all_valid"  # Initialize from the tracks to predict
+wosac_goal_behavior = 2      # Stop when reaching the goal
+wosac_goal_radius = 2.0      # Can shrink goal radius for WOSAC evaluation
+</code></pre>
+<h3 id="log-evals-to-wb-during-training"><a class="header" href="#log-evals-to-wb-during-training">Log evals to W&amp;B during training</a></h3>
+<p>During experimentation, logging key metrics directly to W&amp;B avoids a post-training step. Evaluations can be enabled during training, with results logged under a separate <code>eval/</code> section. The main configuration options:</p>
+<pre><code class="language-ini">[train]
+checkpoint_interval = 500    # Set equal to eval_interval to use the latest checkpoint
+
+[eval]
+eval_interval = 500          # Run eval every N epochs
+map_dir = "resources/drive/binaries/training"  # Dataset to use
+num_maps = 20 # Number of maps to run evaluation on. (It will always be the first num_maps maps of the map_dir)
+</code></pre>
+<h2 id="baselines"><a class="header" href="#baselines">Baselines</a></h2>
+<p>We provide baselines on a small curated dataset from the WOMD validation set with perfect ground-truth (no collisions or off-road events from labeling mistakes).</p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Method</th><th>Realism meta-score</th><th>Kinematic metrics</th><th>Interactive metrics</th><th>Map-based metrics</th><th>minADE</th><th>ADE</th></tr>
+</thead>
+<tbody>
+<tr><td>Ground-truth (UB)</td><td>0.832</td><td>0.606</td><td>0.846</td><td>0.961</td><td>0</td><td>0</td></tr>
+<tr><td>π_Base self-play RL</td><td>0.737</td><td>0.319</td><td>0.789</td><td>0.938</td><td>10.834</td><td>11.317</td></tr>
+<tr><td><a href="https://arxiv.org/abs/2412.05334">SMART-tiny-CLSFT</a></td><td>0.805</td><td>0.534</td><td>0.830</td><td>0.949</td><td>1.124</td><td>3.123</td></tr>
+<tr><td>π_Random</td><td>0.485</td><td>0.214</td><td>0.657</td><td>0.408</td><td>6.477</td><td>18.286</td></tr>
+</tbody>
+</table>
+</div>
+<p><em>Table: WOSAC baselines in PufferDrive on 229 selected clean held-out validation scenarios.</em></p>
+<blockquote>
+<p>✏️ Download the dataset from <a href="https://huggingface.co/datasets/daphne-cornelisse/pufferdrive_wosac_val_clean">Hugging Face</a> to reproduce these results or benchmark your policy.</p>
+</blockquote>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th style="text-align: left">Method</th><th style="text-align: left">Realism meta-score</th><th style="text-align: left">Kinematic metrics</th><th style="text-align: left">Interactive metrics</th><th style="text-align: left">Map-based metrics</th><th style="text-align: left">minADE</th><th style="text-align: left">ADE</th></tr>
+</thead>
+<tbody>
+<tr><td style="text-align: left">Ground-truth (UB)</td><td style="text-align: left">0.833</td><td style="text-align: left">0.574</td><td style="text-align: left">0.864</td><td style="text-align: left">0.958</td><td style="text-align: left">0</td><td style="text-align: left">0</td></tr>
+<tr><td style="text-align: left">π_Base self-play RL</td><td style="text-align: left">0.737</td><td style="text-align: left">0.323</td><td style="text-align: left">0.792</td><td style="text-align: left">0.930</td><td style="text-align: left">8.530</td><td style="text-align: left">9.088</td></tr>
+<tr><td style="text-align: left"><a href="https://arxiv.org/abs/2412.05334">SMART-tiny-CLSFT</a></td><td style="text-align: left">0.795</td><td style="text-align: left">0.504</td><td style="text-align: left">0.832</td><td style="text-align: left">0.932</td><td style="text-align: left">1.182</td><td style="text-align: left">2.857</td></tr>
+<tr><td style="text-align: left">π_Random</td><td style="text-align: left">0.497</td><td style="text-align: left">0.238</td><td style="text-align: left">0.656</td><td style="text-align: left">0.430</td><td style="text-align: left">6.395</td><td style="text-align: left">18.617</td></tr>
+</tbody>
+</table>
+</div>
+<p><em>Table: WOSAC baselines in PufferDrive on validation 10k dataset.</em></p>
+<blockquote>
+<p>✏️ Download the dataset from <a href="https://huggingface.co/datasets/daphne-cornelisse/pufferdrive_womd_val">Hugging Face</a> to reproduce these results or benchmark your policy.</p>
+</blockquote>
+<h2 id="evaluating-trajectories"><a class="header" href="#evaluating-trajectories">Evaluating trajectories</a></h2>
+<p>In this section, we describe how we evaluated <a href="https://arxiv.org/abs/2412.05334">SMART-tiny-CLSFT</a> in PufferDrive and how you can use this to evaluate your own agent trajectories.</p>
+<p><strong>High-level idea</strong></p>
+<p>The WOSAC evaluation pipeline takes as input simulated trajectories (<code>sim_trajectories</code>) and ground-truth trajectories, computes summary statistics, and outputs scores based on these statistics (<a href="https://github.com/Emerge-Lab/PufferDrive/blob/b6ed82f80df3d58c98e72999c4ebe99b2d7515b6/pufferlib/pufferl.py#L1049-L1073">entry point to code here</a>). If you already have simulated trajectories saved as a <code>.pkl</code> file—generated from the same dataset—you can directly use them to compute WOSAC scores.</p>
+<p><strong>Command</strong></p>
+<pre><code class="language-bash">python pufferlib/ocean/benchmark/evaluate_imported_trajectories.py --simulated-file my_rollouts.pkl
+</code></pre>
+<p><strong>Instructions</strong></p>
+<ul>
+<li>Rollouts must be generated using the same dataset specified in the config file under <code>[eval] map_dir</code>. The corresponding scenario IDs can be found in the <code>.json</code> files (the <code>scenario_id</code> field).</li>
+<li>If you have a predefined list of <code>scenario_id</code>s, you can pass them to your dataloader to run inference only on those scenarios.</li>
+<li>Save the inference outputs in a dictionary with the following fields:</li>
+</ul>
+<pre><code class="language-bash">x        : (num_agents, num_rollouts, 81)
+y        : (num_agents, num_rollouts, 81)
+z        : (num_agents, num_rollouts, 81)
+heading  : (num_agents, num_rollouts, 81)
+id       : (num_agents, num_rollouts, 81)
+</code></pre>
+<ul>
+<li>Recompile the code with <code>MAX_AGENTS=256</code> set in <code>drive.h</code>.</li>
+<li>Finally, run:
+<code>python pufferlib/ocean/benchmark/evaluate_imported_trajectories.py --simulated-file my_rollouts.pkl</code></li>
+</ul>
+<h2 id="useful-links"><a class="header" href="#useful-links">Useful links</a></h2>
+<ul>
+<li><a href="https://waymo.com/open/challenges/2025/sim-agents/">WOSAC challenge and leaderboard</a></li>
+<li><a href="https://github.com/waymo-research/waymo-open-dataset/blob/master/tutorial/tutorial_sim_agents.ipynb">Sim agent challenge tutorial</a></li>
+<li><a href="https://arxiv.org/pdf/2305.12032">Reference paper introducing WOSAC</a></li>
+<li><a href="https://github.com/waymo-research/waymo-open-dataset/blob/master/src/waymo_open_dataset/wdl_limited/sim_agents_metrics/metrics.py">Metrics entry point</a></li>
+<li><a href="https://github.com/waymo-research/waymo-open-dataset/blob/master/src/waymo_open_dataset/wdl_limited/sim_agents_metrics/estimators.py">Log-likelihood estimators</a></li>
+<li><a href="https://github.com/waymo-research/waymo-open-dataset/blob/99a4cb3ff07e2fe06c2ce73da001f850f628e45a/src/waymo_open_dataset/protos/sim_agents_metrics.proto#L51">Configurations proto file</a></li>
+<li><a href="https://github.com/waymo-research/waymo-open-dataset/blob/master/src/waymo_open_dataset/wdl_limited/sim_agents_metrics/challenge_2025_sim_agents_config.textproto">Default sim agent challenge configs</a></li>
+</ul>
+<div style="break-before: page; page-break-before: always;"></div>
+<h1 id="pufferdrive-20-a-fast-and-friendly-driving-simulator-for-training-and-evaluating-rl-agents"><a class="header" href="#pufferdrive-20-a-fast-and-friendly-driving-simulator-for-training-and-evaluating-rl-agents">PufferDrive 2.0: A fast and friendly driving simulator for training and evaluating RL agents</a></h1>
+<p><strong>Daphne Cornelisse</strong><sup>1*</sup>, <strong>Spencer Cheng</strong><sup>2*</sup>, Pragnay Mandavilli<sup>1</sup>, Julian Hunt<sup>1</sup>, Kevin Joseph<sup>1</sup>, Waël Doulazmi<sup>3, 4</sup>, Valentin Charraut<sup>4</sup>, Aditya Gupta<sup>1</sup>, Eugene Vinitsky<sup>1</sup></p>
+<p><sup>1</sup> Emerge Lab at NYU Tandon School of Engineering | <sup>2</sup> <a href="https://puffer.ai/">Puffer.ai</a> | <sup>3</sup> Centre for Robotics, Mines Paris - PSL | <sup>4</sup> Valeo | <sup>*</sup> Shared first contributor</p>
+<p><em>December 30, 2025</em></p>
+<blockquote>
+<p>We introduce <strong>PufferDrive 2.0</strong>, a fast, easy-to-use driving simulator for reinforcement learning (RL). Built on <a href="https://puffer.ai/">PufferLib</a>, it allows you to train agents at <strong>300,000 steps per second</strong> on a single GPU. You can solve thousands of multi-agent scenarios in just 15 minutes. Evaluation and visualization run directly in the browser. This post highlights the main features and traces the sequence of projects that led to PufferDrive 2.0.</p>
+</blockquote>
+<br>
+<br>
+<div style="text-align: center;">
+  <iframe width="500" height="300" src="https://www.youtube.com/embed/LfQ324R-cbE" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen=""></iframe>
+</div>
+
+<br>
+<h2 id="highlights-1"><a class="header" href="#highlights-1">Highlights</a></h2>
+<ul>
+<li><strong>Super-fast self-play RL</strong>: Train agents on 10,000 multi-agent Waymo scenarios and reach a near-perfect score in under in about <strong>15 minutes on a single GPU</strong> where <a href="https://arxiv.org/abs/2502.14706">earlier results</a> took 24 hours.</li>
+<li><strong>Long-horizon driving:</strong> Train agents to reach goals indefinitely on large CARLA maps. Demo agents are trained this way. Drive alongside them in the browser below.</li>
+<li><strong>Built-in evaluation:</strong> Integrated, accelerated eval support for the <a href="https://emerge-lab.github.io/PufferDrive/wosac/">Waymo Open Sim Agent Challenge (WOSAC)</a> and a <a href="https://emerge-lab.github.io/PufferDrive/evaluation/#human-compatibility-benchmark">human compatibility benchmark</a>.</li>
+<li><strong>Easy scenario creation:</strong> Edit or design custom scenarios in minutes, including long-tail and stress-test cases, using the <a href="https://emerge-lab.github.io/PufferDrive/scene-editor/">interactive scenario editor</a>.</li>
+<li><strong>And more:</strong> Browse the docs for details.</li>
+</ul>
+<h2 id="drive-together-with-trained-agents"><a class="header" href="#drive-together-with-trained-agents">Drive together with trained agents</a></h2>
+<iframe src="assets/game.html" title="PufferDrive Demo" width="1280" height="720" style="border: none; display: block; margin: 2rem auto;"></iframe>
+<p style="text-align: center; color: #888; margin-top: 1rem;">
+  Hold <strong>Left Shift</strong> and use arrow keys or <strong>WASD</strong> to control the vehicle. Hold <strong>space</strong> for first-person view and <strong>ctrl</strong> to see what your agent is seeing.
+</p>
+
+<blockquote class="blockquote-tag blockquote-tag-tip">
+<p class="blockquote-tag-title"><svg viewbox="0 0 16 16" width="18" height="18"><path d="M8 1.5c-2.363 0-4 1.69-4 3.75 0 .984.424 1.625.984 2.304l.214.253c.223.264.47.556.673.848.284.411.537.896.621 1.49a.75.75 0 0 1-1.484.211c-.04-.282-.163-.547-.37-.847a8.456 8.456 0 0 0-.542-.68c-.084-.1-.173-.205-.268-.32C3.201 7.75 2.5 6.766 2.5 5.25 2.5 2.31 4.863 0 8 0s5.5 2.31 5.5 5.25c0 1.516-.701 2.5-1.328 3.259-.095.115-.184.22-.268.319-.207.245-.383.453-.541.681-.208.3-.33.565-.37.847a.751.751 0 0 1-1.485-.212c.084-.593.337-1.078.621-1.489.203-.292.45-.584.673-.848.075-.088.147-.173.213-.253.561-.679.985-1.32.985-2.304 0-2.06-1.637-3.75-4-3.75ZM5.75 12h4.5a.75.75 0 0 1 0 1.5h-4.5a.75.75 0 0 1 0-1.5ZM6 15.25a.75.75 0 0 1 .75-.75h2.5a.75.75 0 0 1 0 1.5h-2.5a.75.75 0 0 1-.75-.75Z"></path></svg>Tip</p>
+<p>Make sure to click on the demo window first.</p>
+</blockquote>
+<h2 id="introduction-and-history"><a class="header" href="#introduction-and-history">Introduction and history</a></h2>
+<p>Deep reinforcement learning algorithms such as <a href="https://arxiv.org/abs/1707.06347">PPO</a>, work effectively in the billion-sample regime. With sufficient scale and occasional successes, RL can optimize well-defined objectives even under sparse reward signals.</p>
+<p>This shifts the primary bottleneck to simulation. The rate at which high-quality experience can be generated <em>directly determines</em> how reliably RL can be applied to challenging real-world problems, such as autonomous navigation in dynamic, multi-agent environments.<sup><a href="#notes-1">1</a></sup></p>
+<p>Over the past few years, we developed a sequence of data-driven, multi-agent simulators to study large-scale self-play for autonomous driving. Agents are trained from scratch. They generate their own experience by interacting with other agents in the environment and learn from it over time. In this post, we briefly summarize this progression and show how we arrived at PufferDrive 2.0.</p>
+<h2 id="early-results-with-self-play-rl-in-autonomous-driving"><a class="header" href="#early-results-with-self-play-rl-in-autonomous-driving">Early results with self-play RL in autonomous driving</a></h2>
+<p><a href="https://arxiv.org/abs/2206.09889"><strong>Nocturne</strong></a> showed that self-play RL could be promising for driving if we have access to a data-driven (grounded) simulator. Using maps from the <a href="https://waymo.com/open/">Waymo Open Motion Dataset (WOMD)</a>, PPO agents trained from scratch in simulation achieved an 80% goal-reaching rate.</p>
+<p>The main limitation was the <em>cost</em> of simulated experience. Nocturne ran at roughly 2,000 steps per second, so reaching this level of performance required about two days of training on a single GPU. It hinted that self-play RL could work, but generating the required experience was still expensive.</p>
+<h2 id="scaling-up"><a class="header" href="#scaling-up">Scaling up</a></h2>
+<p>Later work explored what becomes possible once reaching scale is no longer a bottleneck.</p>
+<ul>
+<li><a href="https://arxiv.org/abs/2501.00678"><strong>Gigaflow</strong></a> demonstrated that large-scale self-play alone can produce robust, naturalistic driving. With a batched simulator, it trained on the equivalent of decades of driving per hour and achieved strong performance across multiple benchmarks without human driving demonstrations.</li>
+<li><a href="https://arxiv.org/abs/2408.01584"><strong>GPUDrive</strong></a>, built on <a href="https://madrona-engine.github.io/">Madrona</a>, open-sourced a similar GPU-driven simulation approach. It explored a more minimal self-play setup with a simpler reward structure and narrower task scope. It demonstrated that effective collision avoidance and goal-reaching can be learned in roughly a day on a single consumer GPU.</li>
+</ul>
+<p>These results suggested that once simulation becomes cheap, self-play RL can produce robust autonomous driving policies.</p>
+<p><img src="images/sim-comparison.png" alt="SPS comparison between sims">
+<strong>Figure 1:</strong> <em>Progression of RL-based driving simulators. Left: end-to-end training throughput on an NVIDIA RTX 4080, counting only transitions collected by learning policy agents. Right: wall-clock time to reach 80 percent goal-reaching<sup><a href="#notes-1">2</a></sup>. This captures both simulation speed and algorithmic efficiency.</em></p>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th>Simulator</th><th>End-to-end training SPS</th><th>Time to 80% success rate</th></tr>
+</thead>
+<tbody>
+<tr><td>Nocturne</td><td>2,000</td><td>~48 hours</td></tr>
+<tr><td>GPUDrive</td><td>50,000</td><td>~1.7 hours</td></tr>
+<tr><td>PufferDrive</td><td>320,000</td><td>~4 minutes</td></tr>
+</tbody>
+</table>
+</div>
+<h2 id="from-gpudrive-to-pufferdrive"><a class="header" href="#from-gpudrive-to-pufferdrive">From GPUDrive to PufferDrive</a></h2>
+<p>GPUDrive delivered high raw simulation speed, but end-to-end training throughput (~30K steps/sec) still limited experiments, especially on large maps like <a href="https://carla.org/">CARLA</a>. Memory layout and batching overheads prevented further speedups.</p>
+<p>We were motivated to get faster end-to-end training because waiting a full day for experimental results slows down everything, debugging, testing, and scientific progress. This led to the development of PufferDrive.</p>
+<p>Partnering with Spencer Cheng from <a href="https://puffer.ai/">Puffer.ai</a>, we rebuilt GPUDrive around <a href="https://arxiv.org/abs/2406.12905"><strong>PufferLib</strong></a>. The result, <strong>PufferDrive 1.0</strong>, reached ~200,000 steps per second on a single GPU and scaled linearly across multiple GPUs. Training agents on 10,000 Waymo maps took roughly 24 hours with GPUDrive—<a href="https://x.com/spenccheng/status/1959665036483350994">with PufferDrive, we now reproduce the same results in ~15 minutes</a>.</p>
+<h2 id="roadmap-pufferdrive-30"><a class="header" href="#roadmap-pufferdrive-30">Roadmap: PufferDrive 3.0</a></h2>
+<p>What is next? PufferDrive 3.0 will improve agent diversity, realism, and expand simulation capabilities. Priorities may shift as we test features and gather feedback. You can find an overview of our planned features on the <a href="https://github.com/orgs/Emerge-Lab/projects/7">project board</a> or <strong>open an issue</strong> with something you would like to see!</p>
+<p><strong>Simulation and environment</strong></p>
+<ul>
+<li>2.5D simulation (allow for maps with overpasses, currently not supported)</li>
+</ul>
+<p><strong>Agent and interaction</strong></p>
+<ul>
+<li>More efficient collision checking</li>
+<li>Support for traffic lights</li>
+<li>Variable agent numbers in CARLA maps</li>
+<li>Support for reward conditioning across a wide range of rewards</li>
+<li>A wide set of new rewards representing law-abiding driving</li>
+</ul>
+<p><strong>Benchmarks</strong></p>
+<ul>
+<li>More extensive planning benchmark with human replays (more metrics)</li>
+</ul>
+<h2 id="citation"><a class="header" href="#citation">Citation</a></h2>
+<p>If you use PufferDrive, please cite:</p>
+<pre><code class="language-bibtex">@software{pufferdrive2025github,
+  author = {Daphne Cornelisse⁕ and Spencer Cheng⁕ and Pragnay Mandavilli and Julian Hunt and Kevin Joseph and Waël Doulazmi and Valentin Charraut and Aditya Gupta and Eugene Vinitsky},
+  title = {{PufferDrive}: A Fast and Friendly Driving Simulator for Training and Evaluating {RL} Agents},
+  url = {https://github.com/Emerge-Lab/PufferDrive},
+  version = {2.0.0},
+  year = {2025},
+}
+</code></pre>
+<p><em>*Equal contribution</em></p>
+<hr>
+<h2 id="notes-1"><a class="header" href="#notes-1">Notes</a></h2>
+<ol>
+<li>A useful parallel comes from the early days of computing. In the 1970s and 1980s, advances in semiconductor manufacturing and microprocessor design—such as Intel’s 8080 and 80286 chips—dramatically reduced computation costs and increased speed. This made iterative software development accessible and enabled entirely new ecosystems of applications, ultimately giving rise to the personal computer. Multi-agent RL faces a similar bottleneck today: progress is limited by the cost and speed of experience collection. Fast, affordable simulation with integrated RL algorithms may play a similar role, enabling solutions that were previously out of reach.</li>
+<li>We benchmark here against 80% goal-reaching to make the results comparable to those in Nocturne. Similar accelerations are achieved against GPUDrive at the 99% success rate.</li>
+</ol>
+
+                    </main>
+
+                    <nav class="nav-wrapper" aria-label="Page navigation">
+                        <!-- Mobile navigation buttons -->
+
+
+                        <div style="clear: both"></div>
+                    </nav>
+                </div>
+            </div>
+
+            <nav class="nav-wide-wrapper" aria-label="Page navigation">
+
+            </nav>
+
+        </div>
+
+        <template id=fa-eye><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 576 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M288 32c-80.8 0-145.5 36.8-192.6 80.6C48.6 156 17.3 208 2.5 243.7c-3.3 7.9-3.3 16.7 0 24.6C17.3 304 48.6 356 95.4 399.4C142.5 443.2 207.2 480 288 480s145.5-36.8 192.6-80.6c46.8-43.5 78.1-95.4 93-131.1c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C433.5 68.8 368.8 32 288 32zM432 256c0 79.5-64.5 144-144 144s-144-64.5-144-144s64.5-144 144-144s144 64.5 144 144zM288 192c0 35.3-28.7 64-64 64c-11.5 0-22.3-3-31.6-8.4c-.2 2.8-.4 5.5-.4 8.4c0 53 43 96 96 96s96-43 96-96s-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6z"/></svg></span></template>
+        <template id=fa-eye-slash><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M38.8 5.1C28.4-3.1 13.3-1.2 5.1 9.2S-1.2 34.7 9.2 42.9l592 464c10.4 8.2 25.5 6.3 33.7-4.1s6.3-25.5-4.1-33.7L525.6 386.7c39.6-40.6 66.4-86.1 79.9-118.4c3.3-7.9 3.3-16.7 0-24.6c-14.9-35.7-46.2-87.7-93-131.1C465.5 68.8 400.8 32 320 32c-68.2 0-125 26.3-169.3 60.8L38.8 5.1zM223.1 149.5C248.6 126.2 282.7 112 320 112c79.5 0 144 64.5 144 144c0 24.9-6.3 48.3-17.4 68.7L408 294.5c5.2-11.8 8-24.8 8-38.5c0-53-43-96-96-96c-2.8 0-5.6 .1-8.4 .4c5.3 9.3 8.4 20.1 8.4 31.6c0 10.2-2.4 19.8-6.6 28.3l-90.3-70.8zm223.1 298L373 389.9c-16.4 6.5-34.3 10.1-53 10.1c-79.5 0-144-64.5-144-144c0-6.9 .5-13.6 1.4-20.2L83.1 161.5C60.3 191.2 44 220.8 34.5 243.7c-3.3 7.9-3.3 16.7 0 24.6c14.9 35.7 46.2 87.7 93 131.1C174.5 443.2 239.2 480 320 480c47.8 0 89.9-12.9 126.2-32.5z"/></svg></span></template>
+        <template id=fa-copy><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M502.6 70.63l-61.25-61.25C435.4 3.371 427.2 0 418.7 0H255.1c-35.35 0-64 28.66-64 64l.0195 256C192 355.4 220.7 384 256 384h192c35.2 0 64-28.8 64-64V93.25C512 84.77 508.6 76.63 502.6 70.63zM464 320c0 8.836-7.164 16-16 16H255.1c-8.838 0-16-7.164-16-16L239.1 64.13c0-8.836 7.164-16 16-16h128L384 96c0 17.67 14.33 32 32 32h47.1V320zM272 448c0 8.836-7.164 16-16 16H63.1c-8.838 0-16-7.164-16-16L47.98 192.1c0-8.836 7.164-16 16-16H160V128H63.99c-35.35 0-64 28.65-64 64l.0098 256C.002 483.3 28.66 512 64 512h192c35.2 0 64-28.8 64-64v-32h-47.1L272 448z"/></svg></span></template>
+        <template id=fa-play><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg></span></template>
+        <template id=fa-clock-rotate-left><span class=fa-svg><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 6.2.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2022 Fonticons, Inc. --><path d="M75 75L41 41C25.9 25.9 0 36.6 0 57.9V168c0 13.3 10.7 24 24 24H134.1c21.4 0 32.1-25.9 17-41l-30.8-30.8C155 85.5 203 64 256 64c106 0 192 86 192 192s-86 192-192 192c-40.8 0-78.6-12.7-109.7-34.4c-14.5-10.1-34.4-6.6-44.6 7.9s-6.6 34.4 7.9 44.6C151.2 495 201.7 512 256 512c141.4 0 256-114.6 256-256S397.4 0 256 0C185.3 0 121.3 28.7 75 75zm181 53c-13.3 0-24 10.7-24 24V256c0 6.4 2.5 12.5 7 17l72 72c9.4 9.4 24.6 9.4 33.9 0s9.4-24.6 0-33.9l-65-65V152c0-13.3-10.7-24-24-24z"/></svg></span></template>
+
+
+
+        <script>
+            window.playground_copyable = true;
+        </script>
+
+
+        <script src="elasticlunr-ef4e11c1.min.js"></script>
+        <script src="mark-09e88c2c.min.js"></script>
+        <script src="searcher-c2a407aa.js"></script>
+
+        <script src="clipboard-1626706a.min.js"></script>
+        <script src="highlight-abc7f01d.js"></script>
+        <script src="book-a0b12cfe.js"></script>
+
+        <!-- Custom JS scripts -->
+        <script src="theme/mathjax-31470206.js"></script>
+
+        <script>
+        window.addEventListener('load', function() {
+            MathJax.Hub.Register.StartupHook('End', function() {
+                window.setTimeout(window.print, 100);
+            });
+        });
+        </script>
+
+
+    </div>
+    </body>
+</html>
