@@ -1327,6 +1327,39 @@ def sanity(env_name, args=None):
 
     return runs
 
+def zero_shot(env_name, args=None, vecenv=None, policy=None):
+    args = args or load_config(env_name)
+    args["env"]["map_dir"] = args["eval"]["map_dir"]
+    args["env"]["num_maps"] = args["eval"]["num_maps"]
+    args["env"]["use_all_maps"] = True
+    dataset_name = args["env"]["map_dir"].split("/")[-1]
+
+    print(f"Running human replay evaluation with {dataset_name} dataset.\n")
+    from pufferlib.ocean.benchmark.evaluator import OtherReplayEvaluator
+
+    backend = args["eval"].get("backend", "PufferEnv")
+    args["vec"] = dict(backend=backend, num_envs=1)
+    args["env"]["control_mode"] = args["eval"]["human_replay_control_mode"]
+    args["env"]["episode_length"] = 91  # WOMD scenario length
+
+    vecenv = vecenv or load_env(env_name, args)
+    args2 = args.copy()
+    args["load_model_path"] = args["load_multiple_model_path"][0]
+    policy1 = load_policy(args, vecenv, env_name)
+
+    args2["load_model_path"] = args["load_multiple_model_path"][1]
+    policy2 = load_policy(args2, vecenv, env_name)
+
+    print(f"Effective number of scenarios used: {len(vecenv.driver_env.agent_offsets) - 1}")
+
+    evaluator = OtherReplayEvaluator(args)
+
+    # Run save replay
+    if args["zero_shot_mode"] == "reactive-play":
+        results = evaluator.save_replay(args, vecenv, policy1, policy2)
+    elif args["zero_shot_mode"] == "replay":
+        results = evaluator.play_replay(args, vecenv, policy1, policy2)
+    return results
 
 def profile(args=None, env_name=None, vecenv=None, policy=None):
     args = load_config()

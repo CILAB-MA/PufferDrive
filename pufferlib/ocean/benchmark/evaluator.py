@@ -712,3 +712,130 @@ class HumanReplayEvaluator:
             if len(info_list) > 0:  # Happens at the end of episode
                 results = info_list[0]
                 return results
+
+class OtherReplayEvaluator:
+    """Evaluates policies against other policies replays in PufferDrive."""
+
+    def __init__(self, config: Dict):
+        self.config = config
+        self.sim_steps = 91
+
+    def save_replay(self, args, puffer_env, policy1, policy2):
+        """Roll out policy in env with human replays. Store statistics.
+
+        Args:
+
+
+        Returns:
+
+        """
+        import numpy as np
+        import torch
+        import pufferlib
+
+        num_agents = puffer_env.observation_space.shape[0]
+        device = args["train"]["device"]
+
+        obs, infos = puffer_env.reset()
+
+        # collect the first indec in each map, set them as ego
+        for i, info in enumerate(infos):
+            agent_offsets = info['agent_offsets']
+            ego_idx = agent_offsets[:-1]
+            ego_indices += [idx + args["env"]["num_agents"] * i for idx in ego_idx]
+        other_mask = torch.ones(obs.shape[0], dtype=torch.bool, device=device)
+        other_mask[ego_indices] = False
+        state_ego = dict(
+        lstm_h=torch.zeros(len(ego_indices), policy1.hidden_size, device=device),
+        lstm_c=torch.zeros(len(ego_indices), policy1.hidden_size, device=device),
+        )
+        state_other = dict(
+        lstm_h=torch.zeros(obs.shape[0]- len(ego_indices), policy2.hidden_size, device=device),
+        lstm_c=torch.zeros(obs.shape[0] - len(ego_indices), policy2.hidden_size, device=device),
+        )
+        other_action_buf = np.zeros((other_mask.sum(), self.sim_steps, 1))
+        os.makedirs(f"other_action_buffer", exist_ok=True)
+        for time_idx in range(self.sim_steps):
+            # Step policy
+            with torch.no_grad():
+                total_actions = np.zeros((obs.shape[0], 1), dtype=np.int64)
+                ob_tensor = torch.as_tensor(obs).to(device)
+                # ego action
+                ob_ego = ob_tensor[ego_indices]
+                logits_ego, value_ego = policy1.forward_eval(ob_ego, state_ego)
+                action_ego, logprob_ego, _ = pufferlib.pytorch.sample_logits(logits_ego)
+                action_ego = action_ego.cpu().numpy()
+
+                # other action
+                ob_other = obs[other_mask]
+                logits_other, value_other = policy2.forward_eval(ob_other, state_other)
+                action_other, logprob_other, _ = pufferlib.pytorch.sample_logits(logits_other)
+                action_other = action_other.cpu().numpy()
+    
+            if isinstance(logits_ego, torch.distributions.Normal):
+                action_ego = np.clip(action_ego, puffer_env.action_space.low, puffer_env.action_space.high)
+
+            if isinstance(logits_other, torch.distributions.Normal):  
+                action_other = np.clip(action_other, puffer_env.action_space.low, puffer_env.action_space.high)
+            other_action_buf[:, time_idx] = action_other
+            total_actions[ego_indices] = action_ego
+            total_actions[other_mask.cpu().numpy()] = action_other
+            obs, rewards, dones, truncs, info_list = puffer_env.step(total_actions)
+
+            if len(info_list) > 0:  # Happens at the end of episode
+                results = info_list[0]
+                np.save(f"other_action_buffer/other_actions_{args['load_multiple_model_path'][0][-11:-3]}_{num_iter}.npy", other_action_buf)
+                return results
+            
+    def play_replay(self, args, puffer_env, policy1, policy2):
+        """Roll out policy in env with human replays. Store statistics.
+
+        Args:
+
+
+        Returns:
+
+        """
+        import numpy as np
+        import torch
+        import pufferlib
+
+        num_agents = puffer_env.observation_space.shape[0]
+        device = args["train"]["device"]
+
+        obs, infos = puffer_env.reset()
+
+        # collect the first indec in each map, set them as ego
+        for i, info in enumerate(infos):
+            agent_offsets = info['agent_offsets']
+            ego_idx = agent_offsets[:-1]
+            ego_indices += [idx + args["env"]["num_agents"] * i for idx in ego_idx]
+        other_mask = torch.ones(obs.shape[0], dtype=torch.bool, device=device)
+        other_mask[ego_indices] = False
+        state_ego = dict(
+        lstm_h=torch.zeros(len(ego_indices), policy1.hidden_size, device=device),
+        lstm_c=torch.zeros(len(ego_indices), policy1.hidden_size, device=device),
+        )
+        other_action_npy = np.load(f"other_action_buffer/other_actions_{args['load_multiple_model_path'][1][-11:-3]}_{num_iter}.npy")
+        os.makedirs(f"other_action_buffer", exist_ok=True)
+        for time_idx in range(self.sim_steps):
+            # Step policy
+            with torch.no_grad():
+                total_actions = np.zeros((obs.shape[0], 1), dtype=np.int64)
+                ob_tensor = torch.as_tensor(obs).to(device)
+                # ego action
+                ob_ego = ob_tensor[ego_indices]
+                logits_ego, value_ego = policy1.forward_eval(ob_ego, state_ego)
+                action_ego, logprob_ego, _ = pufferlib.pytorch.sample_logits(logits_ego)
+                action_ego = action_ego.cpu().numpy()
+            
+            if isinstance(logits_ego, torch.distributions.Normal):
+                action_ego = np.clip(action_ego, puffer_env.action_space.low, puffer_env.action_space.high)
+
+            total_actions[other_mask.cpu().numpy()] = other_action_npy[:, time_idx]
+            total_actions[ego_indices] = action_ego
+            obs, rewards, dones, truncs, info_list = puffer_env.step(total_actions)
+
+            if len(info_list) > 0:  # Happens at the end of episode
+                results = info_list[0]
+                return results
