@@ -25,6 +25,7 @@ class Drive(pufferlib.PufferEnv):
         goal_target_distance=10.0,
         goal_radius=2.0,
         goal_speed=20.0,
+        aggressive_speed=0.0,
         collision_behavior=0,
         offroad_behavior=0,
         dt=0.1,
@@ -55,6 +56,7 @@ class Drive(pufferlib.PufferEnv):
         self.reward_goal_post_respawn = reward_goal_post_respawn
         self.goal_radius = goal_radius
         self.goal_speed = goal_speed
+        self.aggressive_speed = aggressive_speed
         self.goal_behavior = goal_behavior
         self.goal_target_distance = goal_target_distance
         self.collision_behavior = collision_behavior
@@ -182,6 +184,7 @@ class Drive(pufferlib.PufferEnv):
                 reward_goal_post_respawn=reward_goal_post_respawn,
                 goal_radius=goal_radius,
                 goal_speed=goal_speed,
+                aggressive_speed=aggressive_speed,
                 goal_behavior=self.goal_behavior,
                 goal_target_distance=self.goal_target_distance,
                 collision_behavior=self.collision_behavior,
@@ -232,6 +235,7 @@ class Drive(pufferlib.PufferEnv):
                 goal_behavior=self.goal_behavior,
                 goal_target_distance=self.goal_target_distance,
                 goal_speed=self.goal_speed,
+                aggressive_speed=self.aggressive_speed,
                 map_dir=self.map_dir,
                 sequential_map_sampling=False,  # Always use random sampling with replacement
             )
@@ -260,6 +264,7 @@ class Drive(pufferlib.PufferEnv):
                     goal_behavior=self.goal_behavior,
                     goal_target_distance=self.goal_target_distance,
                     goal_speed=self.goal_speed,
+                    aggressive_speed=self.aggressive_speed,
                     collision_behavior=self.collision_behavior,
                     offroad_behavior=self.offroad_behavior,
                     dt=self.dt,
@@ -278,6 +283,7 @@ class Drive(pufferlib.PufferEnv):
 
             binding.vec_reset(self.c_envs, seed)
             self.terminals[:] = 1
+        # print(f"Rewards {self.rewards.max()} {self.rewards.mean()}")
         return (self.observations, self.rewards, self.terminals, self.truncations, info)
 
     def get_global_agent_state(self):

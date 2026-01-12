@@ -60,6 +60,8 @@
 #define OFFROAD_IDX 1
 #define REACHED_GOAL_IDX 2
 #define LANE_ALIGNED_IDX 3
+#define LANE_DIST_IDX 4
+#define HEADING_DIFF_IDX 5
 
 // Grid cell size
 #define GRID_CELL_SIZE 5.0f
@@ -198,7 +200,7 @@ struct Entity {
     float init_goal_y;
     int mark_as_expert;
     int collision_state;
-    float metrics_array[5]; // metrics_array: [collision, offroad, reached_goal, lane_aligned
+    float metrics_array[7]; // metrics_array: [collision, offroad, reached_goal, lane_aligned, lane_distance, heading_diff
     float x;
     float y;
     float z;
@@ -325,6 +327,7 @@ struct Drive {
     float reward_goal_post_respawn;
     float goal_radius;
     float goal_speed;
+    float aggressive_speed;
     int max_controlled_agents;
     int logs_capacity;
     int goal_behavior;
@@ -520,6 +523,8 @@ void set_start_position(Drive *env) {
         e->metrics_array[OFFROAD_IDX] = 0.0f;      // offroad
         e->metrics_array[REACHED_GOAL_IDX] = 0.0f; // reached goal
         e->metrics_array[LANE_ALIGNED_IDX] = 0.0f; // lane aligned
+        e->metrics_array[LANE_DIST_IDX] = 0.0f; // lane distance -> for lane keeping
+        e->metrics_array[HEADING_DIFF_IDX] = 0.0f; // heading diff -> for lane keeping
         e->respawn_timestep = -1;
         e->stopped = 0;
         e->removed = 0;
@@ -1065,6 +1070,8 @@ void reset_agent_metrics(Drive *env, int agent_idx) {
     agent->metrics_array[COLLISION_IDX] = 0.0f;    // vehicle collision
     agent->metrics_array[OFFROAD_IDX] = 0.0f;      // offroad
     agent->metrics_array[LANE_ALIGNED_IDX] = 0.0f; // lane aligned
+    agent->metrics_array[LANE_DIST_IDX] = 0.0f; // lane dist
+    agent->metrics_array[HEADING_DIFF_IDX] = 0.0f; // heading diff
     agent->collision_state = 0;
 }
 
@@ -1108,7 +1115,7 @@ void compute_agent_metrics(Drive *env, int agent_idx) {
     float cos_heading = cosf(agent->heading);
     float sin_heading = sinf(agent->heading);
     float min_distance = (float)INT16_MAX;
-
+    float best_heading_diff = 0.0f;
     int closest_lane_entity_idx = -1;
     int closest_lane_geometry_idx = -1;
 
@@ -1169,6 +1176,7 @@ void compute_agent_metrics(Drive *env, int agent_idx) {
 
             if (dist < min_distance) {
                 min_distance = dist;
+                best_heading_diff = heading_diff;
                 closest_lane_entity_idx = entity_idx;
                 closest_lane_geometry_idx = geometry_idx;
             }
@@ -1184,6 +1192,8 @@ void compute_agent_metrics(Drive *env, int agent_idx) {
         agent->current_lane_idx = closest_lane_entity_idx;
         int lane_aligned =
             check_lane_aligned(agent, &env->entities[closest_lane_entity_idx], closest_lane_geometry_idx);
+        agent->metrics_array[LANE_DIST_IDX] = min_distance;
+        agent->metrics_array[HEADING_DIFF_IDX] = best_heading_diff;
         agent->metrics_array[LANE_ALIGNED_IDX] = lane_aligned;
     }
 
@@ -1996,6 +2006,8 @@ void c_reset(Drive *env) {
         env->entities[agent_idx].metrics_array[OFFROAD_IDX] = 0.0f;
         env->entities[agent_idx].metrics_array[REACHED_GOAL_IDX] = 0.0f;
         env->entities[agent_idx].metrics_array[LANE_ALIGNED_IDX] = 0.0f;
+        env->entities[agent_idx].metrics_array[LANE_DIST_IDX] = 0.0f;
+        env->entities[agent_idx].metrics_array[HEADING_DIFF_IDX] = 0.0f;
         env->entities[agent_idx].stopped = 0;
         env->entities[agent_idx].removed = 0;
 
@@ -2021,6 +2033,8 @@ void respawn_agent(Drive *env, int agent_idx) {
     env->entities[agent_idx].metrics_array[OFFROAD_IDX] = 0.0f;
     env->entities[agent_idx].metrics_array[REACHED_GOAL_IDX] = 0.0f;
     env->entities[agent_idx].metrics_array[LANE_ALIGNED_IDX] = 0.0f;
+    env->entities[agent_idx].metrics_array[LANE_DIST_IDX] = 0.0f;
+    env->entities[agent_idx].metrics_array[HEADING_DIFF_IDX] = 0.0f;
 
     env->entities[agent_idx].respawn_timestep = env->timestep;
     env->entities[agent_idx].collided_before_goal = 0;
@@ -2116,6 +2130,8 @@ void c_step(Drive *env) {
         // Reward agent if it is within X meters of goal and speed is below threshold
         bool within_distance = distance_to_goal < env->goal_radius;
         bool within_speed = current_speed <= env->goal_speed;
+        // For generate long-tail agent, odd_reward is applied
+        bool aggresive_agent = current_speed >= env->aggressive_speed;
 
         if (within_distance && within_speed && !env->entities[agent_idx].current_goal_reached) {
             if (env->goal_behavior == GOAL_RESPAWN && env->entities[agent_idx].respawn_timestep != -1) {
@@ -2140,6 +2156,10 @@ void c_step(Drive *env) {
         }
 
         int lane_aligned = env->entities[agent_idx].metrics_array[LANE_ALIGNED_IDX];
+        int lane_distance = env->entities[agent_idx].metrics_array[LANE_DIST_IDX];
+        int heading_diff = env->entities[agent_idx].metrics_array[HEADING_DIFF_IDX];
+        env->rewards[i] += heading_diff / (M_PI * 50); // heading_diff normalize [0, 1]
+        env->rewards[i] += lane_distance / (200.0); // distance threshold 4m 
         env->logs[i].lane_alignment_rate = lane_aligned;
     }
 

@@ -1358,10 +1358,12 @@ def zero_shot(env_name, args=None, vecenv=None, policies=None):
     evaluator = OtherReplayEvaluator(args)
 
     # Run save replay
-    if args["zero_shot_mode"] == "reactive-play":
+    if args["zero_shot_mode"] == "save-replay":
         results = evaluator.save_replay(args, vecenv, policy1, policy2)
     elif args["zero_shot_mode"] == "replay":
         results = evaluator.play_replay(args, vecenv, policy1, policy2)
+    elif args["zero_shot_mode"] == "reactive-play":
+        results = evaluator.play_reactive(args, vecenv, policy1, policy2)
     return results
 
 def profile(args=None, env_name=None, vecenv=None, policy=None):
@@ -1497,8 +1499,8 @@ def load_config(env_name, config_dir=None):
     parser.add_argument("--load-model-path", type=str, default=None, help="Path to a pretrained checkpoint")
     # for zero-shot evaluation
     parser.add_argument("--load-multiple-model-path", type=str, default=[], nargs="+", help="Path to a pretrained multiple checkpoints")
-    parser.add_argument('--zero-shot-mode', type=str, default='self-play', 
-        choices=['reactive-play', 'replay']
+    parser.add_argument('--zero-shot-mode', type=str, default='save-replay', 
+        choices=['reactive-play', 'replay', 'save-replay']
     )
     parser.add_argument(
         "--load-id", type=str, default=None, help="Kickstart/eval from from a finished Wandb/Neptune run"
