@@ -232,6 +232,15 @@ static int my_log(PyObject *dict, Log *log) {
     assign_to_dict(dict, "goals_sampled_this_episode", log->goals_sampled_this_episode);
     assign_to_dict(dict, "goals_reached_this_episode", log->goals_reached_this_episode);
     assign_to_dict(dict, "speed_at_goal", log->speed_at_goal);
+    // ego log
+    assign_to_dict(dict, "ego_speed_at_goal", log->ego_speed_at_goal);
+    assign_to_dict(dict, "ego_lane_alignment_rate", log->ego_lane_alignment_rate);
+    assign_to_dict(dict, "ego_offroad_rate", log->ego_offroad_rate);
+    assign_to_dict(dict, "ego_collision_rate", log->ego_collision_rate);
+    assign_to_dict(dict, "ego_completion_rate", log->ego_completion_rate);
+    assign_to_dict(dict, "ego_offroad_per_agent", log->ego_offroad_per_agent);
+    assign_to_dict(dict, "ego_collisions_per_agent", log->ego_collisions_per_agent);
+    assign_to_dict(dict, "ego_score", log->ego_score);
     // assign_to_dict(dict, "avg_displacement_error", log->avg_displacement_error);
     return 0;
 }

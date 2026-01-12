@@ -573,6 +573,7 @@ static PyObject *vec_log(PyObject *self, PyObject *args) {
 
     Log aggregate = {0};
     int num_keys = sizeof(Log) / sizeof(float);
+    int first_one_index = (int)(offsetof(Log, ego_speed_at_goal) / sizeof(float));
     for (int i = 0; i < vec->num_envs; i++) {
         Env *env = vec->envs[i];
         for (int j = 0; j < num_keys; j++) {
@@ -596,9 +597,13 @@ static PyObject *vec_log(PyObject *self, PyObject *args) {
     }
 
     float n = aggregate.n;
-
+    float n_envs = (float)vec->num_envs;
     // Average across agents
     for (int i = 0; i < num_keys; i++) {
+        if (i >= first_one_index) {
+            ((float *)&aggregate)[i] /= n_envs;
+            continue;
+        }
         ((float *)&aggregate)[i] /= n;
     }
 

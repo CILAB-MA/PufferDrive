@@ -163,6 +163,15 @@ struct Log {
     float active_agent_count;
     float expert_static_agent_count;
     float static_agent_count;
+    // only record first agent
+    float ego_speed_at_goal;
+    float ego_lane_alignment_rate;
+    float ego_offroad_rate;
+    float ego_collision_rate;
+    float ego_completion_rate;
+    float ego_offroad_per_agent;
+    float ego_collisions_per_agent;
+    float ego_score;
 };
 
 typedef struct Entity Entity;
@@ -373,6 +382,16 @@ void add_log(Drive *env) {
         env->log.speed_at_goal += env->logs[i].speed_at_goal;
         env->log.episode_length += env->logs[i].episode_length;
         env->log.episode_return += env->logs[i].episode_return;
+
+        if (i == 0) {
+            env->log.ego_score = (e->goals_reached_this_episode && !e->collided_before_goal) ? 1.0f : 0.0f;
+            env->log.ego_offroad_rate = (float)offroad;
+            env->log.ego_collision_rate = (float)collided;
+            env->log.ego_speed_at_goal = env->logs[i].speed_at_goal;
+            env->log.ego_lane_alignment_rate = (float)lane_aligned;
+            env->log.ego_collisions_per_agent = (float)collisions_per_agent;
+            env->log.ego_offroad_per_agent = (float)offroad_per_agent;
+        }
         // Log composition counts per agent so vec_log averaging recovers the per-env value
         env->log.active_agent_count += env->active_agent_count;
         env->log.expert_static_agent_count += env->expert_static_agent_count;

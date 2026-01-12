@@ -1327,19 +1327,19 @@ def sanity(env_name, args=None):
 
     return runs
 
-def zero_shot(env_name, args=None, vecenv=None, policy=None):
+def zero_shot(env_name, args=None, vecenv=None, policies=None):
     args = args or load_config(env_name)
     args["env"]["map_dir"] = args["eval"]["map_dir"]
-    args["env"]["num_maps"] = args["eval"]["num_maps"]
+    args["env"]["num_maps"] = 1000
     args["env"]["use_all_maps"] = True
     dataset_name = args["env"]["map_dir"].split("/")[-1]
-
-    print(f"Running human replay evaluation with {dataset_name} dataset.\n")
+    print(args["env"])
+    print(f"Running zero-shot evaluation with {dataset_name} dataset.\n")
     from pufferlib.ocean.benchmark.evaluator import OtherReplayEvaluator
 
     backend = args["eval"].get("backend", "PufferEnv")
     args["vec"] = dict(backend=backend, num_envs=1)
-    args["env"]["control_mode"] = args["eval"]["human_replay_control_mode"]
+    # args["env"]["control_mode"] = args["eval"]["human_replay_control_mode"]
     args["env"]["episode_length"] = 91  # WOMD scenario length
 
     vecenv = vecenv or load_env(env_name, args)
@@ -1492,6 +1492,11 @@ def load_config(env_name, config_dir=None):
         add_help=False,
     )
     parser.add_argument("--load-model-path", type=str, default=None, help="Path to a pretrained checkpoint")
+    # for zero-shot evaluation
+    parser.add_argument("--load-multiple-model-path", type=str, default=[], nargs="+", help="Path to a pretrained multiple checkpoints")
+    parser.add_argument('--zero-shot-mode', type=str, default='self-play', 
+        choices=['reactive-play', 'replay']
+    )
     parser.add_argument(
         "--load-id", type=str, default=None, help="Kickstart/eval from from a finished Wandb/Neptune run"
     )
@@ -1578,6 +1583,8 @@ def main():
         eval(env_name=env_name)
     elif mode == "sweep":
         sweep(env_name=env_name)
+    elif mode == "zeroshot":
+        zero_shot(env_name=env_name)
     elif mode == "controlled_exp":
         controlled_exp(env_name=env_name)
     elif mode == "autotune":

@@ -720,6 +720,25 @@ class OtherReplayEvaluator:
         self.config = config
         self.sim_steps = 91
 
+    def save_result(self, path, res):
+        import json
+        import os
+        parent = os.path.dirname(os.path.abspath(path))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError):
+            data = []
+        if isinstance(data, dict):
+            data = [data]
+        elif not isinstance(data, list):
+            data = [data]
+        data.append(res)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
     def save_replay(self, args, puffer_env, policy1, policy2):
         """Roll out policy in env with human replays. Store statistics.
 
@@ -735,9 +754,8 @@ class OtherReplayEvaluator:
 
         num_agents = puffer_env.observation_space.shape[0]
         device = args["train"]["device"]
-
         obs, infos = puffer_env.reset()
-
+        ego_indices = []
         # collect the first indec in each map, set them as ego
         for i, info in enumerate(infos):
             agent_offsets = info['agent_offsets']
@@ -754,7 +772,7 @@ class OtherReplayEvaluator:
         lstm_c=torch.zeros(obs.shape[0] - len(ego_indices), policy2.hidden_size, device=device),
         )
         other_action_buf = np.zeros((other_mask.sum(), self.sim_steps, 1))
-        os.makedirs(f"other_action_buffer", exist_ok=True)
+        os.makedirs(f"/data/puffer/experiments/nominal/other_action_buffer", exist_ok=True)
         for time_idx in range(self.sim_steps):
             # Step policy
             with torch.no_grad():
@@ -767,7 +785,7 @@ class OtherReplayEvaluator:
                 action_ego = action_ego.cpu().numpy()
 
                 # other action
-                ob_other = obs[other_mask]
+                ob_other = ob_tensor[other_mask]
                 logits_other, value_other = policy2.forward_eval(ob_other, state_other)
                 action_other, logprob_other, _ = pufferlib.pytorch.sample_logits(logits_other)
                 action_other = action_other.cpu().numpy()
@@ -784,7 +802,9 @@ class OtherReplayEvaluator:
 
             if len(info_list) > 0:  # Happens at the end of episode
                 results = info_list[0]
-                np.save(f"other_action_buffer/other_actions_{args['load_multiple_model_path'][0][-11:-3]}_{num_iter}.npy", other_action_buf)
+                np.save(f"/data/puffer/experiments/nominal/other_action_buffer/other_actions_{args['load_multiple_model_path'][0][-11:-3]}.npy", other_action_buf)
+                res_dict = {f"{args['load_multiple_model_path'][0][-11:-3]}_vs_selfplay": results}
+                self.save_result("/data/puffer/results/nominal/zeroshot.json", res_dict)
                 return results
             
     def play_replay(self, args, puffer_env, policy1, policy2):
@@ -802,7 +822,7 @@ class OtherReplayEvaluator:
 
         num_agents = puffer_env.observation_space.shape[0]
         device = args["train"]["device"]
-
+        ego_indices = []
         obs, infos = puffer_env.reset()
 
         # collect the first indec in each map, set them as ego
@@ -816,8 +836,7 @@ class OtherReplayEvaluator:
         lstm_h=torch.zeros(len(ego_indices), policy1.hidden_size, device=device),
         lstm_c=torch.zeros(len(ego_indices), policy1.hidden_size, device=device),
         )
-        other_action_npy = np.load(f"other_action_buffer/other_actions_{args['load_multiple_model_path'][1][-11:-3]}_{num_iter}.npy")
-        os.makedirs(f"other_action_buffer", exist_ok=True)
+        other_action_npy = np.load(f"/data/puffer/experiments/nominal/other_action_buffer/other_actions_{args['load_multiple_model_path'][1][-11:-3]}.npy")
         for time_idx in range(self.sim_steps):
             # Step policy
             with torch.no_grad():
@@ -838,4 +857,6 @@ class OtherReplayEvaluator:
 
             if len(info_list) > 0:  # Happens at the end of episode
                 results = info_list[0]
+                res_dict = {f"{args['load_multiple_model_path'][0][-11:-3]}_vs_{args['load_multiple_model_path'][1][-11:-3]}": results}
+                self.save_result("/data/puffer/results/nominal/zeroshot.json", res_dict)
                 return results
