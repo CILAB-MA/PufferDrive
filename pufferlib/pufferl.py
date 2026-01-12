@@ -948,6 +948,9 @@ class WandbLogger:
         self.run_id = wandb.run.id
 
     def log(self, logs, step):
+        keys_to_delete = [k for k in logs if ("ego_" in k) or (k in ["environment/num_envs", "environment/map_ids", "environment/agent_offsets"])]
+        for k in keys_to_delete:
+            del logs[k]
         self.wandb.log(logs, step=step)
 
     def close(self, model_path):
