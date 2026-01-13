@@ -319,6 +319,9 @@ struct Drive {
     int termination_mode;
     float reward_vehicle_collision;
     float reward_offroad_collision;
+    float reward_head_diff;
+    float reward_lane_dist;
+    float reward_speed;
     char *map_name;
     float world_mean_x;
     float world_mean_y;
@@ -2131,7 +2134,7 @@ void c_step(Drive *env) {
         bool within_distance = distance_to_goal < env->goal_radius;
         bool within_speed = current_speed <= env->goal_speed;
         // For generate long-tail agent, odd_reward is applied
-        bool aggresive_agent = current_speed >= env->aggressive_speed;
+        bool aggressive_agent = current_speed >= env->aggressive_speed;
 
         if (within_distance && within_speed && !env->entities[agent_idx].current_goal_reached) {
             if (env->goal_behavior == GOAL_RESPAWN && env->entities[agent_idx].respawn_timestep != -1) {
@@ -2158,8 +2161,9 @@ void c_step(Drive *env) {
         int lane_aligned = env->entities[agent_idx].metrics_array[LANE_ALIGNED_IDX];
         int lane_distance = env->entities[agent_idx].metrics_array[LANE_DIST_IDX];
         int heading_diff = env->entities[agent_idx].metrics_array[HEADING_DIFF_IDX];
-        env->rewards[i] += heading_diff / (M_PI * 50); // heading_diff normalize [0, 1]
-        env->rewards[i] += lane_distance / (200.0); // distance threshold 4m 
+        env->rewards[i] += heading_diff / M_PI * env->reward_head_diff; // heading_diff normalize [0, 1]
+        env->rewards[i] += lane_distance / 4.0 * env->reward_lane_dist; // distance threshold 4m 
+        env->rewards[i] += (int)aggressive_agent * env->reward_speed; // speed > 100
         env->logs[i].lane_alignment_rate = lane_aligned;
     }
 
