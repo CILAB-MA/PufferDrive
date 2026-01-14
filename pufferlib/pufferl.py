@@ -1354,8 +1354,8 @@ def zero_shot(env_name, args=None, vecenv=None, policies=None):
     policy2 = load_policy(args2, vecenv, env_name)
 
     print(f"Effective number of scenarios used: {len(vecenv.driver_env.agent_offsets) - 1}")
-
-    evaluator = OtherReplayEvaluator(args)
+    parts = args["load_multiple_model_path"][1].split("/") 
+    evaluator = OtherReplayEvaluator(args, mode=parts[4])
 
     # Run save replay
     if args["zero_shot_mode"] == "save-replay":

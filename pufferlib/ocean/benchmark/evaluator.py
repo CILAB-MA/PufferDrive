@@ -716,8 +716,9 @@ class HumanReplayEvaluator:
 class OtherReplayEvaluator:
     """Evaluates policies against other policies replays in PufferDrive."""
 
-    def __init__(self, config: Dict):
+    def __init__(self, config: Dict, mode: str):
         self.config = config
+        self.mode = mode
         self.sim_steps = 91
 
     def save_result(self, path, res):
@@ -800,7 +801,7 @@ class OtherReplayEvaluator:
             if len(info_list) > 0:  # Happens at the end of episode
                 results = info_list[0]
                 res_dict = {f"{args['load_multiple_model_path'][0][-11:-3]}_vs_{args['load_multiple_model_path'][1][-11:-3]}": results}
-                self.save_result("/data/puffer/results/nominal/zeroshot_reactive.json", res_dict)
+                self.save_result(f"/data/puffer/results/{self.mode}/zeroshot_reactive.json", res_dict)
                 return results
 
     def save_replay(self, args, puffer_env, policy1, policy2):
@@ -836,7 +837,7 @@ class OtherReplayEvaluator:
         lstm_c=torch.zeros(obs.shape[0] - len(ego_indices), policy2.hidden_size, device=device),
         )
         other_action_buf = np.zeros((other_mask.sum(), self.sim_steps, 1))
-        os.makedirs(f"/data/puffer/experiments/nominal/other_action_buffer", exist_ok=True)
+        os.makedirs(f"/data/puffer/experiments/{self.mode}/other_action_buffer", exist_ok=True)
         for time_idx in range(self.sim_steps):
             # Step policy
             with torch.no_grad():
@@ -866,9 +867,9 @@ class OtherReplayEvaluator:
 
             if len(info_list) > 0:  # Happens at the end of episode
                 results = info_list[0]
-                np.save(f"/data/puffer/experiments/nominal/other_action_buffer/other_actions_{args['load_multiple_model_path'][0][-11:-3]}.npy", other_action_buf)
+                np.save(f"/data/puffer/experiments/{self.mode}/other_action_buffer/other_actions_{args['load_multiple_model_path'][0][-11:-3]}.npy", other_action_buf)
                 res_dict = {f"{args['load_multiple_model_path'][0][-11:-3]}_vs_selfplay": results}
-                self.save_result("/data/puffer/results/nominal/zeroshot.json", res_dict)
+                self.save_result(f"/data/puffer/results/{self.mode}/zeroshot.json", res_dict)
                 return results
             
     def play_replay(self, args, puffer_env, policy1, policy2):
@@ -900,7 +901,7 @@ class OtherReplayEvaluator:
         lstm_h=torch.zeros(len(ego_indices), policy1.hidden_size, device=device),
         lstm_c=torch.zeros(len(ego_indices), policy1.hidden_size, device=device),
         )
-        other_action_npy = np.load(f"/data/puffer/experiments/nominal/other_action_buffer/other_actions_{args['load_multiple_model_path'][1][-11:-3]}.npy")
+        other_action_npy = np.load(f"/data/puffer/experiments/{self.mode}/other_action_buffer/other_actions_{args['load_multiple_model_path'][1][-11:-3]}.npy")
         for time_idx in range(self.sim_steps):
             # Step policy
             with torch.no_grad():
@@ -922,5 +923,5 @@ class OtherReplayEvaluator:
             if len(info_list) > 0:  # Happens at the end of episode
                 results = info_list[0]
                 res_dict = {f"{args['load_multiple_model_path'][0][-11:-3]}_vs_{args['load_multiple_model_path'][1][-11:-3]}": results}
-                self.save_result("/data/puffer/results/nominal/zeroshot.json", res_dict)
+                self.save_result(f"/data/puffer/results/{self.mode}/zeroshot.json", res_dict)
                 return results
