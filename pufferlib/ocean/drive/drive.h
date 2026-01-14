@@ -2164,6 +2164,7 @@ void c_step(Drive *env) {
         env->rewards[i] += heading_diff / M_PI * env->reward_head_diff; // heading_diff normalize [0, 1]
         env->rewards[i] += lane_distance / 4.0 * env->reward_lane_dist; // distance threshold 4m 
         env->rewards[i] += (int)aggressive_agent * env->reward_speed; // speed > 100
+        env->rewards[i] += (int)within_speed * env->reward_speed; // speed < 100
         env->logs[i].lane_alignment_rate = lane_aligned;
     }
 
