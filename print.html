@@ -39,7 +39,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-6c58eb4b.js";
+            window.path_to_searchindex_js = "searchindex-b836374d.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-8d227c1c.js"></script>
@@ -272,7 +272,7 @@
     
 <p>Train agents and evaluate them with WOSAC and human-replay benchmarks.</p>
 
-    <a href="#training-agents">Open guide</a>
+    <a href="#training">Open guide</a>
   </div>
 
 </div>
@@ -326,13 +326,12 @@ uv pip install -e .
 <li>Checkpoint uploads and evaluation helpers (<code>pufferlib/utils.py</code>) will log WOSAC/human-replay metrics and rendered videos when W&amp;B is enabled.</li>
 </ul>
 <div style="break-before: page; page-break-before: always;"></div>
-<h1 id="training-agents"><a href="#training-agents" class="header">Training agents</a></h1>
-<h2 id="training"><a class="header" href="#training">Training</a></h2>
-<h3 id="basic-training"><a class="header" href="#basic-training">Basic training</a></h3>
+<h1 id="training"><a class="header" href="#training">Training</a></h1>
+<h2 id="basic-training"><a class="header" href="#basic-training">Basic training</a></h2>
 <p>Launch a training run with Weights &amp; Biases logging:</p>
 <pre><code class="language-bash">puffer train puffer_drive --wandb --wandb-project "pufferdrive"
 </code></pre>
-<h3 id="environment-configurations"><a class="header" href="#environment-configurations">Environment configurations</a></h3>
+<h2 id="environment-configurations"><a class="header" href="#environment-configurations">Environment configurations</a></h2>
 <p><strong>Default configuration (Waymo maps)</strong></p>
 <p>The default settings in <code>drive.ini</code> are optimized for:</p>
 <ul>
@@ -352,10 +351,10 @@ resample_frequency = 100000 # No resampling needed (there are only a few Carla m
 termination_mode = 0  # 0: terminate at episode_length, 1: terminate after all agents reset
 
 # Map settings
-map_dir = "resources/drive/binaries/carla"
-num_maps = 2
+map_dir = "resources/drive/binaries"
+num_maps = 2 # Number of Carla maps you're training in
 </code></pre>
-<p>this should give a good starting point. With these settings, you’ll need about 2-3 billion steps to get an agent that reaches most of it’s goals (&gt; 95%) and has a combined collsion / off-road rate of 3 % per episode of 300 steps.</p>
+<p>this should give a good starting point. With these settings, you’ll need about 2-3 billion steps to get an agent that reaches most of it’s goals (&gt; 95%) and has a combined collsion / off-road rate of 3 % per episode of 300 steps in town 1 and 2, which can be found <a href="https://github.com/Emerge-Lab/PufferDrive/tree/2.0/data_utils/carla/carla_data">here</a>. Before launching your experiment, run <code>drive.py</code> with the folder to the Carla towns to process them to binaries, then ensure the <code>map_dir</code> above is pointed to these binaries.</p>
 <blockquote class="blockquote-tag blockquote-tag-note">
 <p class="blockquote-tag-title"><svg viewbox="0 0 16 16" width="18" height="18"><path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm8-6.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM6.5 7.75A.75.75 0 0 1 7.25 7h1a.75.75 0 0 1 .75.75v2.75h.25a.75.75 0 0 1 0 1.5h-2a.75.75 0 0 1 0-1.5h.25v-2h-.25a.75.75 0 0 1-.75-.75ZM8 6a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"></path></svg>Note</p>
 <p>The default training hyperparameters work well for both configurations and typically don’t need adjustment.</p>
@@ -1030,7 +1029,7 @@ id       : (num_agents, num_rollouts, 81)
 </ul>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="pufferdrive-20-a-fast-and-friendly-driving-simulator-for-training-and-evaluating-rl-agents"><a class="header" href="#pufferdrive-20-a-fast-and-friendly-driving-simulator-for-training-and-evaluating-rl-agents">PufferDrive 2.0: A fast and friendly driving simulator for training and evaluating RL agents</a></h1>
-<p><strong>Daphne Cornelisse</strong><sup>1*</sup>, <strong>Spencer Cheng</strong><sup>2*</sup>, Pragnay Mandavilli<sup>1</sup>, Julian Hunt<sup>1</sup>, Kevin Joseph<sup>1</sup>, Waël Doulazmi<sup>3, 4</sup>, Valentin Charraut<sup>4</sup>, Aditya Gupta<sup>1</sup>, Eugene Vinitsky<sup>1</sup></p>
+<p><strong>Daphne Cornelisse</strong><sup>1*</sup>, <strong>Spencer Cheng</strong><sup>2*</sup>, Pragnay Mandavilli<sup>1</sup>, Julian Hunt<sup>1</sup>, Kevin Joseph<sup>1</sup>, Waël Doulazmi<sup>3, 4</sup>, Valentin Charraut<sup>4</sup>, Aditya Gupta<sup>1</sup>, Joseph Suarez<sup>2</sup>, Eugene Vinitsky<sup>1</sup></p>
 <p><sup>1</sup> Emerge Lab at NYU Tandon School of Engineering | <sup>2</sup> <a href="https://puffer.ai/">Puffer.ai</a> | <sup>3</sup> Centre for Robotics, Mines Paris - PSL | <sup>4</sup> Valeo | <sup>*</sup> Shared first contributor</p>
 <p><em>December 30, 2025</em></p>
 <blockquote>
@@ -1114,7 +1113,7 @@ id       : (num_agents, num_rollouts, 81)
 <h2 id="citation"><a class="header" href="#citation">Citation</a></h2>
 <p>If you use PufferDrive, please cite:</p>
 <pre><code class="language-bibtex">@software{pufferdrive2025github,
-  author = {Daphne Cornelisse⁕ and Spencer Cheng⁕ and Pragnay Mandavilli and Julian Hunt and Kevin Joseph and Waël Doulazmi and Valentin Charraut and Aditya Gupta and Eugene Vinitsky},
+  author = {Daphne Cornelisse⁕ and Spencer Cheng⁕ and Pragnay Mandavilli and Julian Hunt and Kevin Joseph and Waël Doulazmi and Valentin Charraut and Aditya Gupta and Joseph Suarez and Eugene Vinitsky},
   title = {{PufferDrive}: A Fast and Friendly Driving Simulator for Training and Evaluating {RL} Agents},
   url = {https://github.com/Emerge-Lab/PufferDrive},
   version = {2.0.0},
