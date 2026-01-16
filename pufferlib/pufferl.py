@@ -1093,7 +1093,9 @@ def eval(env_name, args=None, vecenv=None, policy=None):
             import json
 
             print("\nWOSAC_METRICS_START")
-            print(json.dumps(results))
+            id_ = args["load_model_path"]
+            map_results = {id_[-11:-3]: results}
+            save_result("/data/puffer/results/nominal/wosac/wosac.json", map_results)
             print("WOSAC_METRICS_END")
 
         return results
@@ -1120,7 +1122,9 @@ def eval(env_name, args=None, vecenv=None, policy=None):
         import json
 
         print("HUMAN_REPLAY_METRICS_START")
-        print(json.dumps(results))
+        id_ = args["load_model_path"]
+        map_results = {id_[-11:-3]: results}
+        save_result("/data/puffer/results/nominal/logreplay/logreplay.json", map_results)
         print("HUMAN_REPLAY_METRICS_END")
 
         return results
@@ -1358,6 +1362,7 @@ def zero_shot(env_name, args=None, vecenv=None, policies=None):
     evaluator = OtherReplayEvaluator(args, mode=parts[4])
 
     # Run save replay
+    # todo: randomly save the state for calculating log diff
     if args["zero_shot_mode"] == "save-replay":
         results = evaluator.save_replay(args, vecenv, policy1, policy2)
     elif args["zero_shot_mode"] == "replay":
@@ -1385,6 +1390,24 @@ def profile(args=None, env_name=None, vecenv=None, policy=None):
     print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
     prof.export_chrome_trace("trace.json")
 
+def save_result(path, res):
+        import json
+        import os
+        parent = os.path.dirname(os.path.abspath(path))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError):
+            data = []
+        if isinstance(data, dict):
+            data = [data]
+        elif not isinstance(data, list):
+            data = [data]
+        data.append(res)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
 
 def export(args=None, env_name=None, vecenv=None, policy=None, path=None, silent=False):
     args = args or load_config(env_name)
