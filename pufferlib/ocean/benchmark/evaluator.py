@@ -803,9 +803,12 @@ class OtherReplayEvaluator:
             if len(info_list) > 0:  # Happens at the end of episode
                 results = info_list[0]
                 ego_speed /= (time_idx + 1)
-                print(results)
                 results["ego_speed"] = ego_speed.item()
-                res_dict = {f"{args['load_multiple_model_path'][0][-11:-3]}_vs_{args['load_multiple_model_path'][1][-11:-3]}": results}
+                if args['load_multiple_model_path'][1][-11:-3] == args['load_multiple_model_path'][0][-11:-3]:
+                    other_name = "selfplay"
+                else:
+                    other_name = args['load_multiple_model_path'][1][-11:-3]
+                res_dict = {f"{args['load_multiple_model_path'][0][-11:-3]}_vs_{other_name}": results}
                 self.save_result(f"/data/puffer/results/{self.mode}/zeroshot_reactive.json", res_dict)
                 return results
 

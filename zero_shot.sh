@@ -20,14 +20,6 @@ done
 
 echo "Found models: ${EGOS[*]} ${OTHERS[*]}"
 
-# for EGO in "${EGOS[@]}"; do
-#   echo "Running reactive-play: EGO ${EGO} vs ${EGO}"
-#   CUDA_VISIBLE_DEVICES=$GPU_ID puffer zeroshot puffer_drive \
-#     --load-multiple-model-path "/data/puffer/experiments/nominal/puffer_drive_${EGO}.pt" \
-#                                "/data/puffer/experiments/nominal/puffer_drive_${EGO}.pt" \
-#     --zero-shot-mode "save-replay"
-# done
-
 for OTHER in "${OTHERS[@]}"; do
 
   echo "Running reactive-play: OTHER MODE ${MODE} ${OTHER} vs ${OTHER}"
@@ -36,7 +28,6 @@ for OTHER in "${OTHERS[@]}"; do
                                "/data/puffer/experiments/${MODE}/puffer_drive_${OTHER}.pt" \
     --zero-shot-mode "save-replay"
 done
-
 
 for MP1 in "${EGOS[@]}"; do
   for MP2 in "${OTHERS[@]}"; do
