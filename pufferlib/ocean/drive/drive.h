@@ -174,6 +174,7 @@ struct Log {
     float ego_offroad_per_agent;
     float ego_collisions_per_agent;
     float ego_score;
+    float ego_n;
 };
 
 typedef struct Entity Entity;
@@ -388,15 +389,15 @@ void add_log(Drive *env) {
         env->log.speed_at_goal += env->logs[i].speed_at_goal;
         env->log.episode_length += env->logs[i].episode_length;
         env->log.episode_return += env->logs[i].episode_return;
-
         if (i == 0) {
-            env->log.ego_score = (e->goals_reached_this_episode && !e->collided_before_goal) ? 1.0f : 0.0f;
-            env->log.ego_offroad_rate = (float)offroad;
-            env->log.ego_collision_rate = (float)collided;
-            env->log.ego_speed_at_goal = env->logs[i].speed_at_goal;
-            env->log.ego_lane_alignment_rate = (float)lane_aligned;
-            env->log.ego_collisions_per_agent = (float)collisions_per_agent;
-            env->log.ego_offroad_per_agent = (float)offroad_per_agent;
+            env->log.ego_score += (frac_goal_reached > threshold && !collision_occurred) ? 1.0f : 0.0f;
+            env->log.ego_offroad_rate += offroad;
+            env->log.ego_collision_rate += collided;
+            env->log.ego_speed_at_goal += env->logs[i].speed_at_goal;
+            env->log.ego_lane_alignment_rate += lane_aligned;
+            env->log.ego_collisions_per_agent += collisions_per_agent;
+            env->log.ego_offroad_per_agent += offroad_per_agent;
+            env->log.ego_n += 1;
         }
         // Log composition counts per agent so vec_log averaging recovers the per-env value
         env->log.active_agent_count += env->active_agent_count;
@@ -1195,7 +1196,7 @@ void compute_agent_metrics(Drive *env, int agent_idx) {
         agent->current_lane_idx = closest_lane_entity_idx;
         int lane_aligned =
             check_lane_aligned(agent, &env->entities[closest_lane_entity_idx], closest_lane_geometry_idx);
-        agent->metrics_array[LANE_DIST_IDX] = min_distance;
+        agent->metrics_array[LANE_DIST_IDX] = -min_distance; // test for go to lane
         agent->metrics_array[HEADING_DIFF_IDX] = best_heading_diff;
         agent->metrics_array[LANE_ALIGNED_IDX] = lane_aligned;
     }
@@ -2156,6 +2157,7 @@ void c_step(Drive *env) {
             }
             env->entities[agent_idx].metrics_array[REACHED_GOAL_IDX] = 1.0f;
             env->logs[i].speed_at_goal = current_speed;
+            
         }
 
         int lane_aligned = env->entities[agent_idx].metrics_array[LANE_ALIGNED_IDX];

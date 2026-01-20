@@ -662,7 +662,7 @@ class HumanReplayEvaluator:
 
     def __init__(self, config: Dict):
         self.config = config
-        self.sim_steps = 91 - self.config["env"]["init_steps"]
+        self.sim_steps = 91
 
     def rollout(self, args, puffer_env, policy):
         """Roll out policy in env with human replays. Store statistics.
@@ -809,6 +809,7 @@ class OtherReplayEvaluator:
                 else:
                     other_name = args['load_multiple_model_path'][1][-11:-3]
                 res_dict = {f"{args['load_multiple_model_path'][0][-11:-3]}_vs_{other_name}": results}
+                print(res_dict)
                 self.save_result(f"/data/puffer/results/{self.mode}/zeroshot_reactive.json", res_dict)
                 return results
 
@@ -879,9 +880,9 @@ class OtherReplayEvaluator:
                 results = info_list[0]
                 np.save(f"/data/puffer/experiments/{self.mode}/other_action_buffer/other_actions_{args['load_multiple_model_path'][0][-11:-3]}.npy", other_action_buf)
                 ego_speed /= (time_idx + 1)
-                print(results)
                 results["ego_speed"] = ego_speed.item()
                 res_dict = {f"{args['load_multiple_model_path'][0][-11:-3]}_vs_selfplay": results}
+                print(res_dict)
                 self.save_result(f"/data/puffer/results/{self.mode}/zeroshot_replay.json", res_dict)
                 return results
             
@@ -938,8 +939,8 @@ class OtherReplayEvaluator:
             if len(info_list) > 0:  # Happens at the end of episode
                 results = info_list[0]
                 ego_speed /= (time_idx + 1)
-                print(results)
                 results["ego_speed"] = ego_speed.item()
                 res_dict = {f"{args['load_multiple_model_path'][0][-11:-3]}_vs_{args['load_multiple_model_path'][1][-11:-3]}": results}
+                print(res_dict)
                 self.save_result(f"/data/puffer/results/{self.mode}/zeroshot.json", res_dict)
                 return results

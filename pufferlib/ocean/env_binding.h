@@ -582,7 +582,6 @@ static PyObject *vec_log(PyObject *self, PyObject *args) {
     }
 
     PyObject *dict = PyDict_New();
-
     // Only log if we have at least num_agents worth of data
     if (aggregate.n < num_agents) {
         return dict;
@@ -597,11 +596,11 @@ static PyObject *vec_log(PyObject *self, PyObject *args) {
     }
 
     float n = aggregate.n;
-    float n_envs = (float)vec->num_envs;
+    float ego_n = aggregate.ego_n;
     // Average across agents
     for (int i = 0; i < num_keys; i++) {
         if (i >= first_one_index) {
-            ((float *)&aggregate)[i] /= n_envs;
+            ((float *)&aggregate)[i] /= ego_n;
             continue;
         }
         ((float *)&aggregate)[i] /= n;

@@ -1045,6 +1045,7 @@ def eval(env_name, args=None, vecenv=None, policy=None):
     args["env"]["map_dir"] = args["eval"]["map_dir"]
     args["env"]["num_maps"] = args["eval"]["wosac_num_maps"]
     args["env"]["use_all_maps"] = True
+    # args["env"]["report_interval"] = args["eval"]["report_interval"]
     dataset_name = args["env"]["map_dir"].split("/")[-1]
 
     if wosac_enabled:
@@ -1124,6 +1125,7 @@ def eval(env_name, args=None, vecenv=None, policy=None):
         print("HUMAN_REPLAY_METRICS_START")
         id_ = args["load_model_path"]
         map_results = {id_[-11:-3]: results}
+        print(map_results)
         save_result("/data/puffer/results/nominal/logreplay/logreplay.json", map_results)
         print("HUMAN_REPLAY_METRICS_END")
 
@@ -1337,10 +1339,9 @@ def sanity(env_name, args=None):
 def zero_shot(env_name, args=None, vecenv=None, policies=None):
     args = args or load_config(env_name)
     args["env"]["map_dir"] = args["eval"]["map_dir"]
-    args["env"]["num_maps"] = 1000
+    args["env"]["num_maps"] = args["eval"]["wosac_num_maps"]
     args["env"]["use_all_maps"] = True
     dataset_name = args["env"]["map_dir"].split("/")[-1]
-    print(args["env"])
     print(f"Running zero-shot evaluation with {dataset_name} dataset.\n")
     from pufferlib.ocean.benchmark.evaluator import OtherReplayEvaluator
 

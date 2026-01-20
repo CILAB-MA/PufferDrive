@@ -14,6 +14,10 @@ typedef struct {
     float reward_offroad_collision;
     float reward_goal;
     float reward_goal_post_respawn;
+    float reward_lane_dist;
+    float reward_head_diff;
+    float aggressive_speed;
+    float reward_speed;
     float reward_vehicle_collision_post_respawn;
     float goal_radius;
     float goal_speed;
