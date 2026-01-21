@@ -323,6 +323,7 @@ struct Drive {
     float reward_head_diff;
     float reward_lane_dist;
     float reward_speed;
+    float aggressive_speed;
     char *map_name;
     float world_mean_x;
     float world_mean_y;
@@ -331,7 +332,6 @@ struct Drive {
     float reward_goal_post_respawn;
     float goal_radius;
     float goal_speed;
-    float aggressive_speed;
     int max_controlled_agents;
     int logs_capacity;
     int goal_behavior;
@@ -2163,6 +2163,7 @@ void c_step(Drive *env) {
         int lane_aligned = env->entities[agent_idx].metrics_array[LANE_ALIGNED_IDX];
         int lane_distance = env->entities[agent_idx].metrics_array[LANE_DIST_IDX];
         int heading_diff = env->entities[agent_idx].metrics_array[HEADING_DIFF_IDX];
+        
         env->rewards[i] += heading_diff / M_PI * env->reward_head_diff; // heading_diff normalize [0, 1]
         env->rewards[i] += lane_distance / 4.0 * env->reward_lane_dist; // distance threshold 4m 
         env->rewards[i] += (int)aggressive_agent * env->reward_speed; // speed > 100

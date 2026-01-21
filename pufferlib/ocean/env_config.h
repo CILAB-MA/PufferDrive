@@ -72,6 +72,14 @@ static int handler(void *config, const char *section, const char *name, const ch
         env_config->reward_goal_post_respawn = atof(value);
     } else if (MATCH("env", "reward_vehicle_collision_post_respawn")) {
         env_config->reward_vehicle_collision_post_respawn = atof(value);
+    } else if (MATCH("env", "reward_head_diff")) {
+        env_config->reward_head_diff = atof(value);
+    } else if (MATCH("env", "reward_lane_dist")) {
+        env_config->reward_lane_dist = atof(value);
+    } else if (MATCH("env", "aggressive_speed")) {
+        env_config->aggressive_speed = atof(value);
+    } else if (MATCH("env", "reward_speed")) {
+        env_config->reward_speed = atof(value);
     } else if (MATCH("env", "goal_radius")) {
         env_config->goal_radius = atof(value);
     } else if (MATCH("env", "goal_speed")) {

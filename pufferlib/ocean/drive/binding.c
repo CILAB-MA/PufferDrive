@@ -190,7 +190,11 @@ static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
     env->reward_vehicle_collision = conf.reward_vehicle_collision;
     env->reward_offroad_collision = conf.reward_offroad_collision;
     env->reward_goal = conf.reward_goal;
+    env->aggressive_speed = conf.aggressive_speed;
     env->reward_goal_post_respawn = conf.reward_goal_post_respawn;
+    env->reward_head_diff = conf.reward_head_diff;
+    env->reward_lane_dist = conf.reward_lane_dist;
+    env->reward_speed = conf.reward_speed;
     env->episode_length = conf.episode_length;
     env->termination_mode = conf.termination_mode;
     env->collision_behavior = conf.collision_behavior;
