@@ -1774,6 +1774,58 @@ void c_get_road_edge_polylines(Drive *env, float *x_out, float *y_out, int *leng
     }
 }
 
+void c_get_partner_gloabl_state(Drive *env, float *x_out, float *y_out, float *heading_out, int *other_id_out, int *ego_id_out, float *speed_out) {
+    int MAX_PARTNERS = MAX_AGENTS - 1;
+    for (int i = 0; i < env->active_agent_count; i++) {
+        int agent_idx = env->active_agent_indices[i];
+        Entity *agent = &env->entities[agent_idx];
+        ego_id_out[i] = agent_idx;
+        int cars_seen = 0;
+        for (int j = 0; j < MAX_AGENTS; j++) {
+            int index = -1;
+            if (j < env->active_agent_count) {
+                index = env->active_agent_indices[j];
+            } else if (j < env->num_actors) {
+                index = env->static_agent_indices[j - env->active_agent_count];
+            }
+            if (index == -1)
+                continue;
+            if (env->entities[index].type > 3)
+                break;
+            if (index == env->active_agent_indices[i])
+                continue; // Skip Ego
+            Entity *other_entity = &env->entities[index];
+            if (agent->respawn_timestep != -1)
+                continue;
+            if (other_entity->respawn_timestep != -1)
+                continue;
+            // Store original relative positions
+            float dx = other_entity->x - agent->x;
+            float dy = other_entity->y - agent->y;
+            float dist = (dx * dx + dy * dy);
+            if (dist > 2500.0f)
+                continue;
+            // Store global positions
+            float other_x = other_entity->x + env->world_mean_x;
+            float other_y = other_entity->y + env->world_mean_y;
+            float heading_x = other_entity->heading_x;
+            float heading_y = other_entity->heading_y;
+            float other_heading = atan2f(heading_y, heading_x);
+            float other_speed_magnitude =
+                sqrtf(other_entity->vx * other_entity->vx + other_entity->vy * other_entity->vy);
+            int slot = cars_seen;
+            int out = i * MAX_PARTNERS + slot; 
+            
+            x_out[out] = other_x;
+            y_out[out] = other_y;
+            heading_out[out] = other_heading;
+            speed_out[out] = other_speed_magnitude;
+            other_id_out[out] = index;
+            cars_seen++;
+        }
+    }
+}
+
 void compute_observations(Drive *env) {
     int ego_dim = (env->dynamics_model == JERK) ? EGO_FEATURES_JERK : EGO_FEATURES_CLASSIC;
     int max_obs = ego_dim + PARTNER_FEATURES * (MAX_AGENTS - 1) + ROAD_FEATURES * MAX_ROAD_SEGMENT_OBSERVATIONS;

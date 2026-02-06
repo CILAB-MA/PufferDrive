@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+GPU_ID=${1:-0}
+MODE=${2:-nominal}
+EGOS=()
+OTHERS=()
+
+for f in /data/puffer/experiments/nominal/puffer_drive_*.pt; do
+  bn=$(basename "$f") # puffer_drive_xxx.pt
+  id=${bn#puffer_drive_} # xxx.pt
+  id=${id%.pt} # xxx
+  EGOS+=("$id")
+done
+
+for f in /data/puffer/experiments/${MODE}/puffer_drive_*.pt; do
+  bn=$(basename "$f") # puffer_drive_xxx.pt
+  id=${bn#puffer_drive_} # xxx.pt
+  id=${id%.pt} # xxx
+  OTHERS+=("$id")
+done
+
+echo "Found models: ${EGOS[*]}"
+
+for MP1 in "${EGOS[@]}"; do
+  for MP2 in "${OTHERS[@]}"; do
+    echo "Running lp data gathering ${MP1} vs ${MP2}"
+    CUDA_VISIBLE_DEVICES=$GPU_ID puffer linear_probe puffer_drive --load-multiple-model-path "/data/puffer/experiments/nominal/puffer_drive_${MP1}.pt" "/data/puffer/experiments/${MODE}/puffer_drive_${MP2}.pt" --lp-mode evaluate
+  done
+done

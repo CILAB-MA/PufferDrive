@@ -631,6 +631,109 @@ static PyObject *vec_close(PyObject *self, PyObject *args) {
     Py_RETURN_NONE;
 }
 
+static PyObject *get_global_partner_state(PyObject *self, PyObject *args) {
+    if (PyTuple_Size(args) != 6) {
+        PyErr_SetString(PyExc_TypeError, "get_global_partner_state requires 5 arguments");
+        return NULL;
+    }
+
+    Env *env = unpack_env(args);
+    if (!env) {
+        return NULL;
+    }
+
+    Drive *drive = (Drive *)env; // Cast to Drive*
+
+    // Get the numpy arrays from arguments
+    PyObject *x_arr = PyTuple_GetItem(args, 1);
+    PyObject *y_arr = PyTuple_GetItem(args, 2);
+    PyObject *heading_arr = PyTuple_GetItem(args, 3);
+    PyObject *other_id_arr = PyTuple_GetItem(args, 4);
+    PyObject *ego_id_arr = PyTuple_GetItem(args, 5);
+    PyObject *speed_arr = PyTuple_GetItem(args, 6);
+
+    if (!PyArray_Check(x_arr) || !PyArray_Check(y_arr) || !PyArray_Check(heading_arr) ||
+        !PyArray_Check(other_id_arr) || !PyArray_Check(ego_id_arr) || !PyArray_Check(speed_arr)) {
+        PyErr_SetString(PyExc_TypeError, "All output arrays must be NumPy arrays");
+        return NULL;
+    }
+
+    float *x_data = (float *)PyArray_DATA((PyArrayObject *)x_arr);
+    float *y_data = (float *)PyArray_DATA((PyArrayObject *)y_arr);
+    float *heading_data = (float *)PyArray_DATA((PyArrayObject *)heading_arr);
+    int *other_id_data = (int *)PyArray_DATA((PyArrayObject *)other_id_arr);
+    int *ego_id_data = (int *)PyArray_DATA((PyArrayObject *)ego_id_arr);
+    float *speed_data = (float *)PyArray_DATA((PyArrayObject *)speed_arr);
+
+    c_get_partner_gloabl_state(drive, x_data, y_data, heading_data, other_id_data, ego_id_data, speed_data);
+
+    Py_RETURN_NONE;
+}
+
+static PyObject *vec_get_global_partner_state(PyObject *self, PyObject *args) {
+    if (PyTuple_Size(args) != 7) {
+        PyErr_SetString(PyExc_TypeError, "get_global_partner_state requires 5 arguments");
+        return NULL;
+    }
+
+    VecEnv *vec = unpack_vecenv(args);
+    if (!vec) {
+        return NULL;
+    }
+
+    // Get the numpy arrays from arguments
+    PyObject *x_arr = PyTuple_GetItem(args, 1);
+    PyObject *y_arr = PyTuple_GetItem(args, 2);
+    PyObject *heading_arr = PyTuple_GetItem(args, 3);
+    PyObject *other_id_arr = PyTuple_GetItem(args, 4);
+    PyObject *ego_id_arr = PyTuple_GetItem(args, 5);
+    PyObject *speed_arr = PyTuple_GetItem(args, 6);
+
+    if (!PyArray_Check(x_arr) || !PyArray_Check(y_arr) || !PyArray_Check(heading_arr) ||
+        !PyArray_Check(other_id_arr) || !PyArray_Check(ego_id_arr) || !PyArray_Check(speed_arr)) {
+        PyErr_SetString(PyExc_TypeError, "All output arrays must be NumPy arrays");
+        return NULL;
+    }
+
+    PyArrayObject *x_array = (PyArrayObject *)x_arr;
+    PyArrayObject *y_array = (PyArrayObject *)y_arr;
+    PyArrayObject *heading_array = (PyArrayObject *)heading_arr;
+    PyArrayObject *other_id_array = (PyArrayObject *)other_id_arr;
+    PyArrayObject *ego_id_array = (PyArrayObject *)ego_id_arr;
+    PyArrayObject *speed_array = (PyArrayObject *)speed_arr;
+
+    // Get base pointers to the arrays
+    float *x_base = (float *)PyArray_DATA(x_array);
+    float *y_base = (float *)PyArray_DATA(y_array);
+    float *heading_base = (float *)PyArray_DATA(heading_array);
+    int *other_id_base = (int *)PyArray_DATA(other_id_array);
+    int *ego_id_base = (int *)PyArray_DATA(ego_id_array);
+    float *speed_base = (float *)PyArray_DATA(speed_array);
+
+    int MAX_PARTNERS = MAX_AGENTS - 1;
+    // Iterate through environments and write to correct offsets
+    int agent_offset = 0;
+    for (int i = 0; i < vec->num_envs; i++) {
+        Drive *drive = (Drive *)vec->envs[i];
+        int partner_offset = agent_offset * MAX_PARTNERS;
+        // Write to the arrays at the current offset
+        c_get_partner_gloabl_state(
+            drive,
+            x_base + partner_offset,
+            y_base + partner_offset,
+            heading_base + partner_offset,
+            other_id_base + partner_offset,
+            ego_id_base + agent_offset,
+            speed_base + partner_offset
+        );
+
+        // Move offset forward by the number of agents in this environment
+        agent_offset += drive->active_agent_count;
+    }
+
+    Py_RETURN_NONE;
+}
+
 static PyObject *get_global_agent_state(PyObject *self, PyObject *args) {
     if (PyTuple_Size(args) != 7) {
         PyErr_SetString(PyExc_TypeError, "get_global_agent_state requires 7 arguments");
@@ -975,6 +1078,8 @@ static PyMethodDef methods[] = {
     {"shared", (PyCFunction)my_shared, METH_VARARGS | METH_KEYWORDS, "Shared state"},
     {"get_global_agent_state", get_global_agent_state, METH_VARARGS, "Get global agent state"},
     {"vec_get_global_agent_state", vec_get_global_agent_state, METH_VARARGS, "Get agent state from vectorized env"},
+    {"get_global_partner_state", get_global_partner_state, METH_VARARGS, "Get global parnter state"},
+    {"vec_get_global_partner_state", vec_get_global_partner_state, METH_VARARGS, "Get partner state from vectorized env"},
     {"get_ground_truth_trajectories", get_ground_truth_trajectories, METH_VARARGS, "Get ground truth trajectories"},
     {"vec_get_global_ground_truth_trajectories", vec_get_global_ground_truth_trajectories, METH_VARARGS,
      "Get ground truth trajectories from vectorized env"},

@@ -330,6 +330,36 @@ class Drive(pufferlib.PufferEnv):
 
         return states
 
+    def get_global_partner_state(self):
+        """Get current global state of all active agents.
+
+        Returns:
+            dict with keys 'x', 'y', 'heading', 'id', 'speed', containing numpy arrays
+            of shape (num_active_agents,)
+        """
+        num_agents = self.num_agents
+        num_partners = self.max_partner_objects
+        states = {
+            "x": np.zeros((num_agents, num_partners), dtype=np.float32),
+            "y": np.zeros((num_agents, num_partners), dtype=np.float32),
+            "heading": np.zeros((num_agents, num_partners), dtype=np.float32),
+            "other_id": np.full((num_agents, num_partners), -1, dtype=np.int32),
+            "ego_id": np.full((num_agents, ), -1, dtype=np.int32),
+            "speed": np.zeros((num_agents, num_partners), dtype=np.float32),
+        }
+
+        binding.vec_get_global_partner_state(
+            self.c_envs,
+            states["x"],
+            states["y"],
+            states["heading"],
+            states["other_id"],
+            states["ego_id"],
+            states["speed"],
+        )
+
+        return states
+
     def get_ground_truth_trajectories(self):
         """Get ground truth trajectories for all active agents.
 

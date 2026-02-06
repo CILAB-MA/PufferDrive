@@ -948,9 +948,6 @@ class WandbLogger:
         self.run_id = wandb.run.id
 
     def log(self, logs, step):
-        keys_to_delete = [k for k in logs if ("ego_" in k) or (k in ["environment/num_envs", "environment/map_ids", "environment/agent_offsets"])]
-        for k in keys_to_delete:
-            del logs[k]
         self.wandb.log(logs, step=step)
 
     def close(self, model_path):
@@ -1044,8 +1041,7 @@ def eval(env_name, args=None, vecenv=None, policy=None):
     human_replay_enabled = args["eval"]["human_replay_eval"]
     args["env"]["map_dir"] = args["eval"]["map_dir"]
     args["env"]["num_maps"] = args["eval"]["wosac_num_maps"]
-    args["env"]["use_all_maps"] = True
-    # args["env"]["report_interval"] = args["eval"]["report_interval"]
+    args["env"]["sequential_map_sampling"] = True
     dataset_name = args["env"]["map_dir"].split("/")[-1]
 
     if wosac_enabled:
@@ -1096,7 +1092,7 @@ def eval(env_name, args=None, vecenv=None, policy=None):
             print("\nWOSAC_METRICS_START")
             id_ = args["load_model_path"]
             map_results = {id_[-11:-3]: results}
-            save_result("/data/puffer/results/nominal/wosac/wosac.json", map_results)
+            save_result("/data/puffer/results/nominal/wosac.json", map_results)
             print("WOSAC_METRICS_END")
 
         return results
@@ -1126,7 +1122,7 @@ def eval(env_name, args=None, vecenv=None, policy=None):
         id_ = args["load_model_path"]
         map_results = {id_[-11:-3]: results}
         print(map_results)
-        save_result("/data/puffer/results/nominal/logreplay/logreplay.json", map_results)
+        save_result("/data/puffer/results/nominal/logreplay.json", map_results)
         print("HUMAN_REPLAY_METRICS_END")
 
         return results
@@ -1340,7 +1336,7 @@ def zero_shot(env_name, args=None, vecenv=None, policies=None):
     args = args or load_config(env_name)
     args["env"]["map_dir"] = args["eval"]["map_dir"]
     args["env"]["num_maps"] = args["eval"]["wosac_num_maps"]
-    args["env"]["use_all_maps"] = True
+    args["env"]["sequential_map_sampling"] = True
     dataset_name = args["env"]["map_dir"].split("/")[-1]
     print(f"Running zero-shot evaluation with {dataset_name} dataset.\n")
     from pufferlib.ocean.benchmark.evaluator import OtherReplayEvaluator
@@ -1371,6 +1367,53 @@ def zero_shot(env_name, args=None, vecenv=None, policies=None):
     elif args["zero_shot_mode"] == "reactive-play":
         results = evaluator.play_reactive(args, vecenv, policy1, policy2)
     return results
+
+def linear_probe(env_name, args=None, vecenv=None, policy=None):
+    from pufferlib.ocean.benchmark.linear_probe import LinearProbe
+    args = args or load_config(env_name)
+    args["env"]["map_dir"] = args["eval"]["map_dir"]
+    # args["env"]["num_maps"] = args["eval"]["wosac_num_maps"]
+    args["env"]["num_maps"] = 300
+    args["env"]["sequential_map_sampling"] = True
+    dataset_name = args["env"]["map_dir"].split("/")[-1]
+    print(f"Running linear_probing with {dataset_name} dataset.\n")
+    from pufferlib.ocean.benchmark.evaluator import OtherReplayEvaluator
+
+    backend = args["eval"].get("backend", "PufferEnv")
+    args["vec"] = dict(backend=backend, num_envs=1)
+    # args["env"]["control_mode"] = args["eval"]["human_replay_control_mode"]
+    args["env"]["episode_length"] = 91  # WOMD scenario length
+
+    vecenv = vecenv or load_env(env_name, args)
+    args2 = args.copy()
+    args["load_model_path"] = args["load_multiple_model_path"][0]
+    policy1 = load_policy(args, vecenv, env_name)
+    if "generate" == args["lp_mode"]:
+        policy2 = None
+    else:
+        args2["load_model_path"] = args["load_multiple_model_path"][1]
+        policy2 = load_policy(args2, vecenv, env_name)
+    vecenv = vecenv or load_env(env_name, args)
+    policy = policy or load_policy(args, vecenv, env_name)
+    lp_module = LinearProbe(args)
+    if "generate" in args["lp_mode"]:
+        lp_module.make_dataset(args, vecenv, policy1, policy2)
+    elif args["lp_mode"] == "train":
+        lp_module.train(args, policy1, 10)
+        lp_module.train(args, policy1, 20)
+        lp_module.train(args, policy1, 30)
+        lp_module.train(args, policy1, 40)
+    elif args["lp_mode"] == "evaluate":
+        other_model_id = args["load_multiple_model_path"][1][-11:-3]
+        lp_module.evaluate(args, policy1, other_model_id, 10)
+        lp_module.evaluate(args, policy1, other_model_id, 20)
+        lp_module.evaluate(args, policy1, other_model_id, 30)
+        lp_module.evaluate(args, policy1, other_model_id, 40)
+
+        lp_module.evaluate(args, policy1, other_model_id, 10, mode="replay")
+        lp_module.evaluate(args, policy1, other_model_id, 20, mode="replay")
+        lp_module.evaluate(args, policy1, other_model_id, 30, mode="replay")
+        lp_module.evaluate(args, policy1, other_model_id, 40, mode="replay")
 
 def profile(args=None, env_name=None, vecenv=None, policy=None):
     args = load_config()
@@ -1526,6 +1569,9 @@ def load_config(env_name, config_dir=None):
     parser.add_argument('--zero-shot-mode', type=str, default='save-replay', 
         choices=['reactive-play', 'replay', 'save-replay']
     )
+    parser.add_argument('--lp-mode', type=str, default='generate', 
+        choices=['generate', 'train', 'evaluate', 'generate_replay', 'generate_reactive']
+    )
     parser.add_argument(
         "--load-id", type=str, default=None, help="Kickstart/eval from from a finished Wandb/Neptune run"
     )
@@ -1614,6 +1660,8 @@ def main():
         sweep(env_name=env_name)
     elif mode == "zeroshot":
         zero_shot(env_name=env_name)
+    elif mode == "linear_probe":
+        linear_probe(env_name=env_name)
     elif mode == "controlled_exp":
         controlled_exp(env_name=env_name)
     elif mode == "autotune":

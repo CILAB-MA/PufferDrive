@@ -22,7 +22,7 @@ echo "Found models: ${EGOS[*]} ${OTHERS[*]}"
 
 for OTHER in "${OTHERS[@]}"; do
 
-  echo "Running reactive-play: OTHER MODE ${MODE} ${OTHER} vs ${OTHER}"
+  echo "Running save-replay: OTHER MODE ${MODE} ${OTHER} vs ${OTHER}"
   CUDA_VISIBLE_DEVICES=$GPU_ID puffer zeroshot puffer_drive \
     --load-multiple-model-path "/data/puffer/experiments/${MODE}/puffer_drive_${OTHER}.pt" \
                                "/data/puffer/experiments/${MODE}/puffer_drive_${OTHER}.pt" \
