@@ -1388,11 +1388,11 @@ def linear_probe(env_name, args=None, vecenv=None, policy=None):
     args2 = args.copy()
     args["load_model_path"] = args["load_multiple_model_path"][0]
     policy1 = load_policy(args, vecenv, env_name)
-    if "generate" == args["lp_mode"]:
-        policy2 = None
-    else:
+    if "generate_" in args["lp_mode"]:
         args2["load_model_path"] = args["load_multiple_model_path"][1]
         policy2 = load_policy(args2, vecenv, env_name)
+    else:
+        policy2 = None
     vecenv = vecenv or load_env(env_name, args)
     policy = policy or load_policy(args, vecenv, env_name)
     lp_module = LinearProbe(args)
