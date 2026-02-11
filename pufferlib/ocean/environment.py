@@ -181,6 +181,7 @@ def make_multiagent(buf=None, **kwargs):
 
 MAKE_FUNCTIONS = {
     "drive": "Drive",
+    "drive_pbt": "Drive_PBT",
     "spaces": make_spaces,
     "multiagent": make_multiagent,
 }

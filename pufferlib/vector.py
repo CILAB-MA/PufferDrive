@@ -314,6 +314,7 @@ class Multiprocessing:
         is_native = isinstance(driver_env, PufferEnv)
         self.emulated = False if is_native else driver_env.emulated
         self.num_agents = num_agents = driver_env.num_agents * num_envs
+        self.num_agents_per_env = driver_env.num_agents
         self.agents_per_batch = driver_env.num_agents * batch_size
         agents_per_worker = driver_env.num_agents * envs_per_worker
         obs_space = driver_env.single_observation_space
