@@ -60,7 +60,7 @@ ADVANTAGE_CUDA = shutil.which("nvcc") is not None
 
 
 class PuffeRL:
-    def __init__(self, config, vecenv, policy, other_policies=None, logger=None):
+    def __init__(self, config, vecenv, policy, logger=None, other_policies=None):
         # Backend perf optimization
         torch.set_float32_matmul_precision("high")
         torch.backends.cudnn.deterministic = config["torch_deterministic"]
@@ -134,7 +134,7 @@ class PuffeRL:
             self.lstm_c = {i * n: torch.zeros(n, h, device=device) for i in range(total_agents // n)}
 
             if config["use_pbt"]:
-                self.ego_ratio = 0.5 # This should be divided with the segments & n
+                self.ego_ratio = 1.0 # This should be divided with the segments & n
                 num_ego = int(n * self.ego_ratio)
                 num_other_policies = len(other_policies)
                 num_other = n - num_ego
@@ -220,7 +220,7 @@ class PuffeRL:
             if config["use_pbt"]:
                 self.other_policies = [torch.compile(other_policy, mode=config["compile_mode"]) for other_policy in self.other_policies]
                 self.other_policies_forward_eval = [torch.compile(other_policy, mode=config["compile_mode"]) for other_policy in self.other_policies]
-
+        print(f"total_minibatches: {self.total_minibatches}, minibatch_size: {self.minibatch_size}, ego_segments: {ego_segments}, segments: {segments}")
         # Optimizer
         if config["optimizer"] == "adam":
             optimizer = torch.optim.Adam(
@@ -313,8 +313,8 @@ class PuffeRL:
                     self.other_lstm_cs[l][k] = torch.zeros(self.other_lstm_cs[l][k].shape, device=device)
     
         self.full_rows = 0
-        ego_iter = 0
         ego_indices = np.random.choice(self.agents_per_batch, size=int(self.ego_ratio * self.agents_per_batch), replace=False)
+        ego_indices = np.arange(self.agents_per_batch)
         ego_set = set(map(int, ego_indices))
         pool = np.array([i for i in range(self.agents_per_batch) if i not in ego_set], dtype=np.int64)
         pool = np.random.permutation(pool)
@@ -417,7 +417,6 @@ class PuffeRL:
                 self.values[ego_batch_rows, l] = value_ego.flatten()
                 # Note: We are not yet handling masks in this version
                 self.ep_lengths[env_id] += 1
-                ego_iter += 1   
                 if l + 1 >= config["bptt_horizon"]:
                     num_full = env_id.stop - env_id.start
                     self.ep_indices[env_id] = self.free_idx + torch.arange(num_full, device=config["device"]).int()
@@ -436,7 +435,6 @@ class PuffeRL:
                     if isinstance(logits_other, torch.distributions.Normal):
                         action_other = np.clip(action_other, self.vecenv.action_space.low, self.vecenv.action_space.high)
                     total_actions[other_idx] = action_other.cpu().numpy()
-
 
             profile("eval_misc", epoch)
             for i in info:
