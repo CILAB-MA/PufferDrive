@@ -134,7 +134,7 @@ class PuffeRL:
             self.lstm_c = {i * n: torch.zeros(n, h, device=device) for i in range(total_agents // n)}
 
             if config["use_pbt"]:
-                self.ego_ratio = 0.25 # This should be divided with the segments & n
+                self.ego_ratio = 1.0 # This should be divided with the segments & n
                 num_ego = int(n * self.ego_ratio)
                 num_other_policies = len(other_policies)
                 num_other = n - num_ego
@@ -154,7 +154,6 @@ class PuffeRL:
             
         if config["use_pbt"]:
             ego_segments = int(segments * self.ego_ratio)
-            print(f"ego segments: {ego_segments} / total segments: {segments} num_ego: {int(n * self.ego_ratio)} / total per batch: {n}")
             self.observations = torch.zeros(
             ego_segments,
             horizon,
@@ -784,7 +783,6 @@ class PuffeRL:
                 return logs
             else:
                 return None
-
         self.logger.log(logs, agent_steps)
         return logs
 
@@ -1169,8 +1167,7 @@ class WandbLogger:
 
     def log(self, logs, step):
         ignore_keys = {"environment/num_envs", "environment/agent_offsets", "environment/map_ids"}
-        logs = {k: v for k, v in logs.items() if (k not in ignore_keys) or ("ego" not in k)}
-        print(logs)
+        logs = {k: v for k, v in logs.items() if (k not in ignore_keys) and ("ego" not in k)}
         self.wandb.log(logs, step=step)
 
     def close(self, model_path):
