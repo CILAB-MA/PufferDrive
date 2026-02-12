@@ -134,7 +134,7 @@ class PuffeRL:
             self.lstm_c = {i * n: torch.zeros(n, h, device=device) for i in range(total_agents // n)}
 
             if config["use_pbt"]:
-                self.ego_ratio = 1.0 # This should be divided with the segments & n
+                self.ego_ratio = 0.5 # This should be divided with the segments & n
                 num_ego = int(n * self.ego_ratio)
                 num_other_policies = len(other_policies)
                 num_other = n - num_ego
@@ -205,19 +205,21 @@ class PuffeRL:
         # Torch compile
         self.uncompiled_policy = policy
         self.policy = policy
-        # Torch compile (other)
-        self.uncompiled_other_policy = other_policies
-        self.other_policies = []
-        for other_policy in other_policies:
-            self.other_policies.append(other_policy.eval())
+        if config["use_pbt"]:
+            # Torch compile (other)
+            self.uncompiled_other_policy = other_policies
+            self.other_policies = []
+            for other_policy in other_policies:
+                self.other_policies.append(other_policy.eval())
         if config["compile"]:
             self.policy = torch.compile(policy, mode=config["compile_mode"])
             self.policy.forward_eval = torch.compile(policy, mode=config["compile_mode"])
             pufferlib.pytorch.sample_logits = torch.compile(
                 pufferlib.pytorch.sample_logits, mode=config["compile_mode"]
             )
-            self.other_policies = [torch.compile(other_policy, mode=config["compile_mode"]) for other_policy in self.other_policies]
-            self.other_policies_forward_eval = [torch.compile(other_policy, mode=config["compile_mode"]) for other_policy in self.other_policies]
+            if config["use_pbt"]:
+                self.other_policies = [torch.compile(other_policy, mode=config["compile_mode"]) for other_policy in self.other_policies]
+                self.other_policies_forward_eval = [torch.compile(other_policy, mode=config["compile_mode"]) for other_policy in self.other_policies]
 
         # Optimizer
         if config["optimizer"] == "adam":
