@@ -134,7 +134,7 @@ class PuffeRL:
             self.lstm_c = {i * n: torch.zeros(n, h, device=device) for i in range(total_agents // n)}
 
             if config["use_pbt"]:
-                self.ego_ratio = 1.0 # This should be divided with the segments & n
+                self.ego_ratio = 0.25 # This should be divided with the segments & n
                 num_ego = int(n * self.ego_ratio)
                 num_other_policies = len(other_policies)
                 num_other = n - num_ego
@@ -220,7 +220,6 @@ class PuffeRL:
             if config["use_pbt"]:
                 self.other_policies = [torch.compile(other_policy, mode=config["compile_mode"]) for other_policy in self.other_policies]
                 self.other_policies_forward_eval = [torch.compile(other_policy, mode=config["compile_mode"]) for other_policy in self.other_policies]
-        print(f"total_minibatches: {self.total_minibatches}, minibatch_size: {self.minibatch_size}, ego_segments: {ego_segments}, segments: {segments}")
         # Optimizer
         if config["optimizer"] == "adam":
             optimizer = torch.optim.Adam(
@@ -314,10 +313,9 @@ class PuffeRL:
     
         self.full_rows = 0
         ego_indices = np.random.choice(self.agents_per_batch, size=int(self.ego_ratio * self.agents_per_batch), replace=False)
-        ego_indices = np.arange(self.agents_per_batch)
         ego_set = set(map(int, ego_indices))
         pool = np.array([i for i in range(self.agents_per_batch) if i not in ego_set], dtype=np.int64)
-        pool = np.random.permutation(pool)
+        # pool = np.random.permutation(pool)
         other_indices = []
         p = 0
         for i, count in enumerate(self.other_counts):
@@ -1303,7 +1301,7 @@ def train_pbt(env_name, args=None, vecenv=None, policy=None, logger=None):
         logger = WandbLogger(args)
 
     train_config = dict(**args["train"], **args["pbt"],env=env_name, eval=args.get("eval", {}))
-    pufferl = PuffeRL(train_config, vecenv, policy, policies, logger)
+    pufferl = PuffeRL(train_config, vecenv, policy, logger, policies)
 
     all_logs = []
     while pufferl.global_step < train_config["total_timesteps"]:
