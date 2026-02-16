@@ -1288,7 +1288,7 @@ class WandbLogger:
         self.run_id = wandb.run.id
 
     def log(self, logs, step):
-        ignore_keys = {"environment/num_envs", "environment/agent_offsets", "environment/map_ids"}
+        ignore_keys = {"environment/num_envs", "environment/agent_offsets", "environment/map_ids", "environment/other_indices"}
         logs = {k: v for k, v in logs.items() if (k not in ignore_keys) and ("ego" not in k)}
         self.wandb.log(logs, step=step)
 
