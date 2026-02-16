@@ -443,7 +443,7 @@ class PuffeRL:
                         offset = self.num_agents_per_env * i
                         self.ego_indices.extend((ego + offset).tolist())
                         for n in range(self.num_other_policies):
-                            other = np.asarray(info_i[n]["other_indices"], dtype=np.int64)
+                            other = np.asarray(info_i["other_indices"][n], dtype=np.int64)
                             self.other_indices[n].extend((other + offset).tolist())
                         
             profile("eval_misc", epoch)
@@ -469,9 +469,6 @@ class PuffeRL:
             mask_others = []
 
             for other_idx in self.other_indices:
-                other_mask_tmp = other_mask.clone()
-                other_mask_tmp[other_idx] = True
-                other_masks.append(other_mask_tmp)
                 o_others.append(o[other_idx].to(device))
                 r_others.append(r[other_idx])
                 d_others.append(d[other_idx])
@@ -863,14 +860,18 @@ class PuffeRL:
             and self.config["eval"]["wosac_realism_eval"]
             and (((self.epoch - 1) % self.config["eval"]["eval_interval"] == 0) or done_training)
         ):
-            pufferlib.utils.run_wosac_eval_in_subprocess(self.config, self.logger, self.global_step)
+            config = self.config.copy()
+            config["env"] = "puffer_drive"
+            pufferlib.utils.run_wosac_eval_in_subprocess(config, self.logger, self.global_step)
 
         if (
             self.epoch > 1
             and self.config["eval"]["human_replay_eval"]
             and (((self.epoch - 1) % self.config["eval"]["eval_interval"] == 0) or done_training)
         ):
-            pufferlib.utils.run_human_replay_eval_in_subprocess(self.config, self.logger, self.global_step)
+            config = self.config.copy()
+            config["env"] = "puffer_drive"
+            pufferlib.utils.run_human_replay_eval_in_subprocess(config, self.logger, self.global_step)
 
 
     def mean_and_log(self):
@@ -1395,8 +1396,9 @@ def train_pbt(env_name, args=None, vecenv=None, policy=None, logger=None):
         f for f in os.listdir(args["pbt"]["population_path"])
         if f.endswith(".pt")
     ]
-    policies = []
+    policies = None
     if args["pbt"]["pbt_mode"] == "reactive":
+        policies = []
         for op in populations:
             args2 = args.copy()
             args2["load_model_path"] = os.path.join(args["pbt"]["population_path"], op)

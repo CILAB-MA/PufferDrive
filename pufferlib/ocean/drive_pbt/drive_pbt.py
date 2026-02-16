@@ -217,7 +217,7 @@ class Drive_PBT(pufferlib.PufferEnv):
         self.ego_ratio = ego_ratio
         self.population_path = population_path
         self.pbt_mode = pbt_mode
-
+        self._allocate_ego_indices(self.num_agents)
         if pbt_mode == "replay":
             # Load Replay
             npz = np.load(os.path.join(self.population_path, "replay", "other_actions_int16.npz"), allow_pickle=True)
@@ -226,12 +226,20 @@ class Drive_PBT(pufferlib.PufferEnv):
             self.actions_map_id = npz['map_ids']
             del npz
             self._allocate_replay(self.num_agents, self.map_ids)
-        self._allocate_ego_indices(self.num_agents)
+        else:
+            populations = [
+                f for f in os.listdir(population_path)
+                if f.endswith(".pt")
+            ]
+            self.num_other_policies = len(populations)
+            self._allocate_other_indices(self.num_agents)
 
     def reset(self, seed=0):    
         binding.vec_reset(self.c_envs, seed)
         self.tick = 0
         info = [{"agent_offsets": self.agent_offsets, "map_ids": self.map_ids, "num_envs": self.num_envs, "ego_indices": self.ego_indices}]
+        if self.pbt_mode == "reactive":
+            info[0]["other_indices"] = self.other_indices
         return self.observations[self.ego_indices], info
 
     def _allocate_ego_indices(self, num_agents):
@@ -239,6 +247,12 @@ class Drive_PBT(pufferlib.PufferEnv):
         self.ego_indices = np.random.choice(num_agents, size=num_ego, replace=False)
         self.other_mask = np.ones(num_agents, dtype=bool)
         self.other_mask[self.ego_indices] = False
+
+    def _allocate_other_indices(self, num_agents):
+        other_indices = np.setdiff1d(np.arange(num_agents), self.ego_indices, assume_unique=False)
+        np.random.shuffle(other_indices)
+        splits = np.array_split(other_indices, self.num_other_policies)
+        self.other_indices = [s.astype(np.int64, copy=False) for s in splits]
 
     def _allocate_replay(self, num_agents, map_ids):
         self.replay_actions = np.zeros((num_agents, self.resample_frequency, 1), dtype=np.int32)
@@ -261,7 +275,7 @@ class Drive_PBT(pufferlib.PufferEnv):
             # allocate replay actions
             replay_actions_t = self.replay_actions[:, self.tick, :]
             self.actions[self.other_mask] = replay_actions_t[self.other_mask]
-
+        print((self.actions.squeeze(-1) == 0).sum(), self.actions.shape)
         binding.vec_step(self.c_envs)
         self.tick += 1
         info = []
@@ -290,10 +304,15 @@ class Drive_PBT(pufferlib.PufferEnv):
             self.agent_offsets = agent_offsets
             self.map_ids = map_ids
             self.num_envs = num_envs
-            self._allocate_replay(self.num_agents, self.map_ids)
             self._allocate_ego_indices(self.num_agents)
+            if self.pbt_mode == "replay":
+                self._allocate_replay(self.num_agents, self.map_ids)
+            else:
+                self._allocate_other_indices(self.num_agents)
             if len(info) == 0:
                 info = [{"agent_offsets": self.agent_offsets, "map_ids": self.map_ids, "num_envs": self.num_envs, "ego_indices": self.ego_indices}]
+                if self.pbt_mode == "reactive":
+                    info[0]["other_indices"] = self.other_indices
             env_ids = []
             seed = np.random.randint(0, 2**32 - 1)
             for i in range(num_envs):
