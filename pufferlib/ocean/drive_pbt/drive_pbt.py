@@ -47,7 +47,9 @@ class Drive_PBT(pufferlib.PufferEnv):
         control_mode="control_vehicles",
         map_dir="resources/drive/binaries/training",
         sequential_map_sampling=False,
-        train_mode="reactive", # for pbt
+        pbt_mode="reactive", # for pbt
+        population_path=None, # for replay
+        ego_ratio=0.0, # for replay
     ):
         # env
         self.dt = dt
@@ -212,16 +214,51 @@ class Drive_PBT(pufferlib.PufferEnv):
             )
             env_ids.append(env_id)
         self.c_envs = binding.vectorize(*env_ids)
-    
-    def reset(self, seed=0):
+        self.ego_ratio = ego_ratio
+        self.population_path = population_path
+        if pbt_mode == "replay":
+            # Load Replay
+            npz = np.load(os.path.join(self.population_path, "replay", "other_actions_int16.npz"), allow_pickle=True)
+            self.other_actions = npz['actions']
+            self.actions_agent_offsets = npz['agent_offsets']
+            self.actions_map_id = npz['map_ids']
+            del npz
+            self._allocate_replay(self.num_agents, self.map_ids)
+        self._allocate_ego_indices(self.num_agents)
+
+    def reset(self, seed=0):    
         binding.vec_reset(self.c_envs, seed)
         self.tick = 0
-        info = [{"agent_offsets": self.agent_offsets, "map_ids": self.map_ids, "num_envs": self.num_envs}]
-        return self.observations, info
+        info = [{"agent_offsets": self.agent_offsets, "map_ids": self.map_ids, "num_envs": self.num_envs, "ego_indices": self.ego_indices}]
+        return self.observations[self.ego_indices], info
+
+    def _allocate_ego_indices(self, num_agents):
+        num_ego = int(num_agents * self.ego_ratio)
+        self.ego_indices = np.random.choice(num_agents, size=num_ego, replace=False)
+        self.other_mask = np.ones(num_agents, dtype=bool)
+        self.other_mask[self.ego_indices] = False
+
+    def _allocate_replay(self, num_agents, map_ids):
+        self.replay_actions = np.zeros((num_agents, self.resample_frequency, 1), dtype=np.int32)
+        agent_ind = 0
+        for _, map_id in enumerate(map_ids):
+            num_rollout = self.other_actions.shape[0]
+            sample_ind = np.random.randint(0, num_rollout)
+            map_indices = np.where(self.actions_map_id[sample_ind] == map_id)[0][0]
+            agent_offsets = self.actions_agent_offsets[sample_ind, map_indices:map_indices+2]
+            num_agents_for_map = agent_offsets[1] - agent_offsets[0]
+            if agent_ind + num_agents_for_map> num_agents:
+                num_agents_for_map = num_agents - agent_ind
+            self.replay_actions[agent_ind:agent_ind+num_agents_for_map] = self.other_actions[sample_ind, agent_offsets[0]:agent_offsets[0] + num_agents_for_map].copy()
+            agent_ind += num_agents_for_map
 
     def step(self, actions):
         self.terminals[:] = 0
-        self.actions[:] = actions
+        self.actions = actions
+        # allocate replay actions
+        replay_actions_t = self.replay_actions[:, self.tick, :]
+        self.actions[self.other_mask] = replay_actions_t[self.other_mask]
+
         binding.vec_step(self.c_envs)
         self.tick += 1
         info = []
@@ -250,6 +287,10 @@ class Drive_PBT(pufferlib.PufferEnv):
             self.agent_offsets = agent_offsets
             self.map_ids = map_ids
             self.num_envs = num_envs
+            self._allocate_replay(self.num_agents, self.map_ids)
+            self._allocate_ego_indices(self.num_agents)
+            if len(info) == 0:
+                info = [{"agent_offsets": self.agent_offsets, "map_ids": self.map_ids, "num_envs": self.num_envs, "ego_indices": self.ego_indices}]
             env_ids = []
             seed = np.random.randint(0, 2**32 - 1)
             for i in range(num_envs):
@@ -295,7 +336,7 @@ class Drive_PBT(pufferlib.PufferEnv):
             binding.vec_reset(self.c_envs, seed)
             self.terminals[:] = 1
         # print(f"Rewards {self.rewards.max()} {self.rewards.mean()}")
-        return (self.observations, self.rewards, self.terminals, self.truncations, info)
+        return (self.observations[self.ego_indices], self.rewards[self.ego_indices], self.terminals[self.ego_indices], self.truncations[self.ego_indices], info)
 
     def get_global_agent_state(self):
         """Get current global state of all active agents.

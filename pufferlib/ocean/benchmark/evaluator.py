@@ -716,7 +716,7 @@ class HumanReplayEvaluator:
 class OtherReplayEvaluator:
     """Evaluates policies against other policies replays in PufferDrive."""
 
-    def __init__(self, config: Dict, mode: str):
+    def __init__(self, config: Dict, mode: str = None):
         self.config = config
         self.mode = mode
         self.sim_steps = 91
@@ -944,3 +944,78 @@ class OtherReplayEvaluator:
                 print(res_dict)
                 self.save_result(f"/data/puffer/results/{self.mode}/zeroshot.json", res_dict)
                 return results
+
+    def collect_rollouts(self, args, puffer_env, policies):
+        import numpy as np
+        import torch
+        import pufferlib
+
+        num_agents = puffer_env.observation_space.shape[0]
+        device = args["train"]["device"]
+        obs, info_list = puffer_env.reset()
+        map_ids = puffer_env.map_ids.copy()
+        agent_offsets = puffer_env.agent_offsets.copy()
+        print(len(agent_offsets), len(map_ids), obs.shape)
+        pool = np.array([i for i in range(obs.shape[0])], dtype=np.int64)
+        pool = np.random.permutation(pool)
+        base, rem = divmod(obs.shape[0], len(policies))
+        counts = [base + (i < rem) for i in range(len(policies))]
+        other_indices = []
+        p = 0
+        states = []
+        for i, count in enumerate(counts):
+            indices = pool[p:p+count]
+            p += count
+            other_indices.append(indices)
+            states.append(dict(
+                lstm_h=torch.zeros(count, policies[i].hidden_size, device=device),
+                lstm_c=torch.zeros(count, policies[i].hidden_size, device=device),
+            ))
+        other_action_buf = np.zeros((obs.shape[0], args["env"]["resample_frequency"], 1))
+        os.makedirs(f"{args['pbt']['population_path']}/replay", exist_ok=True)
+        ego_speed = 0
+        total_results = []
+        for time_idx in range(args["env"]["resample_frequency"]):
+            # Step policy
+            with torch.no_grad():
+                total_actions = np.zeros((obs.shape[0], 1), dtype=np.int64)
+                ob_tensor = torch.as_tensor(obs).to(device)
+
+                for policy_idx, policy in enumerate(policies):
+                    other_mask = np.isin(np.arange(num_agents), other_indices[policy_idx])
+                    # other action
+                    ob_other = ob_tensor[other_mask]
+                    logits_other, value_other = policy.forward_eval(ob_other, states[policy_idx])
+                    action_other, logprob_other, _ = pufferlib.pytorch.sample_logits(logits_other)
+                    action_other = action_other.cpu().numpy()
+                    if isinstance(logits_other, torch.distributions.Normal):  
+                        action_other = np.clip(action_other, puffer_env.action_space.low, puffer_env.action_space.high)
+                    other_action_buf[other_mask, time_idx] = action_other
+                    total_actions[other_mask] = action_other
+
+            obs, rewards, dones, truncs, info_list = puffer_env.step(total_actions)
+            if len(info_list) > 0:  # Happens at the end of episode
+                results = info_list[0]
+                total_results.append(results)
+        df = pd.DataFrame(total_results)
+        mean_per_key = df.mean(numeric_only=True).to_dict()
+        print(mean_per_key)
+        return other_action_buf, agent_offsets, map_ids
+
+    def replay_rollouts(self, args, puffer_env, loaded_actions):
+        import numpy as np
+        import torch
+        import pufferlib
+
+        num_agents = puffer_env.observation_space.shape[0]
+        device = args["train"]["device"]
+        obs, infos = puffer_env.reset()
+        total_results = []
+        for time_idx in range(args["env"]["resample_frequency"]):
+            obs, rewards, dones, truncs, info_list = puffer_env.step(loaded_actions[:, time_idx])
+            if len(info_list) > 0:  # Happens at the end of episode
+                results = info_list[0]
+                total_results.append(results)
+        df = pd.DataFrame(total_results)
+        mean_per_key = df.mean(numeric_only=True).to_dict()
+        print(mean_per_key)
