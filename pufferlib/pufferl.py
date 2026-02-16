@@ -143,6 +143,7 @@ class PuffeRL:
                     self.other_lstm_cs = []
                     self.other_lstm_hs = []
                     num_other_policies = len(other_policies)
+                    self.num_other_policies = num_other_policies
                     num_other = n - num_ego
                     base, rem = divmod(num_other, num_other_policies)
                     counts = [base + (i < rem) for i in range(num_other_policies)]
@@ -155,6 +156,7 @@ class PuffeRL:
             
         if config["use_pbt"]:
             ego_segments = int(segments * self.ego_ratio)
+            # update buffer params
             self.observations = torch.zeros(
             ego_segments,
             horizon,
@@ -164,7 +166,6 @@ class PuffeRL:
             device="cpu" if config["cpu_offload"] else device,
             )
             
-            self.agents_per_batch = n
             self.actions = torch.zeros(
                 ego_segments,
                 horizon,
@@ -182,6 +183,9 @@ class PuffeRL:
             self.ep_lengths = torch.zeros(total_agents, device=device, dtype=torch.int32)
             self.ep_indices = torch.arange(total_agents, device=device, dtype=torch.int32)
             self.free_idx = total_agents
+            config["minibatch_size"] = int(config["minibatch_size"] * self.ego_ratio)
+            config["max_minibatch_size"] = int(config["max_minibatch_size"] * self.ego_ratio)
+            batch_size = int(batch_size * self.ego_ratio)
 
         # Minibatching & gradient accumulation
         minibatch_size = config["minibatch_size"]
@@ -426,20 +430,22 @@ class PuffeRL:
                     self.other_lstm_cs[l][k] = torch.zeros(self.other_lstm_cs[l][k].shape, device=device)
     
         self.full_rows = 0
-        ego_indices = np.random.choice(self.agents_per_batch, size=int(self.ego_ratio * self.agents_per_batch), replace=False)
-        ego_set = set(map(int, ego_indices))
-        pool = np.array([i for i in range(self.agents_per_batch) if i not in ego_set], dtype=np.int64)
-        pool = np.random.permutation(pool)
-        other_indices = []
-        p = 0
-        for i, count in enumerate(self.other_counts):
-            indices = pool[p:p+count]
-            p += count
-            other_indices.append(indices)
         while self.full_rows < self.segments:
             profile("env", epoch)
             o, r, d, t, info, env_id, mask = self.vecenv.recv()
-            other_mask = torch.zeros(o.shape[0], dtype=torch.bool)
+            if len(info) > 0 and "ego_indices" in info[0].keys():
+                self.ego_indices = []
+                self.other_indices =[[] for _ in range(self.num_other_policies)]
+
+                for i, info_i in enumerate(info):
+                    if "ego_indices" in info_i:
+                        ego = np.asarray(info_i["ego_indices"], dtype=np.int64)
+                        offset = self.num_agents_per_env * i
+                        self.ego_indices.extend((ego + offset).tolist())
+                        for n in range(self.num_other_policies):
+                            other = np.asarray(info_i[n]["other_indices"], dtype=np.int64)
+                            self.other_indices[n].extend((other + offset).tolist())
+                        
             profile("eval_misc", epoch)
             env_id = slice(env_id[0], env_id[-1] + 1)
             done_mask = d + t  # TODO: Handle truncations separately
@@ -450,11 +456,11 @@ class PuffeRL:
             r = torch.as_tensor(r).to(device)  # , non_blocking=True)
             d = torch.as_tensor(d).to(device)  # , non_blocking=True)
             
-            o_ego = o[ego_indices]
+            o_ego = o[self.ego_indices]
             o_ego_device = o_ego.to(device)
-            r_ego = r[ego_indices]
-            d_ego = d[ego_indices]
-            mask_ego = mask[ego_indices]
+            r_ego = r[self.ego_indices]
+            d_ego = d[self.ego_indices]
+            mask_ego = mask[self.ego_indices]
 
             other_masks = []
             o_others = []
@@ -462,7 +468,7 @@ class PuffeRL:
             d_others = []
             mask_others = []
 
-            for other_idx in other_indices:
+            for other_idx in self.other_indices:
                 other_mask_tmp = other_mask.clone()
                 other_mask_tmp[other_idx] = True
                 other_masks.append(other_mask_tmp)
@@ -541,8 +547,8 @@ class PuffeRL:
                 if isinstance(logits_ego, torch.distributions.Normal):
                     action_ego = np.clip(action_ego, self.vecenv.action_space.low, self.vecenv.action_space.high)
                 total_actions = np.zeros((o.shape[0], 1), dtype=np.int64)
-                total_actions[ego_indices] = action_ego
-                for i, other_idx in enumerate(other_indices):
+                total_actions[self.ego_indices] = action_ego
+                for i, other_idx in enumerate(self.other_indices):
                     action_other = action_others[i]
                     if isinstance(logits_other, torch.distributions.Normal):
                         action_other = np.clip(action_other, self.vecenv.action_space.low, self.vecenv.action_space.high)

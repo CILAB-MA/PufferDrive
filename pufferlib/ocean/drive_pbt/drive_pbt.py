@@ -7,7 +7,7 @@ import pufferlib
 from pufferlib.ocean.drive import binding
 from multiprocessing import Pool, cpu_count
 from tqdm import tqdm
-
+from pufferlib.pufferl import load_policy
 
 class Drive_PBT(pufferlib.PufferEnv):
     def __init__(
@@ -216,6 +216,8 @@ class Drive_PBT(pufferlib.PufferEnv):
         self.c_envs = binding.vectorize(*env_ids)
         self.ego_ratio = ego_ratio
         self.population_path = population_path
+        self.pbt_mode = pbt_mode
+
         if pbt_mode == "replay":
             # Load Replay
             npz = np.load(os.path.join(self.population_path, "replay", "other_actions_int16.npz"), allow_pickle=True)
@@ -255,9 +257,10 @@ class Drive_PBT(pufferlib.PufferEnv):
     def step(self, actions):
         self.terminals[:] = 0
         self.actions = actions
-        # allocate replay actions
-        replay_actions_t = self.replay_actions[:, self.tick, :]
-        self.actions[self.other_mask] = replay_actions_t[self.other_mask]
+        if self.pbt_mode == "replay":
+            # allocate replay actions
+            replay_actions_t = self.replay_actions[:, self.tick, :]
+            self.actions[self.other_mask] = replay_actions_t[self.other_mask]
 
         binding.vec_step(self.c_envs)
         self.tick += 1
@@ -336,7 +339,7 @@ class Drive_PBT(pufferlib.PufferEnv):
             binding.vec_reset(self.c_envs, seed)
             self.terminals[:] = 1
         # print(f"Rewards {self.rewards.max()} {self.rewards.mean()}")
-        return (self.observations[self.ego_indices], self.rewards[self.ego_indices], self.terminals[self.ego_indices], self.truncations[self.ego_indices], info)
+        return (self.observations, self.rewards, self.terminals, self.truncations, info)
 
     def get_global_agent_state(self):
         """Get current global state of all active agents.
