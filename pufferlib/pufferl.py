@@ -462,7 +462,6 @@ class PuffeRL:
             d_ego = d[self.ego_indices]
             mask_ego = mask[self.ego_indices]
 
-            other_masks = []
             o_others = []
             r_others = []
             d_others = []
@@ -483,7 +482,7 @@ class PuffeRL:
                     env_id=env_id,
                     mask=mask_ego,
                 )
-                for i, other_mask in enumerate(other_masks):
+                for i, other_mask in enumerate(mask_others):
                     other_state = dict(
                         reward=r_others[i],
                         done=d_others[i],
@@ -506,7 +505,6 @@ class PuffeRL:
                 action_ego, logprob_ego, _ = pufferlib.pytorch.sample_logits(logits_ego)
 
                 r_ego = torch.clamp(r_ego, -1, 1)
-
             profile("eval_copy", epoch)
             with torch.no_grad():
                 if config["use_rnn"]:
