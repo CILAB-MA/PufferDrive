@@ -210,7 +210,7 @@ class PuffeRL:
         # Torch compile
         self.uncompiled_policy = policy
         self.policy = policy
-        if config["use_pbt"]:
+        if config["use_pbt"] and config["pbt_mode"] == "reactive":
             # Torch compile (other)
             self.uncompiled_other_policy = other_policies
             self.other_policies = []
@@ -861,7 +861,8 @@ class PuffeRL:
             and (((self.epoch - 1) % self.config["eval"]["eval_interval"] == 0) or done_training)
         ):
             config = self.config.copy()
-            config["env"] = "puffer_drive"
+            # config["env"] = "puffer_drive"
+            config["ego_ratio"] = 1.0
             pufferlib.utils.run_wosac_eval_in_subprocess(config, self.logger, self.global_step)
 
         if (
@@ -1491,7 +1492,8 @@ def eval(env_name, args=None, vecenv=None, policy=None):
         args["env"]["init_steps"] = args["eval"]["wosac_init_steps"]
         args["env"]["goal_behavior"] = args["eval"]["wosac_goal_behavior"]
         args["env"]["goal_radius"] = args["eval"]["wosac_goal_radius"]
-
+        args["base"]["env_name"] = "puffer_drive"
+        env_name = "puffer_drive"
         vecenv = vecenv or load_env(env_name, args)
         policy = policy or load_policy(args, vecenv, env_name)
 
@@ -1525,9 +1527,11 @@ def eval(env_name, args=None, vecenv=None, policy=None):
             import json
 
             print("\nWOSAC_METRICS_START")
-            id_ = args["load_model_path"]
-            map_results = {id_[-11:-3]: results}
-            save_result("/data/puffer/results/nominal/wosac.json", map_results)
+            print(json.dumps(results))
+            # TODO: 저장 따로 시켜야 함
+            # id_ = args["load_model_path"]
+            # map_results = {id_[-11:-3]: results}
+            # save_result("/data/puffer/results/nominal/wosac.json", map_results)
             print("WOSAC_METRICS_END")
 
         return results
@@ -1991,7 +1995,10 @@ def load_env(env_name, args):
     module_name = "pufferlib.ocean" if package == "ocean" else f"pufferlib.environments.{package}"
     env_module = importlib.import_module(module_name)
     make_env = env_module.env_creator(env_name)
-    env_kwargs = {**args["env"], **args.get("pbt", {})}
+    if env_name == "puffer_drive":
+        env_kwargs = {**args["env"]}
+    elif env_name == "puffer_drive_pbt":
+        env_kwargs = {**args["env"], **args.get("pbt", {})}
     return pufferlib.vector.make(make_env, env_kwargs=env_kwargs, **args["vec"])
 
 

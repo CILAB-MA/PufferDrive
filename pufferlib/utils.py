@@ -99,6 +99,8 @@ def run_wosac_eval_in_subprocess(config, logger, global_step):
             "pufferlib.pufferl",
             "eval",
             config["env"],
+            "--env-name",
+            "puffer_drive",
             "--eval.wosac-realism-eval",
             "True",
             "--eval.wosac-num-maps",

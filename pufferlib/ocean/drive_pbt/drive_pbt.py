@@ -240,7 +240,7 @@ class Drive_PBT(pufferlib.PufferEnv):
         info = [{"agent_offsets": self.agent_offsets, "map_ids": self.map_ids, "num_envs": self.num_envs, "ego_indices": self.ego_indices}]
         if self.pbt_mode == "reactive":
             info[0]["other_indices"] = self.other_indices
-        return self.observations[self.ego_indices], info
+        return self.observations, info
 
     def _allocate_ego_indices(self, num_agents):
         num_ego = int(num_agents * self.ego_ratio)
@@ -275,7 +275,6 @@ class Drive_PBT(pufferlib.PufferEnv):
             # allocate replay actions
             replay_actions_t = self.replay_actions[:, self.tick, :]
             self.actions[self.other_mask] = replay_actions_t[self.other_mask]
-        print((self.actions.squeeze(-1) == 0).sum(), self.actions.shape)
         binding.vec_step(self.c_envs)
         self.tick += 1
         info = []
