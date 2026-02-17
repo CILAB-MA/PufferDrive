@@ -247,6 +247,7 @@ class Drive_PBT(pufferlib.PufferEnv):
         self.ego_indices = np.random.choice(num_agents, size=num_ego, replace=False)
         self.other_mask = np.ones(num_agents, dtype=bool)
         self.other_mask[self.ego_indices] = False
+        print("DRIV PBT", self.ego_indices[:5])
 
     def _allocate_other_indices(self, num_agents):
         other_indices = np.setdiff1d(np.arange(num_agents), self.ego_indices, assume_unique=False)
@@ -308,10 +309,12 @@ class Drive_PBT(pufferlib.PufferEnv):
                 self._allocate_replay(self.num_agents, self.map_ids)
             else:
                 self._allocate_other_indices(self.num_agents)
-            if len(info) == 0:
-                info = [{"agent_offsets": self.agent_offsets, "map_ids": self.map_ids, "num_envs": self.num_envs, "ego_indices": self.ego_indices}]
-                if self.pbt_mode == "reactive":
-                    info[0]["other_indices"] = self.other_indices
+            info[0]["agent_offsets"] = self.agent_offsets
+            info[0]["map_ids"] = self.map_ids
+            info[0]["num_envs"] = self.num_envs
+            info[0]["ego_indices"] = self.ego_indices
+            if self.pbt_mode == "reactive":
+                info[0]["other_indices"] = self.other_indices
             env_ids = []
             seed = np.random.randint(0, 2**32 - 1)
             for i in range(num_envs):

@@ -145,6 +145,7 @@ class PuffeRL:
                     self.other_lstm_cs = []
                     self.other_lstm_hs = []
                     num_other = n - num_ego
+                    num_other_policies = len(other_policies)
                     base, rem = divmod(num_other, num_other_policies)
                     counts = [base + (i < rem) for i in range(num_other_policies)]
                     self.other_counts = counts
@@ -289,7 +290,7 @@ class PuffeRL:
 
         # Dashboard
         self.model_size = sum(p.numel() for p in policy.parameters() if p.requires_grad)
-        self.print_dashboard(clear=True)
+        # self.print_dashboard(clear=True)
 
     @property
     def uptime(self):
@@ -318,6 +319,7 @@ class PuffeRL:
                 self.lstm_c[k] = torch.zeros(self.lstm_c[k].shape, device=device)
     
         self.full_rows = 0
+        print(f"global step {self.global_step} ego_indices {self.ego_indices[0,:3]} {self.ego_indices[1,:3]} {self.ego_indices[2,:3]} {self.ego_indices[3,:3]}")
         while self.full_rows < self.segments:
             profile("env", epoch)
             o, r, d, t, info, env_id, mask = self.vecenv.recv() 
@@ -326,7 +328,7 @@ class PuffeRL:
                     ego = np.asarray(info_i["ego_indices"], dtype=np.int64)
                     offset = self.num_agents_per_env * i
                     self.ego_indices[i] = ego + offset
-                
+                    print(f"{i}th infos in rollout {ego[:3]}")
             profile("eval_misc", epoch)
             env_id = slice(env_id[0], env_id[-1] + 1)
             done_mask = d + t  # TODO: Handle truncations separately
@@ -814,7 +816,7 @@ class PuffeRL:
         if done_training or self.global_step == 0 or time.time() > self.last_log_time + 0.25:
             logs = self.mean_and_log()
             self.losses = losses
-            self.print_dashboard()
+            # self.print_dashboard()
             self.stats = defaultdict(list)
             self.last_log_time = time.time()
             self.last_log_step = self.global_step
@@ -1367,7 +1369,7 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
     if logs is not None:
         all_logs.append(logs)
 
-    pufferl.print_dashboard()
+    # pufferl.print_dashboard()
     model_path = pufferl.close()
     pufferl.logger.close(model_path)
     return all_logs
