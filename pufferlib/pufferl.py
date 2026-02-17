@@ -136,9 +136,15 @@ class PuffeRL:
             if config["use_pbt"]:
                 self.ego_ratio = config["ego_ratio"] # This should be divided with the segments & n
                 num_ego = int(n * self.ego_ratio)
+                self.num_ego_per_env = int(self.num_agents_per_env  * self.ego_ratio)
+                self.num_other_per_env = int(self.num_agents_per_env  * (1 - self.ego_ratio))
                 self.lstm_h = {i * n: torch.zeros(num_ego, h, device=device) for i in range(total_agents // n)}
                 self.lstm_c = {i * n: torch.zeros(num_ego, h, device=device) for i in range(total_agents // n)}
-                
+                self.ego_indices = -np.ones((4, self.num_ego_per_env), dtype=np.int32)
+                if self.num_other_per_env > 0:
+                    self.other_indices =[-np.ones((4, self.num_other_per_env), dtype=np.int32) for _ in range(self.num_other_policies)]
+                else:
+                    self.other_indices = []
                 if config["pbt_mode"] == "reactive":
                     self.other_lstm_cs = []
                     self.other_lstm_hs = []
@@ -433,19 +439,17 @@ class PuffeRL:
         while self.full_rows < self.segments:
             profile("env", epoch)
             o, r, d, t, info, env_id, mask = self.vecenv.recv()
-            if len(info) > 0 and "ego_indices" in info[0].keys():
-                self.ego_indices = []
-                self.other_indices =[[] for _ in range(self.num_other_policies)]
-
-                for i, info_i in enumerate(info):
-                    if "ego_indices" in info_i:
-                        ego = np.asarray(info_i["ego_indices"], dtype=np.int64)
-                        offset = self.num_agents_per_env * i
-                        self.ego_indices.extend((ego + offset).tolist())
+            for i, info_i in enumerate(info):
+                if "ego_indices" in info_i.keys():
+                    ego = np.asarray(info_i["ego_indices"], dtype=np.int64)
+                    offset = self.num_agents_per_env * i
+                    self.ego_indices[i] = ego + offset
+                    if self.num_other_per_env > 0:
                         for n in range(self.num_other_policies):
                             other = np.asarray(info_i["other_indices"][n], dtype=np.int64)
-                            self.other_indices[n].extend((other + offset).tolist())
-                        
+                            self.other_indices[n][i] = other + offset
+
+            ego_indices = self.ego_indices.reshape(-1)
             profile("eval_misc", epoch)
             env_id = slice(env_id[0], env_id[-1] + 1)
             done_mask = d + t  # TODO: Handle truncations separately
@@ -455,23 +459,21 @@ class PuffeRL:
             o = torch.as_tensor(o)
             r = torch.as_tensor(r).to(device)  # , non_blocking=True)
             d = torch.as_tensor(d).to(device)  # , non_blocking=True)
-            
-            o_ego = o[self.ego_indices]
+            o_ego = o[ego_indices]
             o_ego_device = o_ego.to(device)
-            r_ego = r[self.ego_indices]
-            d_ego = d[self.ego_indices]
-            mask_ego = mask[self.ego_indices]
-
+            r_ego = r[ego_indices]
+            d_ego = d[ego_indices]
+            mask_ego = mask[ego_indices]
             o_others = []
             r_others = []
             d_others = []
             mask_others = []
 
             for other_idx in self.other_indices:
-                o_others.append(o[other_idx].to(device))
-                r_others.append(r[other_idx])
-                d_others.append(d[other_idx])
-                mask_others.append(mask[other_idx])
+                o_others.append(o[other_idx.reshape(-1)].to(device))
+                r_others.append(r[other_idx.reshape(-1)])
+                d_others.append(d[other_idx.reshape(-1)])
+                mask_others.append(mask[other_idx.reshape(-1)])
                 
             profile("eval_forward", epoch)
             with torch.no_grad(), self.amp_context:
@@ -542,7 +544,7 @@ class PuffeRL:
                 if isinstance(logits_ego, torch.distributions.Normal):
                     action_ego = np.clip(action_ego, self.vecenv.action_space.low, self.vecenv.action_space.high)
                 total_actions = np.zeros((o.shape[0], 1), dtype=np.int64)
-                total_actions[self.ego_indices] = action_ego
+                total_actions[ego_indices] = action_ego
                 for i, other_idx in enumerate(self.other_indices):
                     action_other = action_others[i]
                     if isinstance(logits_other, torch.distributions.Normal):
