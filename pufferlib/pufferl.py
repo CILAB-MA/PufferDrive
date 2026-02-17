@@ -319,7 +319,6 @@ class PuffeRL:
                 self.lstm_c[k] = torch.zeros(self.lstm_c[k].shape, device=device)
     
         self.full_rows = 0
-        print(f"global step {self.global_step} ego_indices {self.ego_indices[0,:3]} {self.ego_indices[1,:3]} {self.ego_indices[2,:3]} {self.ego_indices[3,:3]}")
         while self.full_rows < self.segments:
             profile("env", epoch)
             o, r, d, t, info, env_id, mask = self.vecenv.recv() 
@@ -328,7 +327,6 @@ class PuffeRL:
                     ego = np.asarray(info_i["ego_indices"], dtype=np.int64)
                     offset = self.num_agents_per_env * i
                     self.ego_indices[i] = ego + offset
-                    print(f"{i}th infos in rollout {ego[:3]}")
             profile("eval_misc", epoch)
             env_id = slice(env_id[0], env_id[-1] + 1)
             done_mask = d + t  # TODO: Handle truncations separately
