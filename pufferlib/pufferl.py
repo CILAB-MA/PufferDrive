@@ -77,6 +77,8 @@ class PuffeRL:
         obs_space = vecenv.single_observation_space
         atn_space = vecenv.single_action_space
         total_agents = vecenv.num_agents
+        if config["use_pbt"]:
+            total_agents = int(vecenv.num_agents_per_env * config["ego_ratio"]) * vecenv.num_environments
         self.total_agents = total_agents
 
         # Experience
@@ -130,17 +132,17 @@ class PuffeRL:
         if config["use_rnn"]:
             n = vecenv.agents_per_batch
             h = policy.hidden_size
+            self.num_agents_per_env = vecenv.num_agents_per_env
+            print(f"total_agents {total_agents} n {n} num_agents_per_env {vecenv.num_agents_per_env}")
             self.lstm_h = {i * n: torch.zeros(n, h, device=device) for i in range(total_agents // n)}
             self.lstm_c = {i * n: torch.zeros(n, h, device=device) for i in range(total_agents // n)}
-            self.num_agents_per_env = vecenv.num_agents_per_env
             if config["use_pbt"]:
                 self.ego_ratio = config["ego_ratio"] # This should be divided with the segments & n
                 num_ego = int(n * self.ego_ratio)
                 self.num_ego_per_env = int(self.num_agents_per_env  * self.ego_ratio)
                 self.num_other_per_env = int(self.num_agents_per_env  * (1 - self.ego_ratio))
-                self.lstm_h = {i * n: torch.zeros(num_ego, h, device=device) for i in range(total_agents // n)}
-                self.lstm_c = {i * n: torch.zeros(num_ego, h, device=device) for i in range(total_agents // n)}
-                self.ego_indices = -np.ones((4, self.num_ego_per_env), dtype=np.int32)
+                self.lstm_h = {i * self.num_agents_per_env: torch.zeros(num_ego, h, device=device) for i in range(total_agents // self.num_agents_per_env)}
+                self.lstm_c = {i * self.num_agents_per_env: torch.zeros(num_ego, h, device=device) for i in range(total_agents // self.num_agents_per_env)}
                 if config["pbt_mode"] == "reactive":
                     self.other_lstm_cs = []
                     self.other_lstm_hs = []
@@ -149,49 +151,12 @@ class PuffeRL:
                     self.num_other_policies = num_other_policies
                     base, rem = divmod(num_other, num_other_policies)
                     counts = [base + (i < rem) for i in range(num_other_policies)]
-                    if self.num_other_per_env > 0:
-                        self.other_indices =[-np.ones((4, counts[i]), dtype=np.int32) for i in range(self.num_other_policies)]
-                    else:
-                        self.other_indices = []
                     for count in counts:
-                        other_lstm_h = {i * n: torch.zeros(count, h, device=device) for i in range(total_agents // n)}
-                        other_lstm_c = {i * n: torch.zeros(count, h, device=device) for i in range(total_agents // n)}
+                        other_lstm_h = {i * self.num_agents_per_env: torch.zeros(count, h, device=device) for i in range(total_agents // self.num_agents_per_env)}
+                        other_lstm_c = {i * self.num_agents_per_env: torch.zeros(count, h, device=device) for i in range(total_agents // self.num_agents_per_env)}
                         self.other_lstm_hs.append(other_lstm_h)
                         self.other_lstm_cs.append(other_lstm_c)
             
-        if config["use_pbt"]:
-            ego_segments = int(segments * self.ego_ratio)
-            # update buffer params
-            self.observations = torch.zeros(
-            ego_segments,
-            horizon,
-            *obs_space.shape,
-            dtype=pufferlib.pytorch.numpy_to_torch_dtype_dict[obs_space.dtype],
-            pin_memory=device == "cuda" and config["cpu_offload"],
-            device="cpu" if config["cpu_offload"] else device,
-            )
-            
-            self.actions = torch.zeros(
-                ego_segments,
-                horizon,
-                *atn_space.shape,
-                device=device,
-                dtype=pufferlib.pytorch.numpy_to_torch_dtype_dict[atn_space.dtype],
-            )
-            self.values = torch.zeros(ego_segments, horizon, device=device)
-            self.logprobs = torch.zeros(ego_segments, horizon, device=device)
-            self.rewards = torch.zeros(ego_segments, horizon, device=device)
-            self.terminals = torch.zeros(ego_segments, horizon, device=device)
-            self.truncations = torch.zeros(ego_segments, horizon, device=device)
-            self.ratio = torch.ones(ego_segments, horizon, device=device)
-            self.importance = torch.ones(ego_segments, horizon, device=device)
-            self.ep_lengths = torch.zeros(total_agents, device=device, dtype=torch.int32)
-            self.ep_indices = torch.arange(total_agents, device=device, dtype=torch.int32)
-            self.free_idx = total_agents
-            config["minibatch_size"] = int(config["minibatch_size"] * self.ego_ratio)
-            config["max_minibatch_size"] = int(config["max_minibatch_size"] * self.ego_ratio)
-            batch_size = int(batch_size * self.ego_ratio)
-
         # Minibatching & gradient accumulation
         minibatch_size = config["minibatch_size"]
         max_minibatch_size = config["max_minibatch_size"]
@@ -322,17 +287,19 @@ class PuffeRL:
         while self.full_rows < self.segments:
             profile("env", epoch)
             o, r, d, t, info, env_id, mask = self.vecenv.recv() 
+            ego_indices = []
+            env_id = env_id * self.ego_ratio
+            env_id = env_id.astype(np.int64)
             for i, info_i in enumerate(info):
                 if "ego_indices" in info_i.keys():
                     ego = np.asarray(info_i["ego_indices"], dtype=np.int64)
                     offset = self.num_agents_per_env * i
-                    self.ego_indices[i] = ego + offset
+                    ego_indices.extend((ego + offset))
             profile("eval_misc", epoch)
             env_id = slice(env_id[0], env_id[-1] + 1)
             done_mask = d + t  # TODO: Handle truncations separately
-            self.global_step += int(mask.sum())
 
-            ego_indices = self.ego_indices.reshape(-1)
+            # ego_indices = self.ego_indices.reshape(-1)
             profile("eval_copy", epoch)
             o = torch.as_tensor(o)
             r = torch.as_tensor(r).to(device)  # , non_blocking=True)
@@ -343,6 +310,7 @@ class PuffeRL:
             r_ego = r[ego_indices]
             d_ego = d[ego_indices]
             mask_ego = mask[ego_indices]
+            self.global_step += int(mask_ego.sum())
             profile("eval_forward", epoch)
             with torch.no_grad(), self.amp_context:
                 ego_state = dict(
@@ -368,7 +336,7 @@ class PuffeRL:
                 # Fast path for fully vectorized envs
                 l = self.ep_lengths[env_id.start].item()
                 batch_rows = slice(self.ep_indices[env_id.start].item(), 1 + self.ep_indices[env_id.stop - 1].item())
-                ego_batch_rows = slice(int(batch_rows.start * self.ego_ratio), int(batch_rows.stop * self.ego_ratio))
+                ego_batch_rows = slice(batch_rows.start, batch_rows.stop)
                 if config["cpu_offload"]:
                     self.observations[ego_batch_rows, l] = o_ego
                 else:
