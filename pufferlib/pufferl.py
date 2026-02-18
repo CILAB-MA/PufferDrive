@@ -146,11 +146,11 @@ class PuffeRL:
                     self.other_lstm_hs = []
                     num_other = n - num_ego
                     num_other_policies = len(other_policies)
+                    self.num_other_policies = num_other_policies
                     base, rem = divmod(num_other, num_other_policies)
                     counts = [base + (i < rem) for i in range(num_other_policies)]
-                    self.other_counts = counts
                     if self.num_other_per_env > 0:
-                        self.other_indices =[-np.ones((4, self.num_other_per_env), dtype=np.int32) for _ in range(self.num_other_policies)]
+                        self.other_indices =[-np.ones((4, counts[i]), dtype=np.int32) for i in range(self.num_other_policies)]
                     else:
                         self.other_indices = []
                     for count in counts:
@@ -290,7 +290,7 @@ class PuffeRL:
 
         # Dashboard
         self.model_size = sum(p.numel() for p in policy.parameters() if p.requires_grad)
-        # self.print_dashboard(clear=True)
+        self.print_dashboard(clear=True)
 
     @property
     def uptime(self):
@@ -436,17 +436,19 @@ class PuffeRL:
         while self.full_rows < self.segments:
             profile("env", epoch)
             o, r, d, t, info, env_id, mask = self.vecenv.recv()
+            ego_indices = []
+            other_indices = [[] for _ in range(self.num_other_policies)]
             for i, info_i in enumerate(info):
                 if "ego_indices" in info_i.keys():
                     ego = np.asarray(info_i["ego_indices"], dtype=np.int64)
                     offset = self.num_agents_per_env * i
-                    self.ego_indices[i] = ego + offset
+                    ego_indices.extend((ego + offset))
                     if self.num_other_per_env > 0:
                         for n in range(self.num_other_policies):
                             other = np.asarray(info_i["other_indices"][n], dtype=np.int64)
-                            self.other_indices[n][i] = other + offset
+                            other_indices[n].extend((other + offset))
 
-            ego_indices = self.ego_indices.reshape(-1)
+            # ego_indices = self.ego_indices.reshape(-1)
             profile("eval_misc", epoch)
             env_id = slice(env_id[0], env_id[-1] + 1)
             done_mask = d + t  # TODO: Handle truncations separately
@@ -466,11 +468,11 @@ class PuffeRL:
             d_others = []
             mask_others = []
 
-            for other_idx in self.other_indices:
-                o_others.append(o[other_idx.reshape(-1)].to(device))
-                r_others.append(r[other_idx.reshape(-1)])
-                d_others.append(d[other_idx.reshape(-1)])
-                mask_others.append(mask[other_idx.reshape(-1)])
+            for other_idx in other_indices:
+                o_others.append(o[other_idx].to(device))
+                r_others.append(r[other_idx])
+                d_others.append(d[other_idx])
+                mask_others.append(mask[other_idx])
                 
             profile("eval_forward", epoch)
             with torch.no_grad(), self.amp_context:
@@ -542,7 +544,7 @@ class PuffeRL:
                     action_ego = np.clip(action_ego, self.vecenv.action_space.low, self.vecenv.action_space.high)
                 total_actions = np.zeros((o.shape[0], 1), dtype=np.int64)
                 total_actions[ego_indices] = action_ego
-                for i, other_idx in enumerate(self.other_indices):
+                for i, other_idx in enumerate(other_indices):
                     action_other = action_others[i]
                     if isinstance(logits_other, torch.distributions.Normal):
                         action_other = np.clip(action_other, self.vecenv.action_space.low, self.vecenv.action_space.high)
@@ -814,7 +816,7 @@ class PuffeRL:
         if done_training or self.global_step == 0 or time.time() > self.last_log_time + 0.25:
             logs = self.mean_and_log()
             self.losses = losses
-            # self.print_dashboard()
+            self.print_dashboard()
             self.stats = defaultdict(list)
             self.last_log_time = time.time()
             self.last_log_step = self.global_step
@@ -1367,7 +1369,7 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
     if logs is not None:
         all_logs.append(logs)
 
-    # pufferl.print_dashboard()
+    pufferl.print_dashboard()
     model_path = pufferl.close()
     pufferl.logger.close(model_path)
     return all_logs
