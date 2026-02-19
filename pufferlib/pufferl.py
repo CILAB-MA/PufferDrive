@@ -133,7 +133,6 @@ class PuffeRL:
             n = vecenv.agents_per_batch
             h = policy.hidden_size
             self.num_agents_per_env = vecenv.num_agents_per_env
-            print(f"total_agents {total_agents} n {n} num_agents_per_env {vecenv.num_agents_per_env}")
             self.lstm_h = {i * n: torch.zeros(n, h, device=device) for i in range(total_agents // n)}
             self.lstm_c = {i * n: torch.zeros(n, h, device=device) for i in range(total_agents // n)}
             if config["use_pbt"]:
@@ -255,7 +254,7 @@ class PuffeRL:
 
         # Dashboard
         self.model_size = sum(p.numel() for p in policy.parameters() if p.requires_grad)
-        self.print_dashboard(clear=True)
+        # self.print_dashboard(clear=True)
 
     @property
     def uptime(self):
@@ -406,6 +405,8 @@ class PuffeRL:
             o, r, d, t, info, env_id, mask = self.vecenv.recv()
             ego_indices = []
             other_indices = [[] for _ in range(self.num_other_policies)]
+            env_id = env_id * self.ego_ratio
+            env_id = env_id.astype(np.int64)
             for i, info_i in enumerate(info):
                 if "ego_indices" in info_i.keys():
                     ego = np.asarray(info_i["ego_indices"], dtype=np.int64)
@@ -420,7 +421,6 @@ class PuffeRL:
             profile("eval_misc", epoch)
             env_id = slice(env_id[0], env_id[-1] + 1)
             done_mask = d + t  # TODO: Handle truncations separately
-            self.global_step += int(mask.sum())
 
             profile("eval_copy", epoch)
             o = torch.as_tensor(o)
@@ -435,7 +435,7 @@ class PuffeRL:
             r_others = []
             d_others = []
             mask_others = []
-
+            self.global_step += int(mask_ego.sum())
             for other_idx in other_indices:
                 o_others.append(o[other_idx].to(device))
                 r_others.append(r[other_idx])
@@ -486,7 +486,7 @@ class PuffeRL:
                 # Fast path for fully vectorized envs
                 l = self.ep_lengths[env_id.start].item()
                 batch_rows = slice(self.ep_indices[env_id.start].item(), 1 + self.ep_indices[env_id.stop - 1].item())
-                ego_batch_rows = slice(int(batch_rows.start * self.ego_ratio), int(batch_rows.stop * self.ego_ratio))
+                ego_batch_rows = slice(batch_rows.start, batch_rows.stop)
                 if config["cpu_offload"]:
                     self.observations[ego_batch_rows, l] = o_ego
                 else:
@@ -1420,11 +1420,10 @@ def train_pbt(env_name, args=None, vecenv=None, policy=None, logger=None):
     stats = {}
     while i < 32 or not stats:
         if args["pbt"]["pbt_mode"] == "reactive":
-            pufferl.evaluate_pbt()
+            stats = pufferl.evaluate_pbt()
         elif args["pbt"]["pbt_mode"] == "replay":
-            pufferl.evaluate_pbt_replay()
+            stats = pufferl.evaluate_pbt_replay()
         i += 1
-
     logs = pufferl.mean_and_log()
     if logs is not None:
         all_logs.append(logs)
