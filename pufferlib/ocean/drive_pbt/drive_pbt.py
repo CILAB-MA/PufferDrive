@@ -242,9 +242,50 @@ class Drive_PBT(pufferlib.PufferEnv):
             info[0]["other_indices"] = self.other_indices
         return self.observations, info
 
-    def _allocate_ego_indices(self, num_agents):
+    def _allocate_ego_indices(self, num_agents, agent_offsets=None):
         num_ego = int(num_agents * self.ego_ratio)
-        self.ego_indices = np.random.choice(num_agents, size=num_ego, replace=False)
+        num_ego = max(0, min(num_ego, num_agents))
+        required = np.empty((0,), dtype=np.int64)
+        if agent_offsets is not None and num_ego > 0:
+            agent_offsets = np.asarray(agent_offsets, dtype=np.int64)
+            assert agent_offsets.ndim == 1 and agent_offsets.size >= 2
+            assert agent_offsets[0] == 0
+            assert agent_offsets[-1] <= num_agents 
+
+            # Ensure at least 1 ego per map
+            candidates = []
+            for i in range(agent_offsets.size - 1):
+                s, e = int(agent_offsets[i]), int(agent_offsets[i + 1])
+                if e > s:
+                    candidates.append(np.random.randint(s, e))
+
+            if len(candidates) > 0:
+                candidates = np.asarray(candidates, dtype=np.int64)
+
+                if candidates.size > num_agents:
+                    pick = np.random.choice(candidates.size, size=num_agents, replace=False)
+                    required = candidates[pick]
+                else:
+                    required = candidates
+
+                num_ego = max(num_ego, required.size)
+                num_ego = min(num_ego, num_agents)
+
+        if num_ego == 0:
+            self.ego_indices = np.empty((0,), dtype=np.int64)
+            self.other_mask = np.ones(num_agents, dtype=bool)
+            return
+
+        all_idx = np.arange(num_agents, dtype=np.int64)
+        remaining = np.setdiff1d(all_idx, required, assume_unique=False)
+
+        extra_n = num_ego - required.size
+        extra = (
+            np.random.choice(remaining, size=extra_n, replace=False).astype(np.int64, copy=False)
+            if extra_n > 0 else np.empty((0,), dtype=np.int64)
+        )
+        self.ego_indices = np.concatenate([required, extra])
+        np.random.shuffle(self.ego_indices)
         self.other_mask = np.ones(num_agents, dtype=bool)
         self.other_mask[self.ego_indices] = False
 
