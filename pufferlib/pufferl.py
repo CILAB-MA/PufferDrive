@@ -155,7 +155,9 @@ class PuffeRL:
                         other_lstm_c = {i * self.num_agents_per_env: torch.zeros(count, h, device=device) for i in range(total_agents // self.num_agents_per_env)}
                         self.other_lstm_hs.append(other_lstm_h)
                         self.other_lstm_cs.append(other_lstm_c)
-            
+        if config.get("use_pbt") and config.get("pbt_mode") == "replay":
+            self._total_actions_buffer = np.zeros((n, 1), dtype=np.int64)
+
         # Minibatching & gradient accumulation
         minibatch_size = config["minibatch_size"]
         max_minibatch_size = config["max_minibatch_size"]
@@ -273,7 +275,6 @@ class PuffeRL:
         epoch = self.epoch
         profile("eval", epoch)
         profile("eval_misc", epoch, nest=True)
-
         config = self.config
         device = config["device"]
 
@@ -359,8 +360,16 @@ class PuffeRL:
                 
                 if isinstance(logits_ego, torch.distributions.Normal):
                     action_ego = np.clip(action_ego, self.vecenv.action_space.low, self.vecenv.action_space.high)
-                total_actions = np.zeros((o.shape[0], 1), dtype=np.int64)
+                if os.environ.get("PUFFER_BENCH_REPLAY"):
+                    _t0 = time.perf_counter()
+                total_actions = self._total_actions_buffer
                 total_actions[ego_indices] = action_ego
+                if os.environ.get("PUFFER_BENCH_REPLAY"):
+                    _t1 = time.perf_counter()
+                    if not hasattr(self, "_bench_total_actions"):
+                        self._bench_total_actions = [0.0, 0]
+                    self._bench_total_actions[0] += _t1 - _t0
+                    self._bench_total_actions[1] += 1
 
             profile("eval_misc", epoch)
             for i in info:
@@ -378,9 +387,12 @@ class PuffeRL:
         self.free_idx = self.total_agents
         self.ep_indices = torch.arange(self.total_agents, device=device, dtype=torch.int32)
         self.ep_lengths.zero_()
+        if os.environ.get("PUFFER_BENCH_REPLAY") and hasattr(self, "_bench_total_actions") and self._bench_total_actions[1] > 0:
+            a, n = self._bench_total_actions
+            print(f"[bench] pufferl total_actions: {a*1000:.3f}ms / {n} recvs = {a/n*1e6:.1f}us/recv")
         profile.end()
         return self.stats
-    
+
     def evaluate_pbt(self):
         '''Collect rollout'''
         profile = self.profile
@@ -510,7 +522,7 @@ class PuffeRL:
                 
                 if isinstance(logits_ego, torch.distributions.Normal):
                     action_ego = np.clip(action_ego, self.vecenv.action_space.low, self.vecenv.action_space.high)
-                total_actions = np.zeros((o.shape[0], 1), dtype=np.int64)
+                total_actions = self._total_actions_buffer
                 total_actions[ego_indices] = action_ego
                 for i, other_idx in enumerate(other_indices):
                     action_other = action_others[i]
@@ -1257,9 +1269,16 @@ class WandbLogger:
         self.run_id = wandb.run.id
 
     def log(self, logs, step):
-        ignore_keys = {"environment/num_envs", "environment/agent_offsets", "environment/map_ids", "environment/other_indices"}
-        logs = {k: v for k, v in logs.items() if (k not in ignore_keys) and ("ego" not in k)}
-        self.wandb.log(logs, step=step)
+        ignore_keys = {"environment/num_envs", "environment/agent_offsets", "environment/map_ids", "environment/other_indices", "environment/ego_n"}
+        logs_filtered = {}
+        for k, v in logs.items():
+            if k in ignore_keys:
+                continue
+            elif "ego" in k:
+                logs_filtered[f"ego/{k[16:]}"] = v
+            else:
+                logs_filtered[k] = v
+        self.wandb.log(logs_filtered, step=step)
 
     def close(self, model_path):
         artifact = self.wandb.Artifact(self.run_id, type="model")

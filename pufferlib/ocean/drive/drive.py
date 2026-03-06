@@ -152,7 +152,7 @@ class Drive(pufferlib.PufferEnv):
         self.max_controlled_agents = int(max_controlled_agents)
 
         # Iterate through all maps to count total agents that can be initialized for each map
-        agent_offsets, map_ids, num_envs = binding.shared(
+        agent_offsets, map_ids, num_envs, _ = binding.shared(
             map_dir=map_dir,
             num_agents=num_agents,
             num_maps=num_maps,
@@ -234,7 +234,7 @@ class Drive(pufferlib.PufferEnv):
         if self.tick > 0 and self.resample_frequency > 0 and self.tick % self.resample_frequency == 0:
             self.tick = 0
             binding.vec_close(self.c_envs)
-            agent_offsets, map_ids, num_envs = binding.shared(
+            agent_offsets, map_ids, num_envs, _ = binding.shared(
                 num_agents=self.num_agents,
                 num_maps=self.num_maps,
                 init_mode=self.init_mode,

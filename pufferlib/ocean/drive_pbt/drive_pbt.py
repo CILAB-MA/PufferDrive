@@ -1,8 +1,9 @@
+import os
+import time
 import numpy as np
 import gymnasium
 import json
 import struct
-import os
 import pufferlib
 from pufferlib.ocean.drive import binding
 from multiprocessing import Pool, cpu_count
@@ -154,10 +155,11 @@ class Drive_PBT(pufferlib.PufferEnv):
         self.max_controlled_agents = int(max_controlled_agents)
 
         # Iterate through all maps to count total agents that can be initialized for each map
-        agent_offsets, map_ids, num_envs = binding.shared(
+        agent_offsets, map_ids, num_envs, ego_indices = binding.shared(
             map_dir=map_dir,
             num_agents=num_agents,
             num_maps=num_maps,
+            ego_ratio=ego_ratio,
             init_mode=self.init_mode,
             control_mode=self.control_mode,
             init_steps=self.init_steps,
@@ -166,17 +168,23 @@ class Drive_PBT(pufferlib.PufferEnv):
             goal_target_distance=self.goal_target_distance,
             sequential_map_sampling=sequential_map_sampling,
         )
-
         # agent_offsets[-1] works in both cases, just making it explicit that num_agents is ignored if sequential_map_sampling is True
         self.num_agents = num_agents if not sequential_map_sampling else agent_offsets[-1]
         self.agent_offsets = agent_offsets
         self.map_ids = map_ids
         self.num_envs = num_envs
+        self.ego_indices = np.asarray(ego_indices, dtype=np.int64)
+        ao = np.asarray(agent_offsets, dtype=np.int64)
+        self.num_ego_per_env = [int(np.sum((self.ego_indices >= ao[i]) & (self.ego_indices < ao[i + 1]))) for i in range(num_envs)]
+        self.other_mask = np.ones(self.num_agents, dtype=bool)
+        self.other_mask[self.ego_indices] = False
+        self.other_indices_arr = np.flatnonzero(self.other_mask).astype(np.int64)
         super().__init__(buf=buf)
         env_ids = []
         for i in range(num_envs):
             cur = agent_offsets[i]
             nxt = agent_offsets[i + 1]
+            ego_local = (self.ego_indices - cur)[(self.ego_indices >= cur) & (self.ego_indices < nxt)].astype(np.int32).tolist()
             env_id = binding.env_init(
                 self.observations[cur:nxt],
                 self.actions[cur:nxt],
@@ -206,6 +214,8 @@ class Drive_PBT(pufferlib.PufferEnv):
                 max_controlled_agents=self.max_controlled_agents,
                 map_id=map_ids[i],
                 max_agents=nxt - cur,
+                num_ego=self.num_ego_per_env[i],
+                ego_local_indices=ego_local,
                 ini_file="pufferlib/config/ocean/drive.ini",
                 init_steps=init_steps,
                 init_mode=self.init_mode,
@@ -217,7 +227,6 @@ class Drive_PBT(pufferlib.PufferEnv):
         self.ego_ratio = ego_ratio
         self.population_path = population_path
         self.pbt_mode = pbt_mode
-        self._allocate_ego_indices(self.num_agents)
         if pbt_mode == "replay":
             # Load Replay
             npz = np.load(os.path.join(self.population_path, "replay", "other_actions_int16.npz"), allow_pickle=True)
@@ -241,53 +250,6 @@ class Drive_PBT(pufferlib.PufferEnv):
         if self.pbt_mode == "reactive":
             info[0]["other_indices"] = self.other_indices
         return self.observations, info
-
-    def _allocate_ego_indices(self, num_agents, agent_offsets=None):
-        num_ego = int(num_agents * self.ego_ratio)
-        num_ego = max(0, min(num_ego, num_agents))
-        required = np.empty((0,), dtype=np.int64)
-        if agent_offsets is not None and num_ego > 0:
-            agent_offsets = np.asarray(agent_offsets, dtype=np.int64)
-            assert agent_offsets.ndim == 1 and agent_offsets.size >= 2
-            assert agent_offsets[0] == 0
-            assert agent_offsets[-1] <= num_agents 
-
-            # Ensure at least 1 ego per map
-            candidates = []
-            for i in range(agent_offsets.size - 1):
-                s, e = int(agent_offsets[i]), int(agent_offsets[i + 1])
-                if e > s:
-                    candidates.append(np.random.randint(s, e))
-
-            if len(candidates) > 0:
-                candidates = np.asarray(candidates, dtype=np.int64)
-
-                if candidates.size > num_agents:
-                    pick = np.random.choice(candidates.size, size=num_agents, replace=False)
-                    required = candidates[pick]
-                else:
-                    required = candidates
-
-                num_ego = max(num_ego, required.size)
-                num_ego = min(num_ego, num_agents)
-
-        if num_ego == 0:
-            self.ego_indices = np.empty((0,), dtype=np.int64)
-            self.other_mask = np.ones(num_agents, dtype=bool)
-            return
-
-        all_idx = np.arange(num_agents, dtype=np.int64)
-        remaining = np.setdiff1d(all_idx, required, assume_unique=False)
-
-        extra_n = num_ego - required.size
-        extra = (
-            np.random.choice(remaining, size=extra_n, replace=False).astype(np.int64, copy=False)
-            if extra_n > 0 else np.empty((0,), dtype=np.int64)
-        )
-        self.ego_indices = np.concatenate([required, extra])
-        np.random.shuffle(self.ego_indices)
-        self.other_mask = np.ones(num_agents, dtype=bool)
-        self.other_mask[self.ego_indices] = False
 
     def _allocate_other_indices(self, num_agents):
         other_indices = np.setdiff1d(np.arange(num_agents), self.ego_indices, assume_unique=False)
@@ -313,9 +275,17 @@ class Drive_PBT(pufferlib.PufferEnv):
         self.terminals[:] = 0
         self.actions = actions
         if self.pbt_mode == "replay":
-            # allocate replay actions
-            replay_actions_t = self.replay_actions[:, self.tick, :]
-            self.actions[self.other_mask] = replay_actions_t[self.other_mask]
+            if os.environ.get("PUFFER_BENCH_REPLAY"):
+                _t0 = time.perf_counter()
+            self.actions[self.other_indices_arr] = self.replay_actions[self.other_indices_arr, self.tick, :]
+            if os.environ.get("PUFFER_BENCH_REPLAY"):
+                _t1 = time.perf_counter()
+                if not hasattr(self, "_bench_replay_accum"):
+                    self._bench_replay_accum = [0.0, 0]
+                self._bench_replay_accum[0] += _t1 - _t0
+                self._bench_replay_accum[1] += 1
+                if self._bench_replay_accum[1] % 10000 == 0:
+                    print(f"[bench] drive_pbt replay assign: {self._bench_replay_accum[0]*1000:.3f}ms / {self._bench_replay_accum[1]} steps = {self._bench_replay_accum[0]/self._bench_replay_accum[1]*1e6:.1f}us/step")
         binding.vec_step(self.c_envs)
         self.tick += 1
         info = []
@@ -323,13 +293,13 @@ class Drive_PBT(pufferlib.PufferEnv):
             log = binding.vec_log(self.c_envs, self.num_agents)
             if log:
                 info.append(log)
-                # print(log)
         if self.tick > 0 and self.resample_frequency > 0 and self.tick % self.resample_frequency == 0:
             self.tick = 0
             binding.vec_close(self.c_envs)
-            agent_offsets, map_ids, num_envs = binding.shared(
+            agent_offsets, map_ids, num_envs, ego_indices = binding.shared(
                 num_agents=self.num_agents,
                 num_maps=self.num_maps,
+                ego_ratio=self.ego_ratio,
                 init_mode=self.init_mode,
                 control_mode=self.control_mode,
                 init_steps=self.init_steps,
@@ -344,7 +314,12 @@ class Drive_PBT(pufferlib.PufferEnv):
             self.agent_offsets = agent_offsets
             self.map_ids = map_ids
             self.num_envs = num_envs
-            self._allocate_ego_indices(self.num_agents)
+            self.ego_indices = np.asarray(ego_indices, dtype=np.int64)
+            ao = np.asarray(agent_offsets, dtype=np.int64)
+            self.num_ego_per_env = [int(np.sum((self.ego_indices >= ao[i]) & (self.ego_indices < ao[i + 1]))) for i in range(num_envs)]
+            self.other_mask = np.ones(self.num_agents, dtype=bool)
+            self.other_mask[self.ego_indices] = False
+            self.other_indices_arr = np.flatnonzero(self.other_mask).astype(np.int64)
             if self.pbt_mode == "replay":
                 self._allocate_replay(self.num_agents, self.map_ids)
             else:
@@ -354,6 +329,7 @@ class Drive_PBT(pufferlib.PufferEnv):
             for i in range(num_envs):
                 cur = agent_offsets[i]
                 nxt = agent_offsets[i + 1]
+                ego_local = (self.ego_indices - cur)[(self.ego_indices >= cur) & (self.ego_indices < nxt)].astype(np.int32).tolist()
                 env_id = binding.env_init(
                     self.observations[cur:nxt],
                     self.actions[cur:nxt],
@@ -382,6 +358,8 @@ class Drive_PBT(pufferlib.PufferEnv):
                     max_controlled_agents=self.max_controlled_agents,
                     map_id=map_ids[i],
                     max_agents=nxt - cur,
+                    num_ego=self.num_ego_per_env[i],
+                    ego_local_indices=ego_local,
                     ini_file="pufferlib/config/ocean/drive.ini",
                     init_steps=self.init_steps,
                     init_mode=self.init_mode,

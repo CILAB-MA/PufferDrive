@@ -298,8 +298,11 @@ struct Drive {
     Log log;
     Log *logs;
     int num_agents;
+    int num_ego;           // number of ego agents for this map
     int active_agent_count;
     int *active_agent_indices;
+    int ego_local_indices[MAX_AGENTS];  /* local indices (0..active_agent_count-1) that are ego; set from env_init */
+    int num_ego_local;          /* 0 = legacy (use i==0) */
     int action_type;
     int human_agent_idx;
     Entity *entities;
@@ -347,6 +350,14 @@ struct Drive {
     int control_mode;
 };
 
+static inline int is_ego_local(Drive *env, int i) {
+    for (int j = 0; j < env->num_ego_local; j++) {
+        if (env->ego_local_indices[j] == i)
+            return 1;
+    }
+    return 0;
+}
+
 void add_log(Drive *env) {
     for (int i = 0; i < env->active_agent_count; i++) {
         Entity *e = &env->entities[env->active_agent_indices[i]];
@@ -389,7 +400,7 @@ void add_log(Drive *env) {
         env->log.speed_at_goal += env->logs[i].speed_at_goal;
         env->log.episode_length += env->logs[i].episode_length;
         env->log.episode_return += env->logs[i].episode_return;
-        if (i == 0) {
+        if ((env->num_ego_local > 0 && is_ego_local(env, i)) || (env->num_ego_local == 0 && i == 0)) {
             env->log.ego_score += (frac_goal_reached > threshold && !collision_occurred) ? 1.0f : 0.0f;
             env->log.ego_offroad_rate += offroad;
             env->log.ego_collision_rate += collided;

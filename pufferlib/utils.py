@@ -119,6 +119,8 @@ def run_wosac_eval_in_subprocess(config, logger, global_step):
             str(eval_config.get("wosac_sanity_check", False)),
             "--eval.wosac-aggregate-results",
             str(eval_config.get("wosac_aggregate_results", True)),
+            "--env.termination-mode",
+            0,
         ]
 
         if not model_files:

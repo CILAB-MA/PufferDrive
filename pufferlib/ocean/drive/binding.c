@@ -70,6 +70,9 @@ static int my_put(Env *env, PyObject *args, PyObject *kwargs) {
 static PyObject *my_shared(PyObject *self, PyObject *args, PyObject *kwargs) {
     char *map_dir = unpack_str(kwargs, "map_dir");
     int num_agents = unpack(kwargs, "num_agents");
+    PyObject *ego_ratio_obj = PyDict_GetItemString(kwargs, "ego_ratio");
+    float ego_ratio = ego_ratio_obj ? (float)PyFloat_AsDouble(ego_ratio_obj) : 0.0f;
+    int ego_num_agents = (int)(ego_ratio * (float)num_agents);
     int num_maps = unpack(kwargs, "num_maps");
     int init_mode = unpack(kwargs, "init_mode");
     int control_mode = unpack(kwargs, "control_mode");
@@ -86,6 +89,7 @@ static PyObject *my_shared(PyObject *self, PyObject *args, PyObject *kwargs) {
     int maps_checked = 0;
     PyObject *agent_offsets = PyList_New(max_envs + 1);
     PyObject *map_ids = PyList_New(max_envs);
+    PyObject *ego_indices_list = PyList_New(0);
     // getting env count
     while (sequential_map_sampling ? map_idx < max_envs : total_agent_count < num_agents && env_count < max_envs) {
         char map_file[512];
@@ -158,16 +162,39 @@ static PyObject *my_shared(PyObject *self, PyObject *args, PyObject *kwargs) {
     if (!sequential_map_sampling && total_agent_count >= num_agents) {
         total_agent_count = num_agents;
     }
+    int n_ego = ego_num_agents < total_agent_count ? ego_num_agents : total_agent_count;
+    if (n_ego > 0 && total_agent_count > 0) {
+        int *indices = (int *)malloc((size_t)total_agent_count * sizeof(int));
+        if (indices) {
+            for (int i = 0; i < total_agent_count; i++)
+                indices[i] = i;
+            for (int j = 0; j < n_ego; j++) {
+                int r = j + (rand() % (total_agent_count - j));
+                int t = indices[j];
+                indices[j] = indices[r];
+                indices[r] = t;
+                if (PyList_Append(ego_indices_list, PyLong_FromLong(indices[j])) < 0) {
+                    free(indices);
+                    Py_DECREF(ego_indices_list);
+                    Py_DECREF(agent_offsets);
+                    Py_DECREF(map_ids);
+                    return NULL;
+                }
+            }
+            free(indices);
+        }
+    }
     PyObject *final_total_agent_count = PyLong_FromLong(total_agent_count);
     PyList_SetItem(agent_offsets, env_count, final_total_agent_count);
     PyObject *final_env_count = PyLong_FromLong(env_count);
     // resize lists
     PyObject *resized_agent_offsets = PyList_GetSlice(agent_offsets, 0, env_count + 1);
     PyObject *resized_map_ids = PyList_GetSlice(map_ids, 0, env_count);
-    PyObject *tuple = PyTuple_New(3);
+    PyObject *tuple = PyTuple_New(4);
     PyTuple_SetItem(tuple, 0, resized_agent_offsets);
     PyTuple_SetItem(tuple, 1, resized_map_ids);
     PyTuple_SetItem(tuple, 2, final_env_count);
+    PyTuple_SetItem(tuple, 3, ego_indices_list);
     return tuple;
 }
 
@@ -217,6 +244,17 @@ static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
     env->map_name = strdup(map_file);
     env->init_steps = init_steps;
     env->timestep = init_steps;
+    env->num_ego = (kwargs && PyDict_GetItemString(kwargs, "num_ego")) ? (int)unpack(kwargs, "num_ego") : 0;
+    env->num_ego_local = 0;
+    PyObject *ego_local_obj = kwargs ? PyDict_GetItemString(kwargs, "ego_local_indices") : NULL;
+    if (ego_local_obj && PyList_Check(ego_local_obj)) {
+        Py_ssize_t n = PyList_Size(ego_local_obj);
+        if (n > MAX_AGENTS)
+            n = MAX_AGENTS;
+        for (Py_ssize_t j = 0; j < n; j++) {
+            env->ego_local_indices[env->num_ego_local++] = (int)PyLong_AsLong(PyList_GetItem(ego_local_obj, j));
+        }
+    }
     init(env);
     return 0;
 }
