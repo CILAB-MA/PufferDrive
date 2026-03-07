@@ -840,7 +840,8 @@ class PuffeRL:
             and (((self.epoch - 1) % self.config["eval"]["eval_interval"] == 0) or done_training)
         ):
             config = self.config.copy()
-            # config["env"] = "puffer_drive"
+            config["model_env_name"] = config["env"]
+            config["env"] = "puffer_drive"
             config["ego_ratio"] = 1.0
             pufferlib.utils.run_wosac_eval_in_subprocess(config, self.logger, self.global_step)
 
@@ -850,6 +851,7 @@ class PuffeRL:
             and (((self.epoch - 1) % self.config["eval"]["eval_interval"] == 0) or done_training)
         ):
             config = self.config.copy()
+            config["model_env_name"] = config["env"]
             config["env"] = "puffer_drive"
             pufferlib.utils.run_human_replay_eval_in_subprocess(config, self.logger, self.global_step)
 
@@ -1369,8 +1371,8 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
     pufferl.logger.close(model_path)
     return all_logs
 
-def train_pbt(env_name, args=None, vecenv=None, policy=None, logger=None):
-    args = args or load_config(env_name)
+def train_pbt(env_name, args=None, vecenv=None, policy=None, logger=None, config=None):
+    args = args or load_config(env_name, config_dir=config)
 
     # Assume TorchRun DDP is used if LOCAL_RANK is set
     if "LOCAL_RANK" in os.environ:
@@ -2139,7 +2141,8 @@ def main():
     if mode == "train":
         train(env_name=env_name)
     if mode == "train_pbt":
-        train_pbt(env_name=env_name)
+        config_dir = "pufferlib/ocean/drive_pbt"
+        train_pbt(env_name=env_name, config=config_dir)
     elif mode == "eval":
         eval(env_name=env_name)
     elif mode == "sweep":
