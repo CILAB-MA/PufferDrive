@@ -155,7 +155,7 @@ class PuffeRL:
                         other_lstm_c = {i * self.num_agents_per_env: torch.zeros(count, h, device=device) for i in range(total_agents // self.num_agents_per_env)}
                         self.other_lstm_hs.append(other_lstm_h)
                         self.other_lstm_cs.append(other_lstm_c)
-        if config.get("use_pbt") and config.get("pbt_mode") == "replay":
+        if config.get("use_pbt"):
             self._total_actions_buffer = np.zeros((n, 1), dtype=np.int64)
 
         # Minibatching & gradient accumulation
@@ -1551,10 +1551,11 @@ def eval(env_name, args=None, vecenv=None, policy=None):
         import json
 
         print("HUMAN_REPLAY_METRICS_START")
-        id_ = args["load_model_path"]
-        map_results = {id_[-11:-3]: results}
-        print(map_results)
-        save_result("/data/puffer/results/nominal/logreplay.json", map_results)
+        print(json.dumps(results))
+        # id_ = args["load_model_path"]
+        # map_results = {id_[-11:-3]: results}
+        # print(map_results)
+        # save_result("/data/puffer/results/nominal/logreplay.json", map_results)
         print("HUMAN_REPLAY_METRICS_END")
 
         return results
