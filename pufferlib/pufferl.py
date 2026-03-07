@@ -256,7 +256,7 @@ class PuffeRL:
 
         # Dashboard
         self.model_size = sum(p.numel() for p in policy.parameters() if p.requires_grad)
-        self.print_dashboard(clear=True)
+        # self.print_dashboard(clear=True)
 
     @property
     def uptime(self):
@@ -796,7 +796,7 @@ class PuffeRL:
         if done_training or self.global_step == 0 or time.time() > self.last_log_time + 0.25:
             logs = self.mean_and_log()
             self.losses = losses
-            self.print_dashboard()
+            # self.print_dashboard()
             self.stats = defaultdict(list)
             self.last_log_time = time.time()
             self.last_log_step = self.global_step
@@ -864,6 +864,14 @@ class PuffeRL:
                 del self.stats[k]
 
             self.stats[k] = v
+
+        # Debug: estimate replay (other) success rate; should stay ~0.98 if replay is stable
+        # score = (ego_score*ego_n + other_score*other_n)/n  =>  other_implicit = (score*n - ego_score*ego_n)/(n - ego_n)
+        if config.get("use_pbt") and "score" in self.stats and "ego_score" in self.stats and "n" in self.stats and "ego_n" in self.stats:
+            s, es, n, en = self.stats["score"], self.stats["ego_score"], self.stats["n"], self.stats["ego_n"]
+            if n > en and en > 0:
+                other_implicit = (s * n - es * en) / (n - en)
+                self.stats["other_score_implicit"] = float(np.clip(other_implicit, 0, 1))
 
         device = config["device"]
         agent_steps = int(dist_sum(self.global_step, device))

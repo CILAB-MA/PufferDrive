@@ -273,19 +273,9 @@ class Drive_PBT(pufferlib.PufferEnv):
 
     def step(self, actions):
         self.terminals[:] = 0
-        self.actions = actions
+        self.actions[:] = actions
         if self.pbt_mode == "replay":
-            if os.environ.get("PUFFER_BENCH_REPLAY"):
-                _t0 = time.perf_counter()
             self.actions[self.other_indices_arr] = self.replay_actions[self.other_indices_arr, self.tick, :]
-            if os.environ.get("PUFFER_BENCH_REPLAY"):
-                _t1 = time.perf_counter()
-                if not hasattr(self, "_bench_replay_accum"):
-                    self._bench_replay_accum = [0.0, 0]
-                self._bench_replay_accum[0] += _t1 - _t0
-                self._bench_replay_accum[1] += 1
-                if self._bench_replay_accum[1] % 10000 == 0:
-                    print(f"[bench] drive_pbt replay assign: {self._bench_replay_accum[0]*1000:.3f}ms / {self._bench_replay_accum[1]} steps = {self._bench_replay_accum[0]/self._bench_replay_accum[1]*1e6:.1f}us/step")
         binding.vec_step(self.c_envs)
         self.tick += 1
         info = []
