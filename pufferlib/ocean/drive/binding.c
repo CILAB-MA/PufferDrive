@@ -208,6 +208,9 @@ static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
     if (kwargs && PyDict_GetItemString(kwargs, "episode_length")) {
         conf.episode_length = (int)unpack(kwargs, "episode_length");
     }
+    if (kwargs && PyDict_GetItemString(kwargs, "termination_mode")) {
+        conf.termination_mode = (int)unpack(kwargs, "termination_mode");
+    }
     if (conf.episode_length <= 0) {
         PyErr_SetString(PyExc_ValueError, "episode_length must be > 0 (set in INI or kwargs)");
         return -1;

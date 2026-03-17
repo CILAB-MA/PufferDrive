@@ -716,8 +716,9 @@ class HumanReplayEvaluator:
 class OtherReplayEvaluator:
     """Evaluates policies against other policies replays in PufferDrive."""
 
-    def __init__(self, config: Dict, mode: str = None):
+    def __init__(self, config: Dict, mode: str = None, exp: str = None):
         self.config = config
+        self.exp = exp
         self.mode = mode
         self.sim_steps = 91
 
@@ -810,7 +811,7 @@ class OtherReplayEvaluator:
                     other_name = args['load_multiple_model_path'][1][-11:-3]
                 res_dict = {f"{args['load_multiple_model_path'][0][-11:-3]}_vs_{other_name}": results}
                 print(res_dict)
-                self.save_result(f"/data/puffer/results/{self.mode}/zeroshot_reactive.json", res_dict)
+                self.save_result(f"/data/puffer/results/{self.exp}/{self.mode}/zeroshot_reactive.json", res_dict)
                 return results
 
     def save_replay(self, args, puffer_env, policy1, policy2):

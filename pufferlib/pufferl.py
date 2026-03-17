@@ -1523,10 +1523,11 @@ def eval(env_name, args=None, vecenv=None, policy=None):
 
             print("\nWOSAC_METRICS_START")
             print(json.dumps(results))
-            # TODO: 저장 따로 시켜야 함
-            # id_ = args["load_model_path"]
-            # map_results = {id_[-11:-3]: results}
-            # save_result("/data/puffer/results/nominal/wosac.json", map_results)
+            if args["eval"].get("wosac_save_results", True) and args.get("load_model_path"):
+                id_ = args["load_model_path"]
+                exp = id_.split("/")[-2]
+                map_results = {id_[-11:-3]: results}
+                save_result(f"/data/puffer/results/{exp}/wosac.json", map_results)
             print("WOSAC_METRICS_END")
 
         return results
@@ -1554,10 +1555,11 @@ def eval(env_name, args=None, vecenv=None, policy=None):
 
         print("HUMAN_REPLAY_METRICS_START")
         print(json.dumps(results))
-        # id_ = args["load_model_path"]
-        # map_results = {id_[-11:-3]: results}
-        # print(map_results)
-        # save_result("/data/puffer/results/nominal/logreplay.json", map_results)
+        if args["eval"].get("human_replay_save_results", True) and args.get("load_model_path"):
+            id_ = args["load_model_path"]
+            exp = id_.split("/")[-2]
+            map_results = {id_[-11:-3]: results}
+            save_result(f"/data/puffer/results/{exp}/logreplay.json", map_results)
         print("HUMAN_REPLAY_METRICS_END")
 
         return results
@@ -1780,7 +1782,7 @@ def zero_shot(env_name, args=None, vecenv=None, policies=None):
     args["vec"] = dict(backend=backend, num_envs=1)
     # args["env"]["control_mode"] = args["eval"]["human_replay_control_mode"]
     args["env"]["episode_length"] = 91  # WOMD scenario length
-
+    args["env"]["num_maps"] = 10000 
     vecenv = vecenv or load_env(env_name, args)
     args2 = args.copy()
     if args["pbt"]["pbt_mode"] == "save-population":
@@ -1835,8 +1837,9 @@ def zero_shot(env_name, args=None, vecenv=None, policies=None):
     policy2 = load_policy(args2, vecenv, env_name)
 
     print(f"Effective number of scenarios used: {len(vecenv.driver_env.agent_offsets) - 1}")
-    parts = args["load_multiple_model_path"][1].split("/") 
-    evaluator = OtherReplayEvaluator(args, mode=parts[4])
+    parts_population = args["load_multiple_model_path"][1].split("/") 
+    parts_ego = args["load_multiple_model_path"][0].split("/")
+    evaluator = OtherReplayEvaluator(args, mode=parts_population[4], exp=parts_ego[4])
 
     # Run save replay
     # todo: randomly save the state for calculating log diff

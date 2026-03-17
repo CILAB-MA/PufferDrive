@@ -13,7 +13,7 @@ for f in /data/puffer/experiments/${FOLDER}/puffer_drive_*.pt; do
   EGOS+=("$id")
 done
 
-for f in /data/puffer/experiments/${POPULATION_MODE}/${MODE}/puffer_drive_*.pt; do
+for f in /data/puffer/${POPULATION_MODE}/${MODE}/puffer_drive_*.pt; do
   bn=$(basename "$f") # puffer_drive_xxx.pt
   id=${bn#puffer_drive_} # xxx.pt
   id=${id%.pt} # xxx
@@ -22,26 +22,12 @@ done
 
 echo "Found models: ${EGOS[*]} ${OTHERS[*]}"
 
-# for OTHER in "${OTHERS[@]}"; do
-
-#   echo "Running save-replay: OTHER MODE ${MODE} ${OTHER} vs ${OTHER}"
-#   CUDA_VISIBLE_DEVICES=$GPU_ID puffer zeroshot puffer_drive \
-#     --load-multiple-model-path "/data/puffer/experiments/${MODE}/puffer_drive_${OTHER}.pt" \
-#                                "/data/puffer/experiments/${MODE}/puffer_drive_${OTHER}.pt" \
-#     --zero-shot-mode "save-replay"
-# done
-
 for MP1 in "${EGOS[@]}"; do
   for MP2 in "${OTHERS[@]}"; do
-    # echo "Running replay: ${MP1} vs ${MP2}"
-    # CUDA_VISIBLE_DEVICES=$GPU_ID puffer zeroshot puffer_drive \
-    #   --load-multiple-model-path "/data/puffer/experiments/${EGO_MODE}/puffer_drive_${MP1}.pt" \
-    #                              "/data/puffer/experiments/${MODE}/puffer_drive_${MP2}.pt" \
-    #   --zero-shot-mode "replay"
     echo "Running reactive-play: ${MP1} vs ${MP2}"
     CUDA_VISIBLE_DEVICES=$GPU_ID puffer zeroshot puffer_drive \
       --load-multiple-model-path "/data/puffer/experiments/${FOLDER}/puffer_drive_${MP1}.pt" \
-                                 "/data/puffer/experiments/${POPULATION_MODE}/${MODE}/puffer_drive_${MP2}.pt" \
-      --zero-shot-mode "reactive-play"
+                                 "/data/puffer/${POPULATION_MODE}/${MODE}/puffer_drive_${MP2}.pt" \
+      --zero-shot-mode "reactive-play" --env.termination-mode "0" 
   done
 done

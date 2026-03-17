@@ -41,6 +41,8 @@ def run_human_replay_eval_in_subprocess(config, logger, global_step):
             str(eval_config["human_replay_control_mode"]),
             "--env.termination-mode",
             "0",
+            "--eval.human-replay-save-results",
+            "False",
         ]
 
         # Run human replay evaluation in subprocess
@@ -119,6 +121,8 @@ def run_wosac_eval_in_subprocess(config, logger, global_step):
             str(eval_config.get("wosac_sanity_check", False)),
             "--eval.wosac-aggregate-results",
             str(eval_config.get("wosac_aggregate_results", True)),
+            "--eval.wosac-save-results",
+            "False",
         ]
 
         if not model_files:
