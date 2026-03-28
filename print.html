@@ -29,7 +29,7 @@
         <link rel="stylesheet" id="mdbook-ayu-highlight-css" href="ayu-highlight-3fdfc3ac.css">
 
         <!-- Custom theme stylesheets -->
-        <link rel="stylesheet" href="theme/extra-1e76a9d8.css">
+        <link rel="stylesheet" href="theme/extra-534a9ef5.css">
 
         <!-- MathJax -->
         <script async src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.1/MathJax.js?config=TeX-AMS-MML_HTMLorMML"></script>
@@ -39,7 +39,7 @@
             const path_to_root = "";
             const default_light_theme = "light";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-f4073e00.js";
+            window.path_to_searchindex_js = "searchindex-964f3250.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-8d227c1c.js"></script>
@@ -306,7 +306,7 @@ uv pip install -e .
 <p>Run this with your virtual environment activated so the compiled extension links against the correct Python.</p>
 <h3 id="when-to-rebuild-the-extension"><a class="header" href="#when-to-rebuild-the-extension">When to rebuild the extension</a></h3>
 <ul>
-<li>Re-run <code>python setup.py build_ext --inplace --force</code> after changing any C/Raylib sources in <code>pufferlib/ocean/drive</code> (e.g., <code>drive.c</code>, <code>drive.h</code>, <code>binding.c</code>, <code>visualize.c</code>) or after pulling upstream changes that touch those files. This regenerates the <code>binding.cpython-*.so</code> used by <code>Drive</code>.</li>
+<li>Re-run <code>python setup.py build_ext --inplace --force</code> after changing any C/Raylib sources in <code>pufferlib/ocean/drive</code> (e.g., <code>drive.c</code>, <code>drive.h</code>, <code>binding.c</code>) or after pulling upstream changes that touch those files. This regenerates the <code>binding.cpython-*.so</code> used by <code>Drive</code>.</li>
 <li>Pure Python edits (training scripts, docs, data utilities) do not require a rebuild; just restart your Python process.</li>
 </ul>
 <h2 id="verify-the-setup"><a class="header" href="#verify-the-setup">Verify the setup</a></h2>
@@ -390,6 +390,38 @@ values = [10, 20, 30]
 <pre><code class="language-bash">./drive
 </code></pre>
 <p>This will run <code>demo()</code> with an existing model checkpoint.</p>
+<h2 id="arguments--configuration"><a class="header" href="#arguments--configuration">Arguments &amp; Configuration</a></h2>
+<p>The <code>drive</code> tool supports similar CLI arguments as the visualizer to control the environment and rendering. It also reads the <code>pufferlib/config/ocean/drive.ini</code> file for default environment settings.</p>
+<h3 id="command-line-arguments"><a class="header" href="#command-line-arguments">Command Line Arguments</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th style="text-align: left">Argument</th><th style="text-align: left">Description</th><th style="text-align: left">Default</th></tr>
+</thead>
+<tbody>
+<tr><td style="text-align: left"><code>--map-name &lt;path&gt;</code></td><td style="text-align: left">Path to the map binary file (e.g., <code>resources/drive/binaries/training/map_000.bin</code>). If omitted, picks a random map out of <code>num_maps</code> from <code>map_dir</code> in <code>drive.ini</code>.</td><td style="text-align: left">Random</td></tr>
+<tr><td style="text-align: left"><code>--policy-name &lt;path&gt;</code></td><td style="text-align: left"><code>Path to the policy weights file (.bin).</code></td><td style="text-align: left"><code>resources/drive/puffer_drive_weights.bin</code></td></tr>
+<tr><td style="text-align: left"><code>--view &lt;mode&gt;</code></td><td style="text-align: left">Selects which views to render: <code>agent</code>, <code>topdown</code>, or <code>both</code>.</td><td style="text-align: left"><code>both</code></td></tr>
+<tr><td style="text-align: left"><code>--frame-skip &lt;n&gt;</code></td><td style="text-align: left">Renders every Nth frame to speed up simulation (framerate remains 30fps).</td><td style="text-align: left"><code>1</code></td></tr>
+<tr><td style="text-align: left"><code>--num-maps &lt;n&gt;</code></td><td style="text-align: left">Overrides the number of maps to sample from if <code>--map-name</code> is not set.</td><td style="text-align: left"><code>drive.ini</code> value</td></tr>
+</tbody>
+</table>
+</div>
+<h3 id="visualization-flags"><a class="header" href="#visualization-flags">Visualization Flags</a></h3>
+<div class="table-wrapper">
+<table>
+<thead>
+<tr><th style="text-align: left">Flag</th><th style="text-align: left">Description</th></tr>
+</thead>
+<tbody>
+<tr><td style="text-align: left"><code>--show-grid</code></td><td style="text-align: left">Draws the underlying nav-graph/grid on the map.</td></tr>
+<tr><td style="text-align: left"><code>--obs-only</code></td><td style="text-align: left">Hides objects not currently visible to the agent’s sensors (fog of war).</td></tr>
+<tr><td style="text-align: left"><code>--lasers</code></td><td style="text-align: left">Visualizes the raycast sensor lines from the agent.</td></tr>
+<tr><td style="text-align: left"><code>--log-trajectories</code></td><td style="text-align: left">Draws the ground-truth “human” expert trajectories as green lines.</td></tr>
+<tr><td style="text-align: left"><code>--zoom-in</code></td><td style="text-align: left">Zooms the camera mainly on the active region rather than the full map bounds.</td></tr>
+</tbody>
+</table>
+</div>
 <h3 id="controls"><a class="header" href="#controls">Controls</a></h3>
 <p><strong>General:</strong></p>
 <ul>
@@ -441,12 +473,35 @@ values = [10, 20, 30]
 <ul>
 <li><code>control_vehicles</code>: Only vehicles</li>
 <li><code>control_agents</code>: All agent types (vehicles, cyclists, pedestrians)</li>
-<li><code>control_tracks_to_predict</code>: WOMD evaluation mode</li>
+<li><code>control_wosac</code>: WOSAC evaluation mode (controls all valid agents ignoring expert flag and start to goal distance)</li>
 <li><code>control_sdc_only</code>: Self-driving car only</li>
 </ul>
 <blockquote class="blockquote-tag blockquote-tag-note">
 <p class="blockquote-tag-title"><svg viewbox="0 0 16 16" width="18" height="18"><path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm8-6.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM6.5 7.75A.75.75 0 0 1 7.25 7h1a.75.75 0 0 1 .75.75v2.75h.25a.75.75 0 0 1 0 1.5h-2a.75.75 0 0 1 0-1.5h.25v-2h-.25a.75.75 0 0 1-.75-.75ZM8 6a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"></path></svg>Note</p>
-<p><code>control_vehicles</code> filters out agents marked as “expert” and those too close to their goal (&lt;2m). For full WOMD evaluation, use <code>control_tracks_to_predict</code>.</p>
+<p><code>control_vehicles</code> filters out agents marked as “expert” and those too close to their goal (&lt;2m). For full WOMD evaluation, use <code>control_wosac</code>.</p>
+</blockquote>
+<blockquote class="blockquote-tag blockquote-tag-important">
+<p class="blockquote-tag-title"><svg viewbox="0 0 16 16" width="18" height="18"><path d="M0 1.75C0 .784.784 0 1.75 0h12.5C15.216 0 16 .784 16 1.75v9.5A1.75 1.75 0 0 1 14.25 13H8.06l-2.573 2.573A1.458 1.458 0 0 1 3 14.543V13H1.75A1.75 1.75 0 0 1 0 11.25Zm1.75-.25a.25.25 0 0 0-.25.25v9.5c0 .138.112.25.25.25h2a.75.75 0 0 1 .75.75v2.19l2.72-2.72a.749.749 0 0 1 .53-.22h6.5a.25.25 0 0 0 .25-.25v-9.5a.25.25 0 0 0-.25-.25Zm7 2.25v2.5a.75.75 0 0 1-1.5 0v-2.5a.75.75 0 0 1 1.5 0ZM9 9a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z"></path></svg>Important</p>
+<p><strong>Agent Dynamics:</strong> The simulator supports three types of agents:</p>
+<ol>
+<li><strong>Policy-Controlled:</strong> Stepped by your model’s actions.</li>
+<li><strong>Experts:</strong> Stepped using ground-truth log trajectories.</li>
+<li><strong>Static:</strong> Remain frozen in place.</li>
+</ol>
+<p>In the simulator, agents not selected for policy control will be treated as <strong>Static</strong> by default. To make them follow their <strong>Expert trajectories</strong>, you must set <code>mark_as_expert=true</code> for those agents in the jsons. This is critical for <code>control_sdc_only</code> to ensure the environment behaves realistically around the policy-controlled agents.</p>
+</blockquote>
+<h3 id="init-modes"><a class="header" href="#init-modes">Init modes</a></h3>
+<ul>
+<li>
+<p><strong><code>create_all_valid</code></strong> (Default): Initializes every valid agent present in the map file. This includes policy-controlled agents, experts (if marked), and static agents.</p>
+</li>
+<li>
+<p><strong><code>create_only_controlled</code></strong>: Initializes <strong>only</strong> the agents that are directly controlled by the policy.</p>
+</li>
+</ul>
+<blockquote class="blockquote-tag blockquote-tag-note">
+<p class="blockquote-tag-title"><svg viewbox="0 0 16 16" width="18" height="18"><path d="M0 8a8 8 0 1 1 16 0A8 8 0 0 1 0 8Zm8-6.5a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13ZM6.5 7.75A.75.75 0 0 1 7.25 7h1a.75.75 0 0 1 .75.75v2.75h.25a.75.75 0 0 1 0 1.5h-2a.75.75 0 0 1 0-1.5h.25v-2h-.25a.75.75 0 0 1-.75-.75ZM8 6a1 1 0 1 1 0-2 1 1 0 0 1 0 2Z"></path></svg>Note</p>
+<p>In <code>create_only_controlled</code> mode, the environment will contain <strong>no static or expert agents</strong>. Only the policy-controlled agents will exist.</p>
 </blockquote>
 <h3 id="goal-behaviors"><a class="header" href="#goal-behaviors">Goal behaviors</a></h3>
 <p>Three modes determine what happens when an agent reaches its goal:</p>
@@ -677,7 +732,6 @@ values = [10, 20, 30]
 <li><code>drive.h</code>: Main simulator (stepping, observations, collisions)</li>
 <li><code>drive.c</code>: Demo and testing</li>
 <li><code>binding.c</code>: Python interface</li>
-<li><code>visualize.c</code>: Raylib renderer</li>
 <li><code>drivenet.h</code>: C inference network</li>
 </ul>
 <h3 id="python"><a class="header" href="#python">Python</a></h3>
@@ -793,25 +847,37 @@ values = [10, 20, 30]
 </ul>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="visualizer"><a class="header" href="#visualizer">Visualizer</a></h1>
-<p>PufferDrive ships a Raylib-based visualizer for replaying scenes, exporting videos, and debugging policies.</p>
+<p>PufferDrive uses <a href="https://www.raylib.com/">Raylib</a> for rendering the environment. Rendering is driven from Python using the torch policy directly. No separate binary or weight export is required.</p>
 <h2 id="dependencies"><a class="header" href="#dependencies">Dependencies</a></h2>
-<p>Install the minimal system packages for headless render/export:</p>
-<pre><code class="language-bash">sudo apt update
-sudo apt install ffmpeg xvfb
+<p>For headless rendering, we need ffmpeg and xvfb.</p>
+<pre><code class="language-bash">sudo apt update &amp;&amp; sudo apt install ffmpeg xvfb
 </code></pre>
-<p>On environments without sudo, install them into your conda/venv:</p>
-<pre><code class="language-bash">conda install -c conda-forge xorg-x11-server-xvfb-cos6-x86_64 ffmpeg
+<h2 id="render-modes"><a class="header" href="#render-modes">Render Modes</a></h2>
+<p>Configure <code>render_mode</code> in <code>pufferlib/config/ocean/drive.ini</code>:</p>
+<pre><code class="language-ini">; 0 = pop-up window (requires display)
+; 1 = headless (pipes frames to ffmpeg, recommended for servers/training)
+render_mode = 1
 </code></pre>
-<h2 id="build"><a class="header" href="#build">Build</a></h2>
-<p>Compile the visualizer binary from the repo root:</p>
-<pre><code class="language-bash">bash scripts/build_ocean.sh visualize local
+<h2 id="rendering-once"><a class="header" href="#rendering-once">Rendering once</a></h2>
+<pre><code class="language-bash">puffer eval puffer_drive
 </code></pre>
-<p>If you need to force a rebuild, remove the cached binary first (<code>rm ./visualize</code>).</p>
-<h2 id="run-headless"><a class="header" href="#run-headless">Run headless</a></h2>
-<p>Launch the visualizer with a virtual display and export an <code>.mp4</code>:</p>
-<pre><code class="language-bash">xvfb-run -s "-screen 0 1280x720x24" ./visualize
+<p>This runs a short rollout, calls <code>env.render()</code> each step, and finalizes the video on <code>vecenv.close()</code>. Use <code>render_mode</code> to determine whether the video shows up as a pop-up window, or whether it is stored as an mp4.</p>
+<h2 id="view-modes"><a class="header" href="#view-modes">View modes</a></h2>
+<p>Control what is rendered via the <code>view_mode</code> argument to <code>env.render()</code>:</p>
+<pre><code class="language-python">class RenderView(IntEnum):
+    FULL_SIM_STATE = 0  # Top-down, fully observable
+    BEV_AGENT_OBS  = 1  # Top-down, selected agent's observations only
+    AGENT_PERSP    = 2  # Third-person perspective following selected agent
+
+env.render(view_mode=RenderView.FULL_SIM_STATE, draw_traces=True, env_id=0)
 </code></pre>
-<p>Adjust the screen size and color depth as needed. The <code>xvfb-run</code> wrapper allows Raylib to render without an attached display, which is convenient for servers and CI jobs.</p>
+<h2 id="training-time-evaluation"><a class="header" href="#training-time-evaluation">Training-time evaluation</a></h2>
+<p>Rendering during training is controlled by the <code>[eval]</code> section of <code>drive.ini</code>. See that file for available options (<code>human_replay_eval</code>, <code>self_play_eval</code>, <code>eval_interval</code>, etc.).</p>
+<h2 id="sharp-edges"><a class="header" href="#sharp-edges">Sharp edges</a></h2>
+<ul>
+<li><strong>Raylib is not thread-safe.</strong> If you create two separate render envs, always call <code>env1.close()</code> before calling <code>env2.render()</code>.</li>
+<li>Headless mode derives window dimensions from map bounds automatically; no manual resolution configuration is needed.</li>
+</ul>
 <div style="break-before: page; page-break-before: always;"></div>
 <h1 id="data"><a class="header" href="#data">Data</a></h1>
 <p>PufferDrive consumes map binaries generated from multiple data sources, including the <a href="https://github.com/waymo-research/waymo-open-dataset">Waymo Open Motion Dataset (WOMD)</a> JSON files, <a href="https://github.com/valeoai/V-Max">ScenarioMax</a>, and <a href="https://carla.org/">CARLA</a>. This page covers how to obtain data and convert it into the binary format expected by the simulator.</p>
