@@ -229,7 +229,7 @@ class Drive_PBT(pufferlib.PufferEnv):
         self.pbt_mode = pbt_mode
         if pbt_mode == "replay":
             # Load Replay
-            npz = np.load(os.path.join(self.population_path, "replay", "other_actions_int16.npz"), allow_pickle=True)
+            npz = np.load(os.path.join(self.population_path, "replay", "other_actions.npz"), allow_pickle=True)
             self.other_actions = npz['actions']
             self.actions_agent_offsets = npz['agent_offsets']
             self.actions_map_id = npz['map_ids']

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 GPU_ID=${1:-0}
-MODE=${2:-unseen_other_seeds} # or unseen_other_rewards
-FOLDER=${3:-reactive} # or replay, selfplay
-POPULATION_MODE=${4:-popul_lane_nominal} # population folder
+FOLDER=${2:-reactive_nominal} # or replay, selfplay
+POPULATION_MODE=${3:-popul_nominal} # population folder
+MODE=${4:-unseen_other_seeds} # or unseen_other_rewards
 EGOS=()
 OTHERS=()
 

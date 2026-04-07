@@ -843,30 +843,53 @@ void set_means(Drive *env) {
 void move_expert(Drive *env, float *actions, int agent_idx) {
     Entity *agent = &env->entities[agent_idx];
     int t = env->timestep;
+
     if (t < 0 || t >= agent->array_size) {
         agent->x = INVALID_POSITION;
         agent->y = INVALID_POSITION;
         agent->z = 0.0f;
+        agent->vx = 0.0f;
+        agent->vy = 0.0f;
+        agent->vz = 0.0f;
         agent->heading = 0.0f;
         agent->heading_x = 1.0f;
         agent->heading_y = 0.0f;
         return;
     }
+
     if (agent->traj_valid && agent->traj_valid[t] == 0) {
         agent->x = INVALID_POSITION;
         agent->y = INVALID_POSITION;
         agent->z = 0.0f;
+        agent->vx = 0.0f;
+        agent->vy = 0.0f;
+        agent->vz = 0.0f;
         agent->heading = 0.0f;
         agent->heading_x = 1.0f;
         agent->heading_y = 0.0f;
         return;
     }
+
     agent->x = agent->traj_x[t];
     agent->y = agent->traj_y[t];
     agent->z = agent->traj_z[t];
     agent->heading = agent->traj_heading[t];
     agent->heading_x = cosf(agent->heading);
     agent->heading_y = sinf(agent->heading);
+
+    if (agent->traj_vx != NULL && agent->traj_vy != NULL && agent->traj_vz != NULL) {
+        agent->vx = agent->traj_vx[t];
+        agent->vy = agent->traj_vy[t];
+        agent->vz = agent->traj_vz[t];
+    } else if (t > 0 && env->dt > 0.0f) {
+        agent->vx = (agent->traj_x[t] - agent->traj_x[t - 1]) / env->dt;
+        agent->vy = (agent->traj_y[t] - agent->traj_y[t - 1]) / env->dt;
+        agent->vz = (agent->traj_z[t] - agent->traj_z[t - 1]) / env->dt;
+    } else {
+        agent->vx = 0.0f;
+        agent->vy = 0.0f;
+        agent->vz = 0.0f;
+    }
 }
 
 bool check_line_intersection(float p1[2], float p2[2], float q1[2], float q2[2]) {
