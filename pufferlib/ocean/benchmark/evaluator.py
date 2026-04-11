@@ -879,7 +879,8 @@ class OtherReplayEvaluator:
 
             if len(info_list) > 0:  # Happens at the end of episode
                 results = info_list[0]
-                np.save(f"/data/puffer/experiments/{self.mode}/other_action_buffer/other_actions_{args['load_multiple_model_path'][0][-11:-3]}.npy", other_action_buf)
+                # Must match ``play_replay`` load key: second path is the "other" policy whose actions we save.
+                np.save(f"/data/puffer/experiments/{self.mode}/other_action_buffer/other_actions_{args['load_multiple_model_path'][1][-11:-3]}.npy", other_action_buf)
                 ego_speed /= (time_idx + 1)
                 results["ego_speed"] = ego_speed.item()
                 res_dict = {f"{args['load_multiple_model_path'][0][-11:-3]}_vs_selfplay": results}

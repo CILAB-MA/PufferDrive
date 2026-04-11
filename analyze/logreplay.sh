@@ -15,5 +15,5 @@ echo "Found models: ${EGOS[*]}"
 
 for EGO in "${EGOS[@]}"; do
   echo "Running log-replay: EGO ${EGO} vs ${EGO}"
-  CUDA_VISIBLE_DEVICES=$GPU_ID puffer eval puffer_drive --eval.human-replay-eval True  --env.termination-mode "0" --eval.wosac-num-maps "10000" --load-model-path "/data/puffer/experiments/${MODE}/puffer_drive_${EGO}.pt"
+  CUDA_VISIBLE_DEVICES=$GPU_ID puffer eval puffer_drive --eval.human-replay-eval True --eval.human-replay-save-results True --env.termination-mode "0" --eval.wosac-num-maps "10000" --load-model-path "/data/puffer/experiments/${MODE}/puffer_drive_${EGO}.pt"
 done

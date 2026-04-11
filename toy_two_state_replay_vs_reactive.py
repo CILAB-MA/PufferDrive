@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import pickle
 from dataclasses import dataclass, field, replace
 from typing import Optional
 
@@ -59,6 +60,18 @@ DEFAULT_RISKY_FAMILIES = {
 
 TYPE_NAMES = ["type_0", "type_1", "type_2"]
 STATE_NAMES = ["safe", "risky"]
+
+# Heatmap layout (shared by compute / plot / cache)
+_HEATMAP_MODE_ORDER = ["replay", "reactive"]
+_HEATMAP_METRIC_LAYOUT = [
+    ["safe_pgo", "risky_return_fixed", "risky_collision_fixed"],
+    ["risky_pgo", "risky_return_reactive", "risky_collision_reactive"],
+]
+HEATMAP_METRICS_CACHE = "heatmap_metrics_cache.pkl"
+
+
+def _heatmap_metric_order():
+    return [k for row in _HEATMAP_METRIC_LAYOUT for k in row]
 
 
 def _family_display_name_plot(name: str) -> str:
@@ -526,13 +539,13 @@ def plot_replay_reactive_family_sweep(summary_df, family_names, out_path):
     axes[0].plot(xs, replay_adv, marker="o")
     axes[0].set_xticks(xs)
     axes[0].set_xticklabels([_family_display_name_plot(f) for f in family_names], rotation=20)
-    axes[0].set_title("Fixed eval: replay return advantage")
-    axes[0].set_ylabel("replay return - reactive return")
+    axes[0].set_title("Non-reactive eval: return advantage")
+    axes[0].set_ylabel("recorded-play return - reactive return")
 
     axes[1].plot(xs, collision_reduction, marker="o")
     axes[1].set_xticks(xs)
     axes[1].set_xticklabels([_family_display_name_plot(f) for f in family_names], rotation=20)
-    axes[1].set_title("Fixed eval: collision reduction")
+    axes[1].set_title("Non-reactive eval: collision reduction")
     axes[1].set_ylabel("reactive collision - replay collision")
 
     plt.tight_layout()
@@ -571,48 +584,29 @@ def plot_population_family_sweep(pop_df, family_names, out_path):
         ax.set_ylabel(metric)
 
     axes[0, 0].legend()
-    fig.suptitle("Population performance across risky population families", fontsize=18)
+    fig.suptitle("Population performance across risky population types", fontsize=18)
     plt.tight_layout()
     plt.savefig(out_path, dpi=300)
     plt.close()
 
 
-def plot_metric_grouped_heatmaps(cfg, family_names, risky_scales, out_path):
+def compute_metric_grouped_heatmaps(cfg, family_names, risky_scales):
+    """Train/eval grid for heatmaps (expensive).
+
+    Each column ``α`` in ``risky_scales`` sets both reactive couplings:
+    ``or_safe_scale = or_risky_scale = α``.
+    """
     n_rows = len(family_names)
     n_cols = len(risky_scales)
-    font = _heatmap_serif_font_name()
-    fs_title = 15
-    fs_colgroup = 18
-    fs_axis = 15
-    fs_tick = 13
-    fs_cell = 12
-    fs_cbar = 13
-
-    mode_order = ["replay", "reactive"]
-    # 2×3 panels: col0 = P(Go), col1 = mean return on risky steps, col2 = collision
-    metric_layout = [
-        ["safe_pgo", "risky_return_fixed", "risky_collision_fixed"],
-        ["risky_pgo", "risky_return_reactive", "risky_collision_reactive"],
-    ]
-    metric_order = [k for row in metric_layout for k in row]
-    metric_titles = {
-        "safe_pgo": "Safe-state P(Go)",
-        "risky_pgo": "Risky-state P(Go)",
-        "risky_return_fixed": "Mean return | risky steps (fixed eval)",
-        "risky_collision_fixed": "Risky Collision Rate (fixed eval)",
-        "risky_return_reactive": "Mean return | risky steps (reactive eval)",
-        "risky_collision_reactive": "Risky Collision Rate (reactive eval)",
-    }
+    metric_order = _heatmap_metric_order()
     metrics = {
-        mode: {
-            metric: np.zeros((n_rows, n_cols), dtype=np.float64)
-            for metric in metric_order
-        }
-        for mode in mode_order
+        mode: {metric: np.zeros((n_rows, n_cols), dtype=np.float64) for metric in metric_order}
+        for mode in _HEATMAP_MODE_ORDER
     }
 
     for row_i, family_name in enumerate(family_names):
-        for col_i, risky_scale in enumerate(risky_scales):
+        for col_i, alpha in enumerate(risky_scales):
+            alpha = float(alpha)
             local_cfg = Config(
                 steps=cfg.steps,
                 eval_episodes=cfg.eval_episodes,
@@ -628,8 +622,8 @@ def plot_metric_grouped_heatmaps(cfg, family_names, risky_scales, out_path):
                     k: np.array(v, dtype=np.float64).copy()
                     for k, v in cfg.risky_population_families.items()
                 },
-                or_safe_scale=cfg.or_safe_scale,
-                or_risky_scale=float(risky_scale),
+                or_safe_scale=alpha,
+                or_risky_scale=alpha,
                 smooth_window=cfg.smooth_window,
                 risky_gg=cfg.risky_gg,
                 risky_gy=cfg.risky_gy,
@@ -637,7 +631,7 @@ def plot_metric_grouped_heatmaps(cfg, family_names, risky_scales, out_path):
                 risky_yy=cfg.risky_yy,
             )
 
-            for mode in mode_order:
+            for mode in _HEATMAP_MODE_ORDER:
                 final_safe_all = []
                 final_risky_all = []
                 eval_risky_return_fixed = []
@@ -662,7 +656,34 @@ def plot_metric_grouped_heatmaps(cfg, family_names, risky_scales, out_path):
                 metrics[mode]["risky_return_fixed"][row_i, col_i] = np.mean(eval_risky_return_fixed)
                 metrics[mode]["risky_collision_fixed"][row_i, col_i] = np.mean(eval_risky_collision_fixed)
                 metrics[mode]["risky_return_reactive"][row_i, col_i] = np.mean(eval_risky_return_reactive)
-                metrics[mode]["risky_collision_reactive"][row_i, col_i] = np.mean(eval_risky_collision_reactive)
+                metrics[mode]["risky_collision_reactive"][row_i, col_i] = np.mean(
+                    eval_risky_collision_reactive
+                )
+
+    return metrics
+
+
+def plot_metric_grouped_heatmaps_from_metrics(metrics, family_names, risky_scales, out_path):
+    """Render heatmap PDF from precomputed ``metrics`` (replay minus reactive per cell)."""
+    n_rows = len(family_names)
+    n_cols = len(risky_scales)
+    font = _heatmap_serif_font_name()
+    fs_title = 15
+    fs_colgroup = 18
+    fs_axis = 15
+    fs_tick = 13
+    fs_cell = 12
+    fs_cbar = 13
+
+    metric_layout = _HEATMAP_METRIC_LAYOUT
+    metric_titles = {
+        "safe_pgo": r"$P(\mathrm{Go} \mid \mathtt{safe})$",
+        "risky_pgo": r"$P(\mathrm{Go} \mid \mathtt{risky})$",
+        "risky_return_fixed": r"Mean return | $\mathtt{risky}$ (non-reactive)",
+        "risky_collision_fixed": r"Collision rate | $\mathtt{risky}$ (non-reactive)",
+        "risky_return_reactive": r"Mean return | $\mathtt{risky}$ (reactive)",
+        "risky_collision_reactive": r"Collision rate | $\mathtt{risky}$ (reactive)",
+    }
 
     rc = {
         "font.family": font,
@@ -673,14 +694,13 @@ def plot_metric_grouped_heatmaps(cfg, family_names, risky_scales, out_path):
         "ytick.labelsize": fs_tick,
     }
     with plt.rc_context(rc):
-        # Narrower figure; thin colorbar columns + small wspace → cbar hugs heatmap
         fig = plt.figure(figsize=(16.5, 9.2), constrained_layout=True)
         gs = fig.add_gridspec(
             nrows=2,
             ncols=6,
             width_ratios=[1.0, 0.018, 1.0, 0.018, 1.0, 0.018],
             wspace=0.05,
-            hspace=0.14,
+            hspace=0.09,
         )
         axes = np.empty((2, 3), dtype=object)
         cbar_axes = np.empty((2, 3), dtype=object)
@@ -689,7 +709,7 @@ def plot_metric_grouped_heatmaps(cfg, family_names, risky_scales, out_path):
                 axes[r, c] = fig.add_subplot(gs[r, 2 * c])
                 cbar_axes[r, c] = fig.add_subplot(gs[r, 2 * c + 1])
 
-        col_group_titles = ["P(Go)", "Risky return", "Risky collision rate"]
+        col_group_titles = ["P(Go)", "Riksy state Return", "Risky state Collision"]
         for r in range(2):
             for c in range(3):
                 metric_key = metric_layout[r][c]
@@ -726,10 +746,10 @@ def plot_metric_grouped_heatmaps(cfg, family_names, risky_scales, out_path):
                         [_family_display_name_plot(f) for f in family_names],
                         fontsize=fs_tick,
                     )
-                    ax.set_ylabel("Population family", fontsize=fs_axis)
+                    ax.set_ylabel("Population type", fontsize=fs_axis)
                 else:
                     ax.set_yticklabels([])
-                ax.set_xlabel("α scale (risky)", fontsize=fs_axis)
+                ax.set_xlabel("α scale", fontsize=fs_axis)
                 if r == 0:
                     ax.text(
                         0.5,
@@ -766,8 +786,117 @@ def plot_metric_grouped_heatmaps(cfg, family_names, risky_scales, out_path):
         plt.close()
 
 
+def save_heatmap_metrics_cache(output_dir, family_names, risky_scales, metrics):
+    path = os.path.join(output_dir, HEATMAP_METRICS_CACHE)
+    payload = {
+        "family_names": list(family_names),
+        "risky_scales": np.asarray(risky_scales, dtype=np.float64),
+        "metrics": metrics,
+    }
+    with open(path, "wb") as f:
+        pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+
+def load_heatmap_metrics_cache(output_dir):
+    path = os.path.join(output_dir, HEATMAP_METRICS_CACHE)
+    if not os.path.isfile(path):
+        return None
+    with open(path, "rb") as f:
+        return pickle.load(f)
+
+
+def plot_metric_grouped_heatmaps(cfg, family_names, risky_scales, out_path):
+    metrics = compute_metric_grouped_heatmaps(cfg, family_names, risky_scales)
+    plot_metric_grouped_heatmaps_from_metrics(metrics, family_names, risky_scales, out_path)
+    save_heatmap_metrics_cache(cfg.output_dir, family_names, risky_scales, metrics)
+
+
+def _family_order_from_summary(summary_df, requested):
+    seen = []
+    present = set(summary_df["family"].astype(str))
+    if requested:
+        for f in requested:
+            if f in present and f not in seen:
+                seen.append(f)
+        missing = [f for f in requested if f not in present]
+        if missing:
+            raise ValueError(f"--families not found in summary.csv: {missing}")
+        return seen
+    for f in summary_df["family"].astype(str):
+        if f not in seen:
+            seen.append(f)
+    return seen
+
+
+def regenerate_plots_from_disk(output_dir, families_filter):
+    """Rebuild figures from ``summary.csv`` + ``population_diagnostics.csv`` (+ optional heatmap cache)."""
+    summary_path = os.path.join(output_dir, "summary.csv")
+    pop_path = os.path.join(output_dir, "population_diagnostics.csv")
+    if not os.path.isfile(summary_path):
+        raise FileNotFoundError(f"Missing {summary_path} (run full pipeline once or pass --output-dir).")
+    if not os.path.isfile(pop_path):
+        raise FileNotFoundError(f"Missing {pop_path}")
+
+    summary_df = pd.read_csv(summary_path)
+    pop_df = pd.read_csv(pop_path)
+    family_names = _family_order_from_summary(summary_df, families_filter)
+
+    plot_replay_reactive_family_sweep(
+        summary_df,
+        family_names,
+        os.path.join(output_dir, "replay_reactive_family_sweep.pdf"),
+    )
+    plot_population_family_sweep(
+        pop_df,
+        family_names,
+        os.path.join(output_dir, "population_family_sweep.pdf"),
+    )
+
+    cache = load_heatmap_metrics_cache(output_dir)
+    if cache is not None:
+        c_families = list(cache["family_names"])
+        c_scales = [float(x) for x in np.asarray(cache["risky_scales"]).reshape(-1)]
+        if set(c_families) != set(family_names):
+            print(
+                "Warning: heatmap cache families differ from summary.csv families; "
+                "heatmap uses cached family order."
+            )
+        plot_metric_grouped_heatmaps_from_metrics(
+            cache["metrics"],
+            c_families,
+            c_scales,
+            os.path.join(output_dir, "policy_metric_heatmaps_family_x_risky_scale.pdf"),
+        )
+    else:
+        print(
+            f"No {HEATMAP_METRICS_CACHE} in {output_dir}; skipping heatmap "
+            "(run full pipeline once to write the cache)."
+        )
+
+    root = os.path.join(output_dir, "or", "risky_population_family")
+    for family_name in family_names:
+        family_dir = os.path.join(root, family_name)
+        os.makedirs(family_dir, exist_ok=True)
+        pop_local = pop_df[pop_df["family"] == family_name].copy()
+        pop_local.to_csv(os.path.join(family_dir, "population_summary.csv"), index=False)
+        plot_local_population_metrics(
+            pop_local,
+            family_name,
+            os.path.join(family_dir, "population_metrics.pdf"),
+        )
+
+    print(f"plots-only: regenerated figures under {output_dir}")
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--plots-only",
+        action="store_true",
+        help="Skip simulation/training; rebuild PDFs from summary.csv and "
+        "population_diagnostics.csv under --output-dir. Heatmap needs "
+        f"{HEATMAP_METRICS_CACHE} from a prior full run.",
+    )
     parser.add_argument("--output-dir", type=str, default="toy_population_outputs")
     parser.add_argument("--steps", type=int, default=4000)
     parser.add_argument("--eval-episodes", type=int, default=4000)
@@ -779,19 +908,21 @@ def parse_args():
         "--risky-scales",
         type=str,
         default="",
-        help="Comma-separated α (risky) scales for heatmaps. Empty = 0.0..1.0 step 0.1 (11 values).",
+        help="Comma-separated α scales for heatmaps (or_safe_scale = or_risky_scale = α). "
+        "Empty = np.linspace(0,1, --risky-scale-steps).",
     )
     parser.add_argument(
         "--risky-scale-steps",
         type=int,
         default=11,
-        help="When --risky-scales is empty, use np.linspace(0,1, this many points).",
+        help="When --risky-scales is empty, use np.linspace(0,1, this many α values for both scales).",
     )
     parser.add_argument(
         "--families",
         type=str,
-        default="very_conservative,conservative,medium,aggressive",
-        help="Comma-separated subset of family names. Empty with --risky-families-json uses all keys in file order.",
+        default="very_conservative,conservative,medium,aggressive,vert_aggressive",
+        help="Comma-separated subset of family names. Empty with --risky-families-json uses all keys in file order. "
+        "With --plots-only, use 'auto' (or empty) to take family order from summary.csv.",
     )
     parser.add_argument(
         "--risky-families-json",
@@ -813,6 +944,15 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    if args.plots_only:
+        fam = args.families.strip()
+        if fam.lower() in ("", "auto"):
+            requested = []
+        else:
+            requested = [x.strip() for x in args.families.split(",") if x.strip()]
+        regenerate_plots_from_disk(args.output_dir, requested)
+        return
 
     cfg = Config(
         steps=args.steps,

@@ -1559,6 +1559,7 @@ def eval(env_name, args=None, vecenv=None, policy=None):
             id_ = args["load_model_path"]
             exp = id_.split("/")[-2]
             map_results = {id_[-11:-3]: results}
+            print(f"EXP {exp}")
             save_result(f"/data/puffer/results/{exp}/logreplay.json", map_results)
         print("HUMAN_REPLAY_METRICS_END")
 
