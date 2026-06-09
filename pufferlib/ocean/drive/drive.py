@@ -5,8 +5,15 @@ import struct
 import os
 import pufferlib
 from pufferlib.ocean.drive import binding
+from pufferlib.ocean.drive.scenario_log import (
+    append_scenario_logs,
+    resolve_scenario_log_path,
+    split_aggregate_and_scenario,
+)
 from multiprocessing import Pool, cpu_count
 from tqdm import tqdm
+
+_DRIVE_INI = "pufferlib/config/ocean/drive.ini"
 
 
 class Drive(pufferlib.PufferEnv):
@@ -47,12 +54,14 @@ class Drive(pufferlib.PufferEnv):
         control_mode="control_vehicles",
         map_dir="resources/drive/binaries/training",
         sequential_map_sampling=False,
+        scenario_log_path=None,
     ):
         # env
         self.dt = dt
         self.render_mode = render_mode
         self.num_maps = num_maps
         self.report_interval = report_interval
+        self.scenario_log_path = resolve_scenario_log_path(scenario_log_path, _DRIVE_INI)
         self.reward_vehicle_collision = reward_vehicle_collision
         self.reward_offroad_collision = reward_offroad_collision
         self.reward_goal = reward_goal
@@ -209,6 +218,7 @@ class Drive(pufferlib.PufferEnv):
                 init_mode=self.init_mode,
                 control_mode=self.control_mode,
                 map_dir=map_dir,
+                scenario_log_path=self.scenario_log_path or "",
             )
             env_ids.append(env_id)
 
@@ -229,8 +239,11 @@ class Drive(pufferlib.PufferEnv):
         if self.tick % self.report_interval == 0:
             log = binding.vec_log(self.c_envs, self.num_agents)
             if log:
-                info.append(log)
-                # print(log)
+                aggregate, scenarios = split_aggregate_and_scenario(log)
+                if scenarios and self.scenario_log_path:
+                    append_scenario_logs(self.scenario_log_path, scenarios)
+                if aggregate:
+                    info.append(aggregate)
         if self.tick > 0 and self.resample_frequency > 0 and self.tick % self.resample_frequency == 0:
             self.tick = 0
             binding.vec_close(self.c_envs)
@@ -289,6 +302,7 @@ class Drive(pufferlib.PufferEnv):
                     init_mode=self.init_mode,
                     control_mode=self.control_mode,
                     map_dir=self.map_dir,
+                    scenario_log_path=self.scenario_log_path or "",
                 )
                 env_ids.append(env_id)
             self.c_envs = binding.vectorize(*env_ids)

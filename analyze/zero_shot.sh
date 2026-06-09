@@ -3,6 +3,8 @@ GPU_ID=${1:-0}
 FOLDER=${2:-reactive_nominal} # or replay, selfplay
 POPULATION_MODE=${3:-popul_lane} # population folder
 MODE=${4:-unseen_other_rewards} # unseen_other_rewards | unseen_other_seeds | ...
+SCENARIO_LOG_DIR=${5:-/data/puffer/results/${FOLDER}/${MODE}/scenario_logs}
+mkdir -p "${SCENARIO_LOG_DIR}"
 EGOS=()
 OTHERS=()
 
@@ -47,9 +49,12 @@ for MP1 in "${EGOS[@]}"; do
       ZSM="reactive-play"
       echo "Running reactive-play: ${MP1} vs ${MP2}"
     fi
+    LOG_PATH="${SCENARIO_LOG_DIR}/${MP1}_vs_${MP2}_${ZSM}.json"
     CUDA_VISIBLE_DEVICES=$GPU_ID puffer zeroshot puffer_drive \
       --load-multiple-model-path "/data/puffer/experiments/${FOLDER}/puffer_drive_${MP1}.pt" \
                                  "/data/puffer/${POPULATION_MODE}/${MODE}/puffer_drive_${MP2}.pt" \
-      --zero-shot-mode "${ZSM}" --env.termination-mode "0"
+      --zero-shot-mode "${ZSM}" --env.termination-mode "0" \
+      --eval.scenario-log-path "${LOG_PATH}"
+    echo "Wrote scenario log: ${LOG_PATH}"
   done
 done

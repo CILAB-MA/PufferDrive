@@ -77,10 +77,13 @@ void renderTopDownView(Drive *env, Client *client, int map_height, int obs, int 
         camera.position = (Vector3){0.0f, 0.0f, 500.0f}; // above the scene
         camera.target = (Vector3){0.0f, 0.0f, 0.0f};     // look at origin
         camera.fovy = map_height;
-    } else { // Show full map
-        camera.position = (Vector3){env->grid_map->top_left_x, env->grid_map->bottom_right_y, 500.0f};
-        camera.target = (Vector3){env->grid_map->top_left_x, env->grid_map->bottom_right_y, 0.0f};
-        camera.fovy = 2 * map_height;
+    } else { // Show full map (center on bbox, not bottom-left corner)
+        float cx = 0.5f * (env->grid_map->top_left_x + env->grid_map->bottom_right_x);
+        float cy = 0.5f * (env->grid_map->top_left_y + env->grid_map->bottom_right_y);
+        float pad = 1.08f;
+        camera.position = (Vector3){cx, cy, 500.0f};
+        camera.target = (Vector3){cx, cy, 0.0f};
+        camera.fovy = map_height * pad;
     }
 
     camera.up = (Vector3){0.0f, -1.0f, 0.0f};

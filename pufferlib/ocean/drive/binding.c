@@ -244,6 +244,21 @@ static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
     char map_file[512];
     snprintf(map_file, sizeof(map_file), "%s/map_%03d.bin", map_dir, map_id);
     env->num_agents = max_agents;
+    env->map_id = map_id;
+    env->scenario_log_path[0] = '\0';
+    if (kwargs && PyDict_GetItemString(kwargs, "scenario_log_path")) {
+        const char *p = unpack_str(kwargs, "scenario_log_path");
+        if (p && strcmp(p, "none") != 0 && strcmp(p, "None") != 0 && strcmp(p, "NONE") != 0 && p[0] != '\0') {
+            strncpy(env->scenario_log_path, p, sizeof(env->scenario_log_path) - 1);
+            env->scenario_log_path[sizeof(env->scenario_log_path) - 1] = '\0';
+        }
+    } else if (conf.scenario_log_path[0] != '\0') {
+        const char *p = conf.scenario_log_path;
+        if (strcmp(p, "none") != 0 && strcmp(p, "None") != 0 && strcmp(p, "NONE") != 0) {
+            strncpy(env->scenario_log_path, p, sizeof(env->scenario_log_path) - 1);
+            env->scenario_log_path[sizeof(env->scenario_log_path) - 1] = '\0';
+        }
+    }
     env->map_name = strdup(map_file);
     env->init_steps = init_steps;
     env->timestep = init_steps;

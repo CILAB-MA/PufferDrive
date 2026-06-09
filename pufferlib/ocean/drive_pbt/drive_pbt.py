@@ -6,7 +6,14 @@ import json
 import struct
 import pufferlib
 from pufferlib.ocean.drive import binding
+from pufferlib.ocean.drive.scenario_log import (
+    append_scenario_logs,
+    resolve_scenario_log_path,
+    split_aggregate_and_scenario,
+)
 from multiprocessing import Pool, cpu_count
+
+_DRIVE_INI = "pufferlib/config/ocean/drive.ini"
 from tqdm import tqdm
 from pufferlib.pufferl import load_policy
 
@@ -51,12 +58,14 @@ class Drive_PBT(pufferlib.PufferEnv):
         pbt_mode="reactive", # for pbt
         population_path=None, # for replay
         ego_ratio=0.0, # for replay
+        scenario_log_path=None,
     ):
         # env
         self.dt = dt
         self.render_mode = render_mode
         self.num_maps = num_maps
         self.report_interval = report_interval
+        self.scenario_log_path = resolve_scenario_log_path(scenario_log_path, _DRIVE_INI)
         self.reward_vehicle_collision = reward_vehicle_collision
         self.reward_offroad_collision = reward_offroad_collision
         self.reward_goal = reward_goal
@@ -221,6 +230,7 @@ class Drive_PBT(pufferlib.PufferEnv):
                 init_mode=self.init_mode,
                 control_mode=self.control_mode,
                 map_dir=map_dir,
+                scenario_log_path=self.scenario_log_path or "",
             )
             env_ids.append(env_id)
         self.c_envs = binding.vectorize(*env_ids)
@@ -228,12 +238,22 @@ class Drive_PBT(pufferlib.PufferEnv):
         self.population_path = population_path
         self.pbt_mode = pbt_mode
         if pbt_mode == "replay":
-            # Load Replay
-            npz = np.load(os.path.join(self.population_path, "replay", "other_actions.npz"), allow_pickle=True)
-            self.other_actions = npz['actions']
-            self.actions_agent_offsets = npz['agent_offsets']
-            self.actions_map_id = npz['map_ids']
-            del npz
+            replay_dir = os.path.join(self.population_path, "replay")
+            fp_actions = os.path.join(replay_dir, "other_actions_actions.npy")
+            if os.path.isfile(fp_actions):
+                self.other_actions = np.load(fp_actions, mmap_mode="r")
+                self.actions_agent_offsets = np.load(
+                    os.path.join(replay_dir, "other_actions_agent_offsets.npy"), mmap_mode="r"
+                )
+                self.actions_map_id = np.load(
+                    os.path.join(replay_dir, "other_actions_map_ids.npy"), mmap_mode="r"
+                )
+            else:
+                npz = np.load(os.path.join(replay_dir, "other_actions.npz"), allow_pickle=True)
+                self.other_actions = npz["actions"]
+                self.actions_agent_offsets = npz["agent_offsets"]
+                self.actions_map_id = npz["map_ids"]
+                del npz
             self._allocate_replay(self.num_agents, self.map_ids)
         else:
             populations = [
@@ -282,7 +302,11 @@ class Drive_PBT(pufferlib.PufferEnv):
         if self.tick % self.report_interval == 0:
             log = binding.vec_log(self.c_envs, self.num_agents)
             if log:
-                info.append(log)
+                aggregate, scenarios = split_aggregate_and_scenario(log)
+                if scenarios and self.scenario_log_path:
+                    append_scenario_logs(self.scenario_log_path, scenarios)
+                if aggregate:
+                    info.append(aggregate)
         if self.tick > 0 and self.resample_frequency > 0 and self.tick % self.resample_frequency == 0:
             self.tick = 0
             binding.vec_close(self.c_envs)
@@ -355,6 +379,7 @@ class Drive_PBT(pufferlib.PufferEnv):
                     init_mode=self.init_mode,
                     control_mode=self.control_mode,
                     map_dir=self.map_dir,
+                    scenario_log_path=self.scenario_log_path or "",
                 )
                 env_ids.append(env_id)
             self.c_envs = binding.vectorize(*env_ids)

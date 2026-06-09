@@ -951,6 +951,7 @@ class OtherReplayEvaluator:
         import numpy as np
         import torch
         import pufferlib
+        from tqdm import tqdm
 
         num_agents = puffer_env.observation_space.shape[0]
         device = args["train"]["device"]
@@ -958,7 +959,7 @@ class OtherReplayEvaluator:
         map_ids = puffer_env.map_ids.copy()
         agent_offsets = puffer_env.agent_offsets.copy()
         print(len(agent_offsets), len(map_ids), obs.shape)
-        pool = np.array([i for i in range(obs.shape[0])], dtype=np.int64)
+        pool = np.arange(obs.shape[0], dtype=np.int64)
         pool = np.random.permutation(pool)
         base, rem = divmod(obs.shape[0], len(policies))
         counts = [base + (i < rem) for i in range(len(policies))]
@@ -975,30 +976,36 @@ class OtherReplayEvaluator:
             ))
         other_action_buf = np.zeros((obs.shape[0], args["env"]["resample_frequency"], 1))
         os.makedirs(f"{args['pbt']['population_path']}/replay", exist_ok=True)
-        ego_speed = 0
         total_results = []
-        for time_idx in range(args["env"]["resample_frequency"]):
-            # Step policy
-            with torch.no_grad():
-                total_actions = np.zeros((obs.shape[0], 1), dtype=np.int64)
-                ob_tensor = torch.as_tensor(obs).to(device)
+        ar = np.arange(num_agents, dtype=np.int64)
+        other_masks = [np.isin(ar, other_indices[policy_idx]) for policy_idx in range(len(policies))]
+        total_actions = np.zeros((obs.shape[0], 1), dtype=np.int64)
+        with torch.inference_mode():
+            for time_idx in tqdm(
+                range(args["env"]["resample_frequency"]),
+                desc="collect_rollouts",
+                leave=False,
+            ):
+                total_actions.fill(0)
+                ob_tensor = torch.as_tensor(obs, device=device)
 
                 for policy_idx, policy in enumerate(policies):
-                    other_mask = np.isin(np.arange(num_agents), other_indices[policy_idx])
-                    # other action
+                    other_mask = other_masks[policy_idx]
                     ob_other = ob_tensor[other_mask]
                     logits_other, value_other = policy.forward_eval(ob_other, states[policy_idx])
                     action_other, logprob_other, _ = pufferlib.pytorch.sample_logits(logits_other)
                     action_other = action_other.cpu().numpy()
-                    if isinstance(logits_other, torch.distributions.Normal):  
-                        action_other = np.clip(action_other, puffer_env.action_space.low, puffer_env.action_space.high)
+                    if isinstance(logits_other, torch.distributions.Normal):
+                        action_other = np.clip(
+                            action_other, puffer_env.action_space.low, puffer_env.action_space.high
+                        )
                     other_action_buf[other_mask, time_idx] = action_other
                     total_actions[other_mask] = action_other
 
-            obs, rewards, dones, truncs, info_list = puffer_env.step(total_actions)
-            if len(info_list) > 0:  # Happens at the end of episode
-                results = info_list[0]
-                total_results.append(results)
+                obs, rewards, dones, truncs, info_list = puffer_env.step(total_actions)
+                if len(info_list) > 0:  # Happens at the end of episode
+                    results = info_list[0]
+                    total_results.append(results)
         df = pd.DataFrame(total_results)
         mean_per_key = df.mean(numeric_only=True).to_dict()
         print(mean_per_key)

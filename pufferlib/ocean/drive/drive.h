@@ -340,6 +340,8 @@ struct Drive {
     int goal_behavior;
     float goal_target_distance;
     char *ini_file;
+    char scenario_log_path[512];
+    int map_id;
     char *scenario_id;
     int collision_behavior;
     int offroad_behavior;

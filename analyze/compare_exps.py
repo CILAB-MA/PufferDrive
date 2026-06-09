@@ -258,7 +258,7 @@ def _apply_ln_mix_display(label: str, orig_exp: str) -> str:
 def format_exp_xlabel(exp: str) -> str:
     """X-axis tick labels for subplot/bar figures.
 
-    ``reactive_<v>`` → ``Reactive-PBT (<V>)``, ``replay_<v>`` → ``Recorded-PBT (<V>)`` with ``<V>`` from
+    ``reactive_<v>`` → ``Reactive-PBT (<V>)``, ``replay_<v>`` → ``ReCord (<V>)`` with ``<V>`` from
     ``_format_type_name``; ``selfplay`` → ``SP``; ``logreplay`` is never rewritten as *replay*.
     ``0.25`` / ``0_25`` (Lane+Nominal mix) → ``(L+N)`` in the label (or trailing `` (L+N)`` if stripped).
     Non-matching names still get generic ``reactive`` / ``replay`` word replacements.
@@ -276,9 +276,9 @@ def format_exp_xlabel(exp: str) -> str:
     m = re.search(r"(?:^|_)(?<!log)replay_([a-zA-Z0-9_]+)$", s)
     if m:
         return _apply_ln_mix_display(
-            f"Recorded-PBT ({_format_type_name(m.group(1))})", orig
+            f"ReCord ({_format_type_name(m.group(1))})", orig
         )
-    s = re.sub(r"(?<!log)replay", "Recorded-PBT", s)
+    s = re.sub(r"(?<!log)replay", "ReCord", s)
     s = re.sub(r"reactive", "Reactive-PBT", s, flags=re.I)
     return _apply_ln_mix_display(s, orig)
 
@@ -302,7 +302,7 @@ def _disambiguated_family_label(exp: str) -> Optional[str]:
     m = re.search(r"(?:^|_)(?<!log)replay_([a-zA-Z0-9_]+)$", s)
     if m:
         return _apply_ln_mix_display(
-            f"Recorded-PBT ({_format_type_name(m.group(1))})", orig
+            f"ReCord ({_format_type_name(m.group(1))})", orig
         )
     return None
 

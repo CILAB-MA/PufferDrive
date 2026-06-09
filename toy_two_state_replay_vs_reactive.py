@@ -50,11 +50,11 @@ def smooth_edge(x, window=101):
 
 
 DEFAULT_RISKY_FAMILIES = {
-    "very_conservative": np.array([0.0, 0.1, 0.2], dtype=np.float64),
-    "conservative": np.array([0.1, 0.3, 0.5], dtype=np.float64),
-    # "mixed": np.array([0.1, 0.5, 0.9], dtype=np.float64),
-    "medium": np.array([0.3, 0.5, 0.7], dtype=np.float64),
-    "aggressive": np.array([0.5, 0.7, 0.9], dtype=np.float64),
+    "very_conservative": np.array([0.2, 0.25, 0.3], dtype=np.float64),
+    "conservative": np.array([0.35, 0.4, 0.45], dtype=np.float64),
+    "medium": np.array([0.45, 0.5, 0.55], dtype=np.float64),
+    "aggressive": np.array([0.5, 0.55, 0.6], dtype=np.float64),
+    "very_aggressive": np.array([0.6, 0.65, 0.7], dtype=np.float64),
 }
 
 
@@ -920,7 +920,7 @@ def parse_args():
     parser.add_argument(
         "--families",
         type=str,
-        default="very_conservative,conservative,medium,aggressive,vert_aggressive",
+        default="very_conservative,conservative,medium,aggressive,very_aggressive",
         help="Comma-separated subset of family names. Empty with --risky-families-json uses all keys in file order. "
         "With --plots-only, use 'auto' (or empty) to take family order from summary.csv.",
     )

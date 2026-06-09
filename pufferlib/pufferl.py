@@ -1589,23 +1589,43 @@ def eval(env_name, args=None, vecenv=None, policy=None):
                 lstm_c=torch.zeros(num_agents, policy.hidden_size, device=device),
             )
 
-        frames = []
+        target_frames = int(args["save_frames"])
+        if target_frames > 0:
+            frames = []
+            for _ in range(target_frames):
+                render = driver.render()
+                if render is not None:
+                    frames.append(render)
+
+                with torch.no_grad():
+                    ob = torch.as_tensor(ob).to(device)
+                    logits, value = policy.forward_eval(ob, state)
+                    action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
+                    action = action.cpu().numpy().reshape(vecenv.action_space.shape)
+
+                if isinstance(logits, torch.distributions.Normal):
+                    action = np.clip(action, vecenv.action_space.low, vecenv.action_space.high)
+
+                ob = vecenv.step(action)[0]
+
+            if not frames:
+                raise pufferlib.APIUsageError(
+                    "No render frames captured. Drive.render() returns None in raylib mode. "
+                    "Use: python analyze/viz.py --model <ckpt.pt> --map-bin <map_XXX.bin> --out out.gif --use-xvfb"
+                )
+
+            import imageio
+
+            imageio.mimsave(args["gif_path"], frames, fps=args["fps"], loop=0)
+            print(f"Saved {args['gif_path']} ({len(frames)} frames)")
+            return
+
         while True:
             render = driver.render()
-            if len(frames) < args["save_frames"]:
-                frames.append(render)
 
-            # Screenshot Ocean envs with F12, gifs with control + F12
-            if driver.render_mode == "ansi":
+            if driver.render_mode == "ansi" and render is not None:
                 print("\033[0;0H" + render + "\n")
                 time.sleep(1 / args["fps"])
-            elif driver.render_mode == "rgb_array":
-                pass
-                # import cv2
-                # render = cv2.cvtColor(render, cv2.COLOR_RGB2BGR)
-                # cv2.imshow('frame', render)
-                # cv2.waitKey(1)
-                # time.sleep(1/args['fps'])
 
             with torch.no_grad():
                 ob = torch.as_tensor(ob).to(device)
@@ -1617,12 +1637,6 @@ def eval(env_name, args=None, vecenv=None, policy=None):
                 action = np.clip(action, vecenv.action_space.low, vecenv.action_space.high)
 
             ob = vecenv.step(action)[0]
-
-            if len(frames) > 0 and len(frames) == args["save_frames"]:
-                import imageio
-
-                imageio.mimsave(args["gif_path"], frames, fps=args["fps"], loop=0)
-                frames.append("Done")
 
 
 def sweep(args=None, env_name=None):
@@ -1788,8 +1802,16 @@ def zero_shot(env_name, args=None, vecenv=None, policies=None):
     args2 = args.copy()
     if args["pbt"]["pbt_mode"] == "save-population":
         policies = []
-        num_collect_rollout = 50
-        args["env"]["num_maps"] = 10000 # tmp
+        num_collect_rollout = int(args["pbt"].get("num_collect_rollout", 50))
+        start_idx = int(args["pbt"].get("collect_start_idx", 0))
+        end_idx = int(args["pbt"].get("collect_end_idx", num_collect_rollout))
+        if not (0 <= start_idx < end_idx <= num_collect_rollout):
+            raise ValueError(
+                "Need 0 <= collect_start_idx < collect_end_idx <= num_collect_rollout; "
+                f"got start_idx={start_idx}, end_idx={end_idx}, num_collect_rollout={num_collect_rollout}"
+            )
+        shard_len = end_idx - start_idx
+        args["env"]["num_maps"] = 10000  # tmp
         vecenv = load_env(env_name, args)
         evaluator = OtherReplayEvaluator(args)
         populations = [
@@ -1801,34 +1823,68 @@ def zero_shot(env_name, args=None, vecenv=None, policies=None):
             args2["load_model_path"] = os.path.join(args["pbt"]["population_path"], op)
             policy2 = load_policy(args2, vecenv, env_name)
             policies.append(policy2.eval())
-        for i in range(num_collect_rollout):
+        replay_dir = os.path.join(args["pbt"]["population_path"], "replay")
+        split_dir = os.path.join(args["pbt"]["population_path"], "splits")
+        os.makedirs(split_dir, exist_ok=True)
+        tag = f"{start_idx:06d}_{end_idx:06d}"
+        fp_a = os.path.join(split_dir, f"actions_{tag}.npy")
+        fp_ao = os.path.join(split_dir, f"agent_offsets_{tag}.npy")
+        fp_m = os.path.join(split_dir, f"map_ids_{tag}.npy")
+        mm_a = mm_ao = mm_m = None
+        for local_i, global_i in enumerate(range(start_idx, end_idx)):
             other_action_buf, agent_offsets, map_ids = evaluator.collect_rollouts(args, vecenv, policies)
-            agent_offsets = np.array(agent_offsets)
-            map_ids = np.array(map_ids)
-            if i == 0:
-                total_other_action_buf = np.zeros((num_collect_rollout, *other_action_buf.shape), dtype=np.int16)
-                total_agent_offsets = np.zeros((num_collect_rollout, *agent_offsets.shape), dtype=np.int32)
-                total_map_ids = np.zeros((num_collect_rollout, *map_ids.shape), dtype=np.int32)
-            total_other_action_buf[i] = other_action_buf
-            total_agent_offsets[i] = agent_offsets
-            total_map_ids[i] = map_ids
+            agent_offsets = np.asarray(agent_offsets, dtype=np.int32, order="C")
+            map_ids = np.asarray(map_ids, dtype=np.int32, order="C")
+            if local_i == 0:
+                na, T, c = other_action_buf.shape
+                jo = int(agent_offsets.size)
+                km = int(map_ids.size)
+                mm_a = np.lib.format.open_memmap(
+                    fp_a,
+                    mode="w+",
+                    dtype=other_action_buf.dtype,
+                    shape=(shard_len, na, T, c),
+                )
+                mm_ao = np.lib.format.open_memmap(
+                    fp_ao, mode="w+", dtype=np.int32, shape=(shard_len, jo)
+                )
+                mm_m = np.lib.format.open_memmap(
+                    fp_m, mode="w+", dtype=np.int32, shape=(shard_len, km)
+                )
+            mm_a[local_i] = np.ascontiguousarray(other_action_buf)
+            mm_ao[local_i] = agent_offsets.reshape(mm_ao.shape[1:])
+            mm_m[local_i] = map_ids.reshape(mm_m.shape[1:])
             # to initialize
             vecenv.close()
             vecenv = load_env(env_name, args)
-            print(f"Collected rollout {i+1}, shape: {total_other_action_buf[i].shape} {other_action_buf.shape}")
-        print("Make replay action buffer shape:", total_other_action_buf.shape)
-        np.savez_compressed(f"{args['pbt']['population_path']}/replay/other_actions.npz", actions=total_other_action_buf, agent_offsets=total_agent_offsets, map_ids=total_map_ids)
-        print(f"Test replay actions to {args['pbt']['population_path']}/replay/other_actions.npz")
-        npy = np.load(f"{args['pbt']['population_path']}/replay/other_actions.npz")
-        loaded_actions = npy['actions']
-        for i in range(num_collect_rollout):
-            evaluator.replay_rollouts(args, vecenv, loaded_actions[i])
-            if i != num_collect_rollout -1:
-                # to initialize
+            print(
+                f"Collected shard {local_i + 1}/{shard_len} "
+                f"(global rollout {global_i + 1}/{num_collect_rollout}), shape: {other_action_buf.shape}"
+            )
+        del mm_a, mm_ao, mm_m
+        print(
+            f"Wrote split memmaps under {split_dir} tag={tag} "
+            f"(shard_len={shard_len}, agents={na}, T={T}). "
+            f"Merge with: python data_concat.py --population-path {args['pbt']['population_path']} "
+            f"--total-rollouts {num_collect_rollout}"
+        )
+        if start_idx == 0 and end_idx == num_collect_rollout:
+            actions_rd = np.load(fp_a, mmap_mode="r")
+            for i in range(shard_len):
+                evaluator.replay_rollouts(args, vecenv, np.asarray(actions_rd[i], dtype=actions_rd.dtype))
+                if i != shard_len - 1:
+                    vecenv.close()
+                    vecenv = load_env(env_name, args)
+            vecenv.close()
+            print("Finished replay smoke-test (full single-shard run).")
+        else:
+            try:
                 vecenv.close()
-                vecenv = load_env(env_name, args)
-        vecenv.close()
-        print("Finished collecting replay actions and testing.")
+            except Exception:
+                pass
+            print(
+                "Skipped replay smoke-test for partial shard; run data_concat.py then replay training/eval."
+            )
         return None
     
     args["load_model_path"] = args["load_multiple_model_path"][0]
@@ -1999,6 +2055,12 @@ def load_env(env_name, args):
         env_kwargs = {**args["env"]}
     elif env_name == "puffer_drive_pbt":
         env_kwargs = {**args["env"], **args.get("pbt", {})}
+    else:
+        return pufferlib.vector.make(make_env, env_kwargs={**args["env"]}, **args["vec"])
+
+    sp = args.get("eval", {}).get("scenario_log_path")
+    if sp is not None:
+        env_kwargs["scenario_log_path"] = sp
     return pufferlib.vector.make(make_env, env_kwargs=env_kwargs, **args["vec"])
 
 

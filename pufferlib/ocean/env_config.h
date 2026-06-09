@@ -33,6 +33,7 @@ typedef struct {
     int init_mode;
     int control_mode;
     char map_dir[256];
+    char scenario_log_path[512];
 } env_init_config;
 
 // INI file parser handler - parses all environment configuration from drive.ini
@@ -126,6 +127,11 @@ static int handler(void *config, const char *section, const char *name, const ch
             env_config->map_dir[sizeof(env_config->map_dir) - 1] = '\0';
         }
         // printf("Parsed map_dir: '%s'\n", env_config->map_dir);
+    } else if (MATCH("eval", "scenario_log_path")) {
+        if (sscanf(value, "\"%511[^\"]\"", env_config->scenario_log_path) != 1) {
+            strncpy(env_config->scenario_log_path, value, sizeof(env_config->scenario_log_path) - 1);
+            env_config->scenario_log_path[sizeof(env_config->scenario_log_path) - 1] = '\0';
+        }
     } else {
         return 0; // Unknown section/name, indicate failure to handle
     }
