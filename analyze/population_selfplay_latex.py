@@ -1,0 +1,300 @@
+#!/usr/bin/env python3
+"""Export population self-play summary JSON files to a LaTeX table."""
+
+import argparse
+import json
+import math
+import os
+from typing import Optional
+
+import pandas as pd
+
+from compare_exps import (
+    _canonical_base_for_column,
+    _metric_plot_title,
+    _slice_plot_metrics,
+    is_num,
+)
+
+RESULTS_BASE = "/data/puffer/results"
+
+DEFAULT_POPULATIONS = (
+    ("popul_lane_nominal", "L+N"),
+    ("popul_nominal", "ON"),
+    ("popul_lane", "OL"),
+    ("popul_mix", "Mixed"),
+)
+
+TABLE_METRICS_ORDER = (
+    "lane_alignment_rate",
+    "collision_per_agent",
+    "offroad_per_agent",
+    "score",
+)
+
+TABLE_METRIC_HEADERS = {
+    "lane_alignment_rate": "Lane alignment",
+    "collision_per_agent": "Collisions per agent",
+    "offroad_per_agent": "Off-road per agent",
+    "score": "Success Rate",
+}
+
+
+def _latex_escape(text: str) -> str:
+    out = []
+    for ch in str(text):
+        if ch == "\\":
+            out.append("\\textbackslash{}")
+        elif ch == "&":
+            out.append("\\&")
+        elif ch == "%":
+            out.append("\\%")
+        elif ch == "$":
+            out.append("\\$")
+        elif ch == "#":
+            out.append("\\#")
+        elif ch == "_":
+            out.append("\\_")
+        elif ch == "{":
+            out.append("\\{")
+        elif ch == "}":
+            out.append("\\}")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def load_summary(path: str) -> tuple[dict, dict]:
+    with open(path, "r", encoding="utf-8") as f:
+        obj = json.load(f)
+    mean_d = obj.get("mean") or {}
+    std_d = obj.get("std") or {}
+    if not isinstance(mean_d, dict) or not isinstance(std_d, dict):
+        raise ValueError(f"Invalid summary JSON: {path}")
+    return mean_d, std_d
+
+
+def summary_path(results_base: str, population_slug: str) -> str:
+    return os.path.join(
+        results_base,
+        population_slug,
+        "selfplay",
+        "population_selfplay_summary.json",
+    )
+
+
+def collect_population_tables(
+    results_base: str,
+    populations: list[tuple[str, str]],
+) -> tuple[pd.DataFrame, pd.DataFrame, list[str]]:
+    rows_mean = []
+    rows_std = []
+    row_labels = []
+    for slug, label in populations:
+        path = summary_path(results_base, slug)
+        if not os.path.isfile(path):
+            print(f"Warning: missing summary for {slug}: {path}")
+            continue
+        mean_d, std_d = load_summary(path)
+        rows_mean.append(mean_d)
+        rows_std.append(std_d)
+        row_labels.append(label)
+    if not row_labels:
+        raise SystemExit("No population_selfplay_summary.json files found.")
+    df_m = pd.DataFrame(rows_mean, index=row_labels)
+    df_s = pd.DataFrame(rows_std, index=row_labels)
+    return df_m, df_s, row_labels
+
+
+def _row_best_exps(
+    df_mean: pd.DataFrame,
+    row_labels: list[str],
+    base: str,
+) -> set[str]:
+    dm, _ = _slice_plot_metrics(df_mean, None)
+    if dm.empty:
+        return set()
+    col = None
+    for c in dm.columns:
+        if _canonical_base_for_column(c) == base:
+            col = c
+            break
+    if col is None:
+        return set()
+    vals = []
+    for lbl in row_labels:
+        if lbl not in dm.index:
+            continue
+        v = dm.loc[lbl, col]
+        if is_num(v):
+            vals.append((lbl, float(v)))
+    if not vals:
+        return set()
+    if base in ("collision_per_agent", "offroad_per_agent"):
+        best = min(v for _, v in vals)
+        return {lbl for lbl, v in vals if math.isclose(v, best, rel_tol=0.0, abs_tol=1e-9)}
+    best = max(v for _, v in vals)
+    return {lbl for lbl, v in vals if math.isclose(v, best, rel_tol=0.0, abs_tol=1e-9)}
+
+
+def _format_cell(mean: float, std: float, *, bold: bool = False) -> str:
+    text = f"{mean:.3f} \\pm {std:.3f}"
+    if bold:
+        return f"$\\bm{{{text}}}$"
+    return f"${text}$"
+
+
+def _ordered_metric_columns(dm: pd.DataFrame) -> list[str]:
+    by_base = {_canonical_base_for_column(c): c for c in dm.columns}
+    cols = []
+    for base in TABLE_METRICS_ORDER:
+        if base in by_base:
+            cols.append(by_base[base])
+    return cols
+
+
+def export_latex_table(
+    df_mean: pd.DataFrame,
+    df_std: pd.DataFrame,
+    row_labels: list[str],
+    *,
+    caption: str,
+    label: str,
+    bold_best: bool = True,
+) -> str:
+    dm, ds = _slice_plot_metrics(df_mean, df_std)
+    if dm.empty:
+        raise SystemExit("No requested metrics found in summaries.")
+
+    metric_cols = _ordered_metric_columns(dm)
+    if not metric_cols:
+        raise SystemExit("No requested metrics found in summaries.")
+    col_labels = [lbl for lbl in row_labels if lbl in dm.index]
+    best_by_metric: dict[str, set[str]] = {}
+    if bold_best:
+        for col in metric_cols:
+            base = _canonical_base_for_column(col)
+            best_by_metric[col] = _row_best_exps(dm, col_labels, base)
+
+    lines = [
+        "% Auto-generated by analyze/population_selfplay_latex.py",
+        "% Requires: \\usepackage{booktabs}",
+        "% Requires: \\usepackage{bm}   % optional, for best-in-row values",
+        "\\begin{table}[h]",
+        "\\centering",
+        f"\\caption{{{caption}}}",
+        f"\\label{{{label}}}",
+        f"\\begin{{tabular}}{{l{'c' * len(col_labels)}}}",
+        "\\toprule",
+        " & "
+        + " & ".join(f"\\textbf{{{_latex_escape(lbl)}}}" for lbl in col_labels)
+        + " \\\\",
+        "\\midrule",
+    ]
+
+    for col in metric_cols:
+        base = _canonical_base_for_column(col)
+        row_label = TABLE_METRIC_HEADERS.get(base, _metric_plot_title(col))
+        cells = [f"\\textbf{{{_latex_escape(row_label)}}}"]
+        for lbl in col_labels:
+            vm = dm.loc[lbl, col]
+            if not is_num(vm):
+                cells.append("--")
+                continue
+            vs = 0.0
+            if ds is not None and col in ds.columns and lbl in ds.index:
+                vv = ds.loc[lbl, col]
+                if is_num(vv):
+                    vs = float(vv)
+            bold = bold_best and lbl in best_by_metric.get(col, set())
+            cells.append(_format_cell(float(vm), vs, bold=bold))
+        lines.append(" & ".join(cells) + " \\\\")
+
+    lines.extend(
+        [
+            "\\bottomrule",
+            "\\end{tabular}",
+            "\\end{table}",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Build a LaTeX table from population self-play summary JSON files."
+    )
+    parser.add_argument(
+        "--results-base",
+        "-b",
+        default=RESULTS_BASE,
+        help=f"Root containing <population>/selfplay/population_selfplay_summary.json (default: {RESULTS_BASE})",
+    )
+    parser.add_argument(
+        "--populations",
+        nargs="+",
+        default=None,
+        metavar="SLUG",
+        help="Population folder names under results-base (default: popul_lane_nominal, popul_nominal, popul_lane, popul_mix)",
+    )
+    parser.add_argument(
+        "--out",
+        "-o",
+        default=None,
+        help="Output .tex path (default: <results-base>/compare/population_selfplay_table.tex)",
+    )
+    parser.add_argument(
+        "--caption",
+        default="Population self-play in PufferDrive (mean $\\pm$ std across models).",
+    )
+    parser.add_argument(
+        "--label",
+        default="tab:population_selfplay",
+    )
+    parser.add_argument(
+        "--no-bold-best",
+        action="store_true",
+        help="Do not bold best value in each metric column",
+    )
+    parser.add_argument(
+        "--print",
+        action="store_true",
+        help="Print LaTeX to stdout instead of only writing the file",
+    )
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    if args.populations:
+        populations = [(slug, slug) for slug in args.populations]
+        # Keep known short labels when user passes default slugs only.
+        known = {slug: label for slug, label in DEFAULT_POPULATIONS}
+        populations = [(slug, known.get(slug, slug)) for slug in args.populations]
+    else:
+        populations = list(DEFAULT_POPULATIONS)
+
+    df_m, df_s, row_labels = collect_population_tables(args.results_base, populations)
+    tex = export_latex_table(
+        df_m,
+        df_s,
+        row_labels,
+        caption=args.caption,
+        label=args.label,
+        bold_best=not args.no_bold_best,
+    )
+
+    out_path = args.out or os.path.join(
+        args.results_base, "compare", "population_selfplay_table.tex"
+    )
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write(tex)
+    print(f"Wrote: {out_path}")
+    if args.print:
+        print()
+        print(tex)
+
+
+if __name__ == "__main__":
+    main()

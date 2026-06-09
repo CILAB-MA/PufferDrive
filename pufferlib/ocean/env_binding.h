@@ -555,6 +555,69 @@ static int assign_to_dict(PyObject *dict, char *key, float value) {
     return 0;
 }
 
+static void normalize_log_inplace(Log *log) {
+    float n = log->n;
+    float ego_n = log->ego_n;
+    if (n < 1.0f) {
+        return;
+    }
+    int num_keys = sizeof(Log) / sizeof(float);
+    int first_one_index = (int)(offsetof(Log, ego_speed_at_goal) / sizeof(float));
+    for (int i = 0; i < num_keys; i++) {
+        if (i >= first_one_index) {
+            if (ego_n >= 1.0f) {
+                ((float *)log)[i] /= ego_n;
+            }
+            continue;
+        }
+        ((float *)log)[i] /= n;
+    }
+    if (log->goals_sampled_this_episode > 0.0f) {
+        log->completion_rate = log->goals_reached_this_episode / log->goals_sampled_this_episode;
+    }
+    log->ego_n = ego_n;
+}
+
+static int scenario_log_enabled(Env *env) {
+    return env->scenario_log_path[0] != '\0';
+}
+
+static PyObject *build_scenario_log_list(VecEnv *vec) {
+    PyObject *scenario_list = PyList_New(0);
+    if (!scenario_list) {
+        return NULL;
+    }
+    for (int i = 0; i < vec->num_envs; i++) {
+        Env *env = vec->envs[i];
+        if (env->log.n < 1.0f) {
+            continue;
+        }
+        Log per = env->log;
+        normalize_log_inplace(&per);
+        PyObject *entry = PyDict_New();
+        if (!entry) {
+            Py_DECREF(scenario_list);
+            return NULL;
+        }
+        if (my_log(entry, &per) != 0) {
+            Py_DECREF(entry);
+            Py_DECREF(scenario_list);
+            return NULL;
+        }
+        assign_to_dict(entry, "map_id", (float)env->map_id);
+        if (env->num_entities > 0) {
+            assign_to_dict(entry, "scenario_id", (float)env->entities[0].scenario_id);
+        }
+        if (PyList_Append(scenario_list, entry) < 0) {
+            Py_DECREF(entry);
+            Py_DECREF(scenario_list);
+            return NULL;
+        }
+        Py_DECREF(entry);
+    }
+    return scenario_list;
+}
+
 static PyObject *vec_log(PyObject *self, PyObject *args) {
     if (PyTuple_Size(args) != 2) {
         PyErr_SetString(PyExc_TypeError, "vec_log requires 2 arguments");
@@ -574,6 +637,9 @@ static PyObject *vec_log(PyObject *self, PyObject *args) {
     Log aggregate = {0};
     int num_keys = sizeof(Log) / sizeof(float);
     int first_one_index = (int)(offsetof(Log, ego_speed_at_goal) / sizeof(float));
+    int save_scenario = vec->num_envs > 0 && scenario_log_enabled(vec->envs[0]);
+    PyObject *scenario_list = NULL;
+
     for (int i = 0; i < vec->num_envs; i++) {
         Env *env = vec->envs[i];
         for (int j = 0; j < num_keys; j++) {
@@ -585,6 +651,14 @@ static PyObject *vec_log(PyObject *self, PyObject *args) {
     // Only log if we have at least num_agents worth of data
     if (aggregate.n < num_agents) {
         return dict;
+    }
+
+    if (save_scenario) {
+        scenario_list = build_scenario_log_list(vec);
+        if (!scenario_list) {
+            Py_DECREF(dict);
+            return NULL;
+        }
     }
 
     // Got enough data. Reset logs and return metrics
@@ -605,6 +679,7 @@ static PyObject *vec_log(PyObject *self, PyObject *args) {
         }
         ((float *)&aggregate)[i] /= n;
     }
+    aggregate.ego_n = ego_n;
 
     // Compute completion_rate from aggregated counts
     aggregate.completion_rate = aggregate.goals_reached_this_episode / aggregate.goals_sampled_this_episode;
@@ -612,6 +687,15 @@ static PyObject *vec_log(PyObject *self, PyObject *args) {
     // User populates dict
     my_log(dict, &aggregate);
     assign_to_dict(dict, "n", n);
+
+    if (scenario_list) {
+        if (PyDict_SetItemString(dict, "scenario", scenario_list) < 0) {
+            Py_DECREF(scenario_list);
+            Py_DECREF(dict);
+            return NULL;
+        }
+        Py_DECREF(scenario_list);
+    }
 
     return dict;
 }

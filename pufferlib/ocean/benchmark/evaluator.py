@@ -716,8 +716,9 @@ class HumanReplayEvaluator:
 class OtherReplayEvaluator:
     """Evaluates policies against other policies replays in PufferDrive."""
 
-    def __init__(self, config: Dict, mode: str):
+    def __init__(self, config: Dict, mode: str = None, exp: str = None):
         self.config = config
+        self.exp = exp
         self.mode = mode
         self.sim_steps = 91
 
@@ -810,7 +811,7 @@ class OtherReplayEvaluator:
                     other_name = args['load_multiple_model_path'][1][-11:-3]
                 res_dict = {f"{args['load_multiple_model_path'][0][-11:-3]}_vs_{other_name}": results}
                 print(res_dict)
-                self.save_result(f"/data/puffer/results/{self.mode}/zeroshot_reactive.json", res_dict)
+                self.save_result(f"/data/puffer/results/{self.exp}/{self.mode}/zeroshot_reactive.json", res_dict)
                 return results
 
     def save_replay(self, args, puffer_env, policy1, policy2):
@@ -878,7 +879,8 @@ class OtherReplayEvaluator:
 
             if len(info_list) > 0:  # Happens at the end of episode
                 results = info_list[0]
-                np.save(f"/data/puffer/experiments/{self.mode}/other_action_buffer/other_actions_{args['load_multiple_model_path'][0][-11:-3]}.npy", other_action_buf)
+                # Must match ``play_replay`` load key: second path is the "other" policy whose actions we save.
+                np.save(f"/data/puffer/experiments/{self.mode}/other_action_buffer/other_actions_{args['load_multiple_model_path'][1][-11:-3]}.npy", other_action_buf)
                 ego_speed /= (time_idx + 1)
                 results["ego_speed"] = ego_speed.item()
                 res_dict = {f"{args['load_multiple_model_path'][0][-11:-3]}_vs_selfplay": results}
@@ -944,3 +946,85 @@ class OtherReplayEvaluator:
                 print(res_dict)
                 self.save_result(f"/data/puffer/results/{self.mode}/zeroshot.json", res_dict)
                 return results
+
+    def collect_rollouts(self, args, puffer_env, policies):
+        import numpy as np
+        import torch
+        import pufferlib
+        from tqdm import tqdm
+
+        num_agents = puffer_env.observation_space.shape[0]
+        device = args["train"]["device"]
+        obs, info_list = puffer_env.reset()
+        map_ids = puffer_env.map_ids.copy()
+        agent_offsets = puffer_env.agent_offsets.copy()
+        print(len(agent_offsets), len(map_ids), obs.shape)
+        pool = np.arange(obs.shape[0], dtype=np.int64)
+        pool = np.random.permutation(pool)
+        base, rem = divmod(obs.shape[0], len(policies))
+        counts = [base + (i < rem) for i in range(len(policies))]
+        other_indices = []
+        p = 0
+        states = []
+        for i, count in enumerate(counts):
+            indices = pool[p:p+count]
+            p += count
+            other_indices.append(indices)
+            states.append(dict(
+                lstm_h=torch.zeros(count, policies[i].hidden_size, device=device),
+                lstm_c=torch.zeros(count, policies[i].hidden_size, device=device),
+            ))
+        other_action_buf = np.zeros((obs.shape[0], args["env"]["resample_frequency"], 1))
+        os.makedirs(f"{args['pbt']['population_path']}/replay", exist_ok=True)
+        total_results = []
+        ar = np.arange(num_agents, dtype=np.int64)
+        other_masks = [np.isin(ar, other_indices[policy_idx]) for policy_idx in range(len(policies))]
+        total_actions = np.zeros((obs.shape[0], 1), dtype=np.int64)
+        with torch.inference_mode():
+            for time_idx in tqdm(
+                range(args["env"]["resample_frequency"]),
+                desc="collect_rollouts",
+                leave=False,
+            ):
+                total_actions.fill(0)
+                ob_tensor = torch.as_tensor(obs, device=device)
+
+                for policy_idx, policy in enumerate(policies):
+                    other_mask = other_masks[policy_idx]
+                    ob_other = ob_tensor[other_mask]
+                    logits_other, value_other = policy.forward_eval(ob_other, states[policy_idx])
+                    action_other, logprob_other, _ = pufferlib.pytorch.sample_logits(logits_other)
+                    action_other = action_other.cpu().numpy()
+                    if isinstance(logits_other, torch.distributions.Normal):
+                        action_other = np.clip(
+                            action_other, puffer_env.action_space.low, puffer_env.action_space.high
+                        )
+                    other_action_buf[other_mask, time_idx] = action_other
+                    total_actions[other_mask] = action_other
+
+                obs, rewards, dones, truncs, info_list = puffer_env.step(total_actions)
+                if len(info_list) > 0:  # Happens at the end of episode
+                    results = info_list[0]
+                    total_results.append(results)
+        df = pd.DataFrame(total_results)
+        mean_per_key = df.mean(numeric_only=True).to_dict()
+        print(mean_per_key)
+        return other_action_buf, agent_offsets, map_ids
+
+    def replay_rollouts(self, args, puffer_env, loaded_actions):
+        import numpy as np
+        import torch
+        import pufferlib
+
+        num_agents = puffer_env.observation_space.shape[0]
+        device = args["train"]["device"]
+        obs, infos = puffer_env.reset()
+        total_results = []
+        for time_idx in range(args["env"]["resample_frequency"]):
+            obs, rewards, dones, truncs, info_list = puffer_env.step(loaded_actions[:, time_idx])
+            if len(info_list) > 0:  # Happens at the end of episode
+                results = info_list[0]
+                total_results.append(results)
+        df = pd.DataFrame(total_results)
+        mean_per_key = df.mean(numeric_only=True).to_dict()
+        print(mean_per_key)

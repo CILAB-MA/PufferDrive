@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 GPU_ID=${1:-0}
-MODE=${2:-nominal}
+MODE=${2:-replay_0.25}
 EGOS=()
 OTHERS=()
 
-for f in /data/puffer/experiments/nominal/puffer_drive_*.pt; do
+for f in /data/puffer/experiments/${MODE}/puffer_drive_*.pt; do
   bn=$(basename "$f") # puffer_drive_xxx.pt
   id=${bn#puffer_drive_} # xxx.pt
   id=${id%.pt} # xxx
@@ -15,5 +15,5 @@ echo "Found models: ${EGOS[*]}"
 
 for EGO in "${EGOS[@]}"; do
   echo "Running log-replay: EGO ${EGO} vs ${EGO}"
-  CUDA_VISIBLE_DEVICES=$GPU_ID puffer eval puffer_drive --eval.human-replay-eval True --load-model-path "/data/puffer/experiments/nominal/puffer_drive_${EGO}.pt"
+  CUDA_VISIBLE_DEVICES=$GPU_ID puffer eval puffer_drive --eval.human-replay-eval True --eval.human-replay-save-results True --env.termination-mode "0" --eval.wosac-num-maps "10000" --load-model-path "/data/puffer/experiments/${MODE}/puffer_drive_${EGO}.pt"
 done

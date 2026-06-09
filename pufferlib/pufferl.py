@@ -60,7 +60,7 @@ ADVANTAGE_CUDA = shutil.which("nvcc") is not None
 
 
 class PuffeRL:
-    def __init__(self, config, vecenv, policy, logger=None):
+    def __init__(self, config, vecenv, policy, logger=None, other_policies=None):
         # Backend perf optimization
         torch.set_float32_matmul_precision("high")
         torch.backends.cudnn.deterministic = config["torch_deterministic"]
@@ -77,6 +77,8 @@ class PuffeRL:
         obs_space = vecenv.single_observation_space
         atn_space = vecenv.single_action_space
         total_agents = vecenv.num_agents
+        if config["use_pbt"]:
+            total_agents = int(vecenv.num_agents_per_env * config["ego_ratio"]) * vecenv.num_environments
         self.total_agents = total_agents
 
         # Experience
@@ -130,8 +132,31 @@ class PuffeRL:
         if config["use_rnn"]:
             n = vecenv.agents_per_batch
             h = policy.hidden_size
+            self.num_agents_per_env = vecenv.num_agents_per_env
             self.lstm_h = {i * n: torch.zeros(n, h, device=device) for i in range(total_agents // n)}
             self.lstm_c = {i * n: torch.zeros(n, h, device=device) for i in range(total_agents // n)}
+            if config["use_pbt"]:
+                self.ego_ratio = config["ego_ratio"] # This should be divided with the segments & n
+                num_ego = int(n * self.ego_ratio)
+                self.num_ego_per_env = int(self.num_agents_per_env  * self.ego_ratio)
+                self.num_other_per_env = int(self.num_agents_per_env  * (1 - self.ego_ratio))
+                self.lstm_h = {i * self.num_agents_per_env: torch.zeros(num_ego, h, device=device) for i in range(total_agents // self.num_agents_per_env)}
+                self.lstm_c = {i * self.num_agents_per_env: torch.zeros(num_ego, h, device=device) for i in range(total_agents // self.num_agents_per_env)}
+                if config["pbt_mode"] == "reactive":
+                    self.other_lstm_cs = []
+                    self.other_lstm_hs = []
+                    num_other = n - num_ego
+                    num_other_policies = len(other_policies)
+                    self.num_other_policies = num_other_policies
+                    base, rem = divmod(num_other, num_other_policies)
+                    counts = [base + (i < rem) for i in range(num_other_policies)]
+                    for count in counts:
+                        other_lstm_h = {i * self.num_agents_per_env: torch.zeros(count, h, device=device) for i in range(total_agents // self.num_agents_per_env)}
+                        other_lstm_c = {i * self.num_agents_per_env: torch.zeros(count, h, device=device) for i in range(total_agents // self.num_agents_per_env)}
+                        self.other_lstm_hs.append(other_lstm_h)
+                        self.other_lstm_cs.append(other_lstm_c)
+        if config.get("use_pbt"):
+            self._total_actions_buffer = np.zeros((n, 1), dtype=np.int64)
 
         # Minibatching & gradient accumulation
         minibatch_size = config["minibatch_size"]
@@ -156,13 +181,21 @@ class PuffeRL:
         # Torch compile
         self.uncompiled_policy = policy
         self.policy = policy
+        if config["use_pbt"] and config["pbt_mode"] == "reactive":
+            # Torch compile (other)
+            self.uncompiled_other_policy = other_policies
+            self.other_policies = []
+            for other_policy in other_policies:
+                self.other_policies.append(other_policy.eval())
         if config["compile"]:
             self.policy = torch.compile(policy, mode=config["compile_mode"])
             self.policy.forward_eval = torch.compile(policy, mode=config["compile_mode"])
             pufferlib.pytorch.sample_logits = torch.compile(
                 pufferlib.pytorch.sample_logits, mode=config["compile_mode"]
             )
-
+            if config["use_pbt"]:
+                self.other_policies = [torch.compile(other_policy, mode=config["compile_mode"]) for other_policy in self.other_policies]
+                self.other_policies_forward_eval = [torch.compile(other_policy, mode=config["compile_mode"]) for other_policy in self.other_policies]
         # Optimizer
         if config["optimizer"] == "adam":
             optimizer = torch.optim.Adam(
@@ -235,6 +268,286 @@ class PuffeRL:
             return 0
 
         return (self.global_step - self.last_log_step) / (time.time() - self.last_log_time)
+
+    def evaluate_pbt_replay(self):
+        '''Collect rollout'''
+        profile = self.profile
+        epoch = self.epoch
+        profile("eval", epoch)
+        profile("eval_misc", epoch, nest=True)
+        config = self.config
+        device = config["device"]
+
+        if config["use_rnn"]:
+            for k in self.lstm_h:
+                self.lstm_h[k] = torch.zeros(self.lstm_h[k].shape, device=device)
+                self.lstm_c[k] = torch.zeros(self.lstm_c[k].shape, device=device)
+    
+        self.full_rows = 0
+        while self.full_rows < self.segments:
+            profile("env", epoch)
+            o, r, d, t, info, env_id, mask = self.vecenv.recv() 
+            ego_indices = []
+            env_id = env_id * self.ego_ratio
+            env_id = env_id.astype(np.int64)
+            for i, info_i in enumerate(info):
+                if "ego_indices" in info_i.keys():
+                    ego = np.asarray(info_i["ego_indices"], dtype=np.int64)
+                    offset = self.num_agents_per_env * i
+                    ego_indices.extend((ego + offset))
+            profile("eval_misc", epoch)
+            env_id = slice(env_id[0], env_id[-1] + 1)
+            done_mask = d + t  # TODO: Handle truncations separately
+
+            # ego_indices = self.ego_indices.reshape(-1)
+            profile("eval_copy", epoch)
+            o = torch.as_tensor(o)
+            r = torch.as_tensor(r).to(device)  # , non_blocking=True)
+            d = torch.as_tensor(d).to(device)  # , non_blocking=True)
+            
+            o_ego = o[ego_indices]
+            o_ego_device = o_ego.to(device)
+            r_ego = r[ego_indices]
+            d_ego = d[ego_indices]
+            mask_ego = mask[ego_indices]
+            self.global_step += int(mask_ego.sum())
+            profile("eval_forward", epoch)
+            with torch.no_grad(), self.amp_context:
+                ego_state = dict(
+                    reward=r_ego,
+                    done=d_ego,
+                    env_id=env_id,
+                    mask=mask_ego,
+                )
+                if config["use_rnn"]:
+                    ego_state["lstm_h"] = self.lstm_h[env_id.start]
+                    ego_state["lstm_c"] = self.lstm_c[env_id.start]
+                logits_ego, value_ego = self.policy.forward_eval(o_ego_device, ego_state)
+                action_ego, logprob_ego, _ = pufferlib.pytorch.sample_logits(logits_ego)
+
+                r_ego = torch.clamp(r_ego, -1, 1)
+
+            profile("eval_copy", epoch)
+            with torch.no_grad():
+                if config["use_rnn"]:
+                    self.lstm_h[env_id.start] = ego_state["lstm_h"]
+                    self.lstm_c[env_id.start] = ego_state["lstm_c"]
+
+                # Fast path for fully vectorized envs
+                l = self.ep_lengths[env_id.start].item()
+                batch_rows = slice(self.ep_indices[env_id.start].item(), 1 + self.ep_indices[env_id.stop - 1].item())
+                ego_batch_rows = slice(batch_rows.start, batch_rows.stop)
+                if config["cpu_offload"]:
+                    self.observations[ego_batch_rows, l] = o_ego
+                else:
+                    self.observations[ego_batch_rows, l] = o_ego_device
+                # stack transitions only ego
+                self.actions[ego_batch_rows, l] = action_ego
+                self.logprobs[ego_batch_rows, l] = logprob_ego
+                self.rewards[ego_batch_rows, l] = r_ego
+                self.terminals[ego_batch_rows, l] = d_ego.float()
+                self.values[ego_batch_rows, l] = value_ego.flatten()
+                # Note: We are not yet handling masks in this version
+                self.ep_lengths[env_id] += 1
+                if l + 1 >= config["bptt_horizon"]:
+                    num_full = env_id.stop - env_id.start
+                    self.ep_indices[env_id] = self.free_idx + torch.arange(num_full, device=config["device"]).int()
+                    self.ep_lengths[env_id] = 0
+                    self.free_idx += num_full
+                    self.full_rows += num_full
+
+                action_ego = action_ego.cpu().numpy()
+                
+                if isinstance(logits_ego, torch.distributions.Normal):
+                    action_ego = np.clip(action_ego, self.vecenv.action_space.low, self.vecenv.action_space.high)
+                if os.environ.get("PUFFER_BENCH_REPLAY"):
+                    _t0 = time.perf_counter()
+                total_actions = self._total_actions_buffer
+                total_actions[ego_indices] = action_ego
+                if os.environ.get("PUFFER_BENCH_REPLAY"):
+                    _t1 = time.perf_counter()
+                    if not hasattr(self, "_bench_total_actions"):
+                        self._bench_total_actions = [0.0, 0]
+                    self._bench_total_actions[0] += _t1 - _t0
+                    self._bench_total_actions[1] += 1
+
+            profile("eval_misc", epoch)
+            for i in info:
+                for k, v in pufferlib.unroll_nested_dict(i):
+                    if isinstance(v, np.ndarray):
+                        v = v.tolist()
+                    elif isinstance(v, (list, tuple)):
+                        self.stats[k].extend(v)
+                    else:
+                        self.stats[k].append(v)
+            profile("env", epoch)
+            self.vecenv.send(total_actions)
+
+        profile("eval_misc", epoch)
+        self.free_idx = self.total_agents
+        self.ep_indices = torch.arange(self.total_agents, device=device, dtype=torch.int32)
+        self.ep_lengths.zero_()
+        if os.environ.get("PUFFER_BENCH_REPLAY") and hasattr(self, "_bench_total_actions") and self._bench_total_actions[1] > 0:
+            a, n = self._bench_total_actions
+            print(f"[bench] pufferl total_actions: {a*1000:.3f}ms / {n} recvs = {a/n*1e6:.1f}us/recv")
+        profile.end()
+        return self.stats
+
+    def evaluate_pbt(self):
+        '''Collect rollout'''
+        profile = self.profile
+        epoch = self.epoch
+        profile("eval", epoch)
+        profile("eval_misc", epoch, nest=True)
+
+        config = self.config
+        device = config["device"]
+
+        if config["use_rnn"]:
+            for k in self.lstm_h:
+                self.lstm_h[k] = torch.zeros(self.lstm_h[k].shape, device=device)
+                self.lstm_c[k] = torch.zeros(self.lstm_c[k].shape, device=device)
+                for l in range(len(self.other_lstm_hs)):
+                    self.other_lstm_hs[l][k] = torch.zeros(self.other_lstm_hs[l][k].shape, device=device)
+                    self.other_lstm_cs[l][k] = torch.zeros(self.other_lstm_cs[l][k].shape, device=device)
+    
+        self.full_rows = 0
+        while self.full_rows < self.segments:
+            profile("env", epoch)
+            o, r, d, t, info, env_id, mask = self.vecenv.recv()
+            ego_indices = []
+            other_indices = [[] for _ in range(self.num_other_policies)]
+            env_id = env_id * self.ego_ratio
+            env_id = env_id.astype(np.int64)
+            for i, info_i in enumerate(info):
+                if "ego_indices" in info_i.keys():
+                    ego = np.asarray(info_i["ego_indices"], dtype=np.int64)
+                    offset = self.num_agents_per_env * i
+                    ego_indices.extend((ego + offset))
+                    if self.num_other_per_env > 0:
+                        for n in range(self.num_other_policies):
+                            other = np.asarray(info_i["other_indices"][n], dtype=np.int64)
+                            other_indices[n].extend((other + offset))
+
+            # ego_indices = self.ego_indices.reshape(-1)
+            profile("eval_misc", epoch)
+            env_id = slice(env_id[0], env_id[-1] + 1)
+            done_mask = d + t  # TODO: Handle truncations separately
+
+            profile("eval_copy", epoch)
+            o = torch.as_tensor(o)
+            r = torch.as_tensor(r).to(device)  # , non_blocking=True)
+            d = torch.as_tensor(d).to(device)  # , non_blocking=True)
+            o_ego = o[ego_indices]
+            o_ego_device = o_ego.to(device)
+            r_ego = r[ego_indices]
+            d_ego = d[ego_indices]
+            mask_ego = mask[ego_indices]
+            o_others = []
+            r_others = []
+            d_others = []
+            mask_others = []
+            self.global_step += int(mask_ego.sum())
+            for other_idx in other_indices:
+                o_others.append(o[other_idx].to(device))
+                r_others.append(r[other_idx])
+                d_others.append(d[other_idx])
+                mask_others.append(mask[other_idx])
+                
+            profile("eval_forward", epoch)
+            with torch.no_grad(), self.amp_context:
+                other_states = []
+                ego_state = dict(
+                    reward=r_ego,
+                    done=d_ego,
+                    env_id=env_id,
+                    mask=mask_ego,
+                )
+                for i, other_mask in enumerate(mask_others):
+                    other_state = dict(
+                        reward=r_others[i],
+                        done=d_others[i],
+                        env_id=env_id,
+                        mask=mask_others[i],
+                    )
+                    other_states.append(other_state)
+                if config["use_rnn"]:
+                    ego_state["lstm_h"] = self.lstm_h[env_id.start]
+                    ego_state["lstm_c"] = self.lstm_c[env_id.start]
+                    action_others = []
+                    for i in range(len(other_states)):
+                        other_state = other_states[i]
+                        other_state["lstm_h"] = self.other_lstm_hs[i][env_id.start]
+                        other_state["lstm_c"] = self.other_lstm_cs[i][env_id.start]
+                        logits_other, _ = self.other_policies[i].forward_eval(o_others[i], other_state)
+                        action_other, _, _ = pufferlib.pytorch.sample_logits(logits_other)
+                        action_others.append(action_other)
+                logits_ego, value_ego = self.policy.forward_eval(o_ego_device, ego_state)
+                action_ego, logprob_ego, _ = pufferlib.pytorch.sample_logits(logits_ego)
+
+                r_ego = torch.clamp(r_ego, -1, 1)
+            profile("eval_copy", epoch)
+            with torch.no_grad():
+                if config["use_rnn"]:
+                    self.lstm_h[env_id.start] = ego_state["lstm_h"]
+                    self.lstm_c[env_id.start] = ego_state["lstm_c"]
+                    for i in range(len(action_others)):
+                        self.other_lstm_hs[i][env_id.start] = other_states[i]["lstm_h"]
+                        self.other_lstm_cs[i][env_id.start] = other_states[i]["lstm_c"]
+
+                # Fast path for fully vectorized envs
+                l = self.ep_lengths[env_id.start].item()
+                batch_rows = slice(self.ep_indices[env_id.start].item(), 1 + self.ep_indices[env_id.stop - 1].item())
+                ego_batch_rows = slice(batch_rows.start, batch_rows.stop)
+                if config["cpu_offload"]:
+                    self.observations[ego_batch_rows, l] = o_ego
+                else:
+                    self.observations[ego_batch_rows, l] = o_ego_device
+                # stack transitions only ego
+                self.actions[ego_batch_rows, l] = action_ego
+                self.logprobs[ego_batch_rows, l] = logprob_ego
+                self.rewards[ego_batch_rows, l] = r_ego
+                self.terminals[ego_batch_rows, l] = d_ego.float()
+                self.values[ego_batch_rows, l] = value_ego.flatten()
+                # Note: We are not yet handling masks in this version
+                self.ep_lengths[env_id] += 1
+                if l + 1 >= config["bptt_horizon"]:
+                    num_full = env_id.stop - env_id.start
+                    self.ep_indices[env_id] = self.free_idx + torch.arange(num_full, device=config["device"]).int()
+                    self.ep_lengths[env_id] = 0
+                    self.free_idx += num_full
+                    self.full_rows += num_full
+
+                action_ego = action_ego.cpu().numpy()
+                
+                if isinstance(logits_ego, torch.distributions.Normal):
+                    action_ego = np.clip(action_ego, self.vecenv.action_space.low, self.vecenv.action_space.high)
+                total_actions = self._total_actions_buffer
+                total_actions[ego_indices] = action_ego
+                for i, other_idx in enumerate(other_indices):
+                    action_other = action_others[i]
+                    if isinstance(logits_other, torch.distributions.Normal):
+                        action_other = np.clip(action_other, self.vecenv.action_space.low, self.vecenv.action_space.high)
+                    total_actions[other_idx] = action_other.cpu().numpy()
+
+            profile("eval_misc", epoch)
+            for i in info:
+                for k, v in pufferlib.unroll_nested_dict(i):
+                    if isinstance(v, np.ndarray):
+                        v = v.tolist()
+                    elif isinstance(v, (list, tuple)):
+                        self.stats[k].extend(v)
+                    else:
+                        self.stats[k].append(v)
+            profile("env", epoch)
+            self.vecenv.send(total_actions)
+
+        profile("eval_misc", epoch)
+        self.free_idx = self.total_agents
+        self.ep_indices = torch.arange(self.total_agents, device=device, dtype=torch.int32)
+        self.ep_lengths.zero_()
+        profile.end()
+        return self.stats
 
     def evaluate(self):
         profile = self.profile
@@ -521,15 +834,27 @@ class PuffeRL:
                     except Exception as e:
                         print(f"Failed to export model weights: {e}")
 
-        if self.config["eval"]["wosac_realism_eval"] and (
-            (self.epoch - 1) % self.config["eval"]["eval_interval"] == 0 or done_training
+        if (
+            self.epoch > 1
+            and self.config["eval"]["wosac_realism_eval"]
+            and (((self.epoch - 1) % self.config["eval"]["eval_interval"] == 0) or done_training)
         ):
-            pufferlib.utils.run_wosac_eval_in_subprocess(self.config, self.logger, self.global_step)
+            config = self.config.copy()
+            config["model_env_name"] = config["env"]
+            config["env"] = "puffer_drive"
+            config["ego_ratio"] = 1.0
+            pufferlib.utils.run_wosac_eval_in_subprocess(config, self.logger, self.global_step)
 
-        if self.config["eval"]["human_replay_eval"] and (
-            (self.epoch - 1) % self.config["eval"]["eval_interval"] == 0 or done_training
+        if (
+            self.epoch > 1
+            and self.config["eval"]["human_replay_eval"]
+            and (((self.epoch - 1) % self.config["eval"]["eval_interval"] == 0) or done_training)
         ):
-            pufferlib.utils.run_human_replay_eval_in_subprocess(self.config, self.logger, self.global_step)
+            config = self.config.copy()
+            config["model_env_name"] = config["env"]
+            config["env"] = "puffer_drive"
+            pufferlib.utils.run_human_replay_eval_in_subprocess(config, self.logger, self.global_step)
+
 
     def mean_and_log(self):
         config = self.config
@@ -541,6 +866,14 @@ class PuffeRL:
                 del self.stats[k]
 
             self.stats[k] = v
+
+        # Debug: estimate replay (other) success rate; should stay ~0.98 if replay is stable
+        # score = (ego_score*ego_n + other_score*other_n)/n  =>  other_implicit = (score*n - ego_score*ego_n)/(n - ego_n)
+        if config.get("use_pbt") and "score" in self.stats and "ego_score" in self.stats and "n" in self.stats and "ego_n" in self.stats:
+            s, es, n, en = self.stats["score"], self.stats["ego_score"], self.stats["n"], self.stats["ego_n"]
+            if n > en and en > 0:
+                other_implicit = (s * n - es * en) / (n - en)
+                self.stats["other_score_implicit"] = float(np.clip(other_implicit, 0, 1))
 
         device = config["device"]
         agent_steps = int(dist_sum(self.global_step, device))
@@ -564,7 +897,6 @@ class PuffeRL:
                 return logs
             else:
                 return None
-
         self.logger.log(logs, agent_steps)
         return logs
 
@@ -729,7 +1061,6 @@ def compute_puff_advantage(
         terminals = terminals.cpu()
         ratio = ratio.cpu()
         advantages = advantages.cpu()
-
     torch.ops.pufferlib.compute_puff_advantage(
         values, rewards, terminals, ratio, advantages, gamma, gae_lambda, vtrace_rho_clip, vtrace_c_clip
     )
@@ -948,7 +1279,16 @@ class WandbLogger:
         self.run_id = wandb.run.id
 
     def log(self, logs, step):
-        self.wandb.log(logs, step=step)
+        ignore_keys = {"environment/num_envs", "environment/agent_offsets", "environment/map_ids", "environment/other_indices", "environment/ego_n"}
+        logs_filtered = {}
+        for k, v in logs.items():
+            if k in ignore_keys:
+                continue
+            elif "ego" in k:
+                logs_filtered[f"ego/{k[16:]}"] = v
+            else:
+                logs_filtered[k] = v
+        self.wandb.log(logs_filtered, step=step)
 
     def close(self, model_path):
         artifact = self.wandb.Artifact(self.run_id, type="model")
@@ -1031,6 +1371,97 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
     pufferl.logger.close(model_path)
     return all_logs
 
+def train_pbt(env_name, args=None, vecenv=None, policy=None, logger=None, config=None):
+    args = args or load_config(env_name, config_dir=config)
+
+    # Assume TorchRun DDP is used if LOCAL_RANK is set
+    if "LOCAL_RANK" in os.environ:
+        world_size = int(os.environ.get("WORLD_SIZE", 1))
+        print("World size", world_size)
+        master_addr = os.environ.get("MASTER_ADDR", "localhost")
+        master_port = os.environ.get("MASTER_PORT", "29500")
+        local_rank = int(os.environ["LOCAL_RANK"])
+        print(f"rank: {local_rank}, MASTER_ADDR={master_addr}, MASTER_PORT={master_port}")
+        torch.cuda.set_device(local_rank)
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(local_rank)
+
+    vecenv = vecenv or load_env(env_name, args)
+    policy = policy or load_policy(args, vecenv, env_name)
+
+    # if the pbt train mode is reactive, load other policy
+    populations = [
+        f for f in os.listdir(args["pbt"]["population_path"])
+        if f.endswith(".pt")
+    ]
+    policies = None
+    if args["pbt"]["pbt_mode"] == "reactive":
+        policies = []
+        for op in populations:
+            args2 = args.copy()
+            args2["load_model_path"] = os.path.join(args["pbt"]["population_path"], op)
+            policy2 = load_policy(args2, vecenv, env_name)
+            policies.append(policy2)
+
+    if "LOCAL_RANK" in os.environ:
+        args["train"]["device"] = torch.cuda.current_device()
+        torch.distributed.init_process_group(backend="nccl", world_size=world_size)
+        policy = policy.to(local_rank)
+        for p, policy2 in enumerate(policies):
+            policies[p] = policy2.to(local_rank)
+            policies[p] = torch.nn.parallel.DistributedDataParallel(policies[p], device_ids=[local_rank], output_device=local_rank)
+        model = torch.nn.parallel.DistributedDataParallel(policy, device_ids=[local_rank], output_device=local_rank)
+        if hasattr(policy, "lstm"):
+            # model.lstm = policy.lstm
+            model.hidden_size = policy.hidden_size
+            for p, policy2 in enumerate(policies):
+                policies[p].hidden_size = policy2.hidden_size
+                policies[p].forward_eval = policy2.forward_eval
+                policies[p] = policy2.to(local_rank)
+        model.forward_eval = policy.forward_eval
+        policy = model.to(local_rank)
+    if args["neptune"]:
+        logger = NeptuneLogger(args)
+    elif args["wandb"]:
+        logger = WandbLogger(args)
+
+    train_config = dict(**args["train"], **args["pbt"],env=env_name, eval=args.get("eval", {}))
+    pufferl = PuffeRL(train_config, vecenv, policy, logger, policies)
+
+    all_logs = []
+    while pufferl.global_step < train_config["total_timesteps"]:
+        if train_config["device"] == "cuda":
+            torch.compiler.cudagraph_mark_step_begin()
+        if args["pbt"]["pbt_mode"] == "reactive":
+            pufferl.evaluate_pbt()
+        elif args["pbt"]["pbt_mode"] == "replay":
+            pufferl.evaluate_pbt_replay()
+        if train_config["device"] == "cuda":
+            torch.compiler.cudagraph_mark_step_begin()
+        logs = pufferl.train()
+        if logs is not None:
+            if pufferl.global_step > 0.20 * train_config["total_timesteps"]:
+                all_logs.append(logs)
+
+    # Final eval. You can reset the env here, but depending on
+    # your env, this can skew data (i.e. you only collect the shortest
+    # rollouts within a fixed number of epochs)
+    i = 0
+    stats = {}
+    while i < 32 or not stats:
+        if args["pbt"]["pbt_mode"] == "reactive":
+            stats = pufferl.evaluate_pbt()
+        elif args["pbt"]["pbt_mode"] == "replay":
+            stats = pufferl.evaluate_pbt_replay()
+        i += 1
+    logs = pufferl.mean_and_log()
+    if logs is not None:
+        all_logs.append(logs)
+
+    pufferl.print_dashboard()
+    model_path = pufferl.close()
+    pufferl.logger.close(model_path)
+    return all_logs
+
 
 def eval(env_name, args=None, vecenv=None, policy=None):
     """Evaluate a policy."""
@@ -1056,7 +1487,8 @@ def eval(env_name, args=None, vecenv=None, policy=None):
         args["env"]["init_steps"] = args["eval"]["wosac_init_steps"]
         args["env"]["goal_behavior"] = args["eval"]["wosac_goal_behavior"]
         args["env"]["goal_radius"] = args["eval"]["wosac_goal_radius"]
-
+        args["base"]["env_name"] = "puffer_drive"
+        env_name = "puffer_drive"
         vecenv = vecenv or load_env(env_name, args)
         policy = policy or load_policy(args, vecenv, env_name)
 
@@ -1090,9 +1522,12 @@ def eval(env_name, args=None, vecenv=None, policy=None):
             import json
 
             print("\nWOSAC_METRICS_START")
-            id_ = args["load_model_path"]
-            map_results = {id_[-11:-3]: results}
-            save_result("/data/puffer/results/nominal/wosac.json", map_results)
+            print(json.dumps(results))
+            if args["eval"].get("wosac_save_results", True) and args.get("load_model_path"):
+                id_ = args["load_model_path"]
+                exp = id_.split("/")[-2]
+                map_results = {id_[-11:-3]: results}
+                save_result(f"/data/puffer/results/{exp}/wosac.json", map_results)
             print("WOSAC_METRICS_END")
 
         return results
@@ -1105,7 +1540,7 @@ def eval(env_name, args=None, vecenv=None, policy=None):
         args["vec"] = dict(backend=backend, num_envs=1)
         args["env"]["control_mode"] = args["eval"]["human_replay_control_mode"]
         args["env"]["episode_length"] = 91  # WOMD scenario length
-
+        args["env"]["termination_mode"] = 0 # Should be 0 for human replay evaluation
         vecenv = vecenv or load_env(env_name, args)
         policy = policy or load_policy(args, vecenv, env_name)
 
@@ -1119,10 +1554,13 @@ def eval(env_name, args=None, vecenv=None, policy=None):
         import json
 
         print("HUMAN_REPLAY_METRICS_START")
-        id_ = args["load_model_path"]
-        map_results = {id_[-11:-3]: results}
-        print(map_results)
-        save_result("/data/puffer/results/nominal/logreplay.json", map_results)
+        print(json.dumps(results))
+        if args["eval"].get("human_replay_save_results", True) and args.get("load_model_path"):
+            id_ = args["load_model_path"]
+            exp = id_.split("/")[-2]
+            map_results = {id_[-11:-3]: results}
+            print(f"EXP {exp}")
+            save_result(f"/data/puffer/results/{exp}/logreplay.json", map_results)
         print("HUMAN_REPLAY_METRICS_END")
 
         return results
@@ -1151,23 +1589,43 @@ def eval(env_name, args=None, vecenv=None, policy=None):
                 lstm_c=torch.zeros(num_agents, policy.hidden_size, device=device),
             )
 
-        frames = []
+        target_frames = int(args["save_frames"])
+        if target_frames > 0:
+            frames = []
+            for _ in range(target_frames):
+                render = driver.render()
+                if render is not None:
+                    frames.append(render)
+
+                with torch.no_grad():
+                    ob = torch.as_tensor(ob).to(device)
+                    logits, value = policy.forward_eval(ob, state)
+                    action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
+                    action = action.cpu().numpy().reshape(vecenv.action_space.shape)
+
+                if isinstance(logits, torch.distributions.Normal):
+                    action = np.clip(action, vecenv.action_space.low, vecenv.action_space.high)
+
+                ob = vecenv.step(action)[0]
+
+            if not frames:
+                raise pufferlib.APIUsageError(
+                    "No render frames captured. Drive.render() returns None in raylib mode. "
+                    "Use: python analyze/viz.py --model <ckpt.pt> --map-bin <map_XXX.bin> --out out.gif --use-xvfb"
+                )
+
+            import imageio
+
+            imageio.mimsave(args["gif_path"], frames, fps=args["fps"], loop=0)
+            print(f"Saved {args['gif_path']} ({len(frames)} frames)")
+            return
+
         while True:
             render = driver.render()
-            if len(frames) < args["save_frames"]:
-                frames.append(render)
 
-            # Screenshot Ocean envs with F12, gifs with control + F12
-            if driver.render_mode == "ansi":
+            if driver.render_mode == "ansi" and render is not None:
                 print("\033[0;0H" + render + "\n")
                 time.sleep(1 / args["fps"])
-            elif driver.render_mode == "rgb_array":
-                pass
-                # import cv2
-                # render = cv2.cvtColor(render, cv2.COLOR_RGB2BGR)
-                # cv2.imshow('frame', render)
-                # cv2.waitKey(1)
-                # time.sleep(1/args['fps'])
 
             with torch.no_grad():
                 ob = torch.as_tensor(ob).to(device)
@@ -1179,12 +1637,6 @@ def eval(env_name, args=None, vecenv=None, policy=None):
                 action = np.clip(action, vecenv.action_space.low, vecenv.action_space.high)
 
             ob = vecenv.step(action)[0]
-
-            if len(frames) > 0 and len(frames) == args["save_frames"]:
-                import imageio
-
-                imageio.mimsave(args["gif_path"], frames, fps=args["fps"], loop=0)
-                frames.append("Done")
 
 
 def sweep(args=None, env_name=None):
@@ -1345,9 +1797,96 @@ def zero_shot(env_name, args=None, vecenv=None, policies=None):
     args["vec"] = dict(backend=backend, num_envs=1)
     # args["env"]["control_mode"] = args["eval"]["human_replay_control_mode"]
     args["env"]["episode_length"] = 91  # WOMD scenario length
-
+    args["env"]["num_maps"] = 10000 
     vecenv = vecenv or load_env(env_name, args)
     args2 = args.copy()
+    if args["pbt"]["pbt_mode"] == "save-population":
+        policies = []
+        num_collect_rollout = int(args["pbt"].get("num_collect_rollout", 50))
+        start_idx = int(args["pbt"].get("collect_start_idx", 0))
+        end_idx = int(args["pbt"].get("collect_end_idx", num_collect_rollout))
+        if not (0 <= start_idx < end_idx <= num_collect_rollout):
+            raise ValueError(
+                "Need 0 <= collect_start_idx < collect_end_idx <= num_collect_rollout; "
+                f"got start_idx={start_idx}, end_idx={end_idx}, num_collect_rollout={num_collect_rollout}"
+            )
+        shard_len = end_idx - start_idx
+        args["env"]["num_maps"] = 10000  # tmp
+        vecenv = load_env(env_name, args)
+        evaluator = OtherReplayEvaluator(args)
+        populations = [
+            f for f in os.listdir(args["pbt"]["population_path"])
+            if f.endswith(".pt")
+        ]
+        for op in populations:
+            args2 = args.copy()
+            args2["load_model_path"] = os.path.join(args["pbt"]["population_path"], op)
+            policy2 = load_policy(args2, vecenv, env_name)
+            policies.append(policy2.eval())
+        replay_dir = os.path.join(args["pbt"]["population_path"], "replay")
+        split_dir = os.path.join(args["pbt"]["population_path"], "splits")
+        os.makedirs(split_dir, exist_ok=True)
+        tag = f"{start_idx:06d}_{end_idx:06d}"
+        fp_a = os.path.join(split_dir, f"actions_{tag}.npy")
+        fp_ao = os.path.join(split_dir, f"agent_offsets_{tag}.npy")
+        fp_m = os.path.join(split_dir, f"map_ids_{tag}.npy")
+        mm_a = mm_ao = mm_m = None
+        for local_i, global_i in enumerate(range(start_idx, end_idx)):
+            other_action_buf, agent_offsets, map_ids = evaluator.collect_rollouts(args, vecenv, policies)
+            agent_offsets = np.asarray(agent_offsets, dtype=np.int32, order="C")
+            map_ids = np.asarray(map_ids, dtype=np.int32, order="C")
+            if local_i == 0:
+                na, T, c = other_action_buf.shape
+                jo = int(agent_offsets.size)
+                km = int(map_ids.size)
+                mm_a = np.lib.format.open_memmap(
+                    fp_a,
+                    mode="w+",
+                    dtype=other_action_buf.dtype,
+                    shape=(shard_len, na, T, c),
+                )
+                mm_ao = np.lib.format.open_memmap(
+                    fp_ao, mode="w+", dtype=np.int32, shape=(shard_len, jo)
+                )
+                mm_m = np.lib.format.open_memmap(
+                    fp_m, mode="w+", dtype=np.int32, shape=(shard_len, km)
+                )
+            mm_a[local_i] = np.ascontiguousarray(other_action_buf)
+            mm_ao[local_i] = agent_offsets.reshape(mm_ao.shape[1:])
+            mm_m[local_i] = map_ids.reshape(mm_m.shape[1:])
+            # to initialize
+            vecenv.close()
+            vecenv = load_env(env_name, args)
+            print(
+                f"Collected shard {local_i + 1}/{shard_len} "
+                f"(global rollout {global_i + 1}/{num_collect_rollout}), shape: {other_action_buf.shape}"
+            )
+        del mm_a, mm_ao, mm_m
+        print(
+            f"Wrote split memmaps under {split_dir} tag={tag} "
+            f"(shard_len={shard_len}, agents={na}, T={T}). "
+            f"Merge with: python data_concat.py --population-path {args['pbt']['population_path']} "
+            f"--total-rollouts {num_collect_rollout}"
+        )
+        if start_idx == 0 and end_idx == num_collect_rollout:
+            actions_rd = np.load(fp_a, mmap_mode="r")
+            for i in range(shard_len):
+                evaluator.replay_rollouts(args, vecenv, np.asarray(actions_rd[i], dtype=actions_rd.dtype))
+                if i != shard_len - 1:
+                    vecenv.close()
+                    vecenv = load_env(env_name, args)
+            vecenv.close()
+            print("Finished replay smoke-test (full single-shard run).")
+        else:
+            try:
+                vecenv.close()
+            except Exception:
+                pass
+            print(
+                "Skipped replay smoke-test for partial shard; run data_concat.py then replay training/eval."
+            )
+        return None
+    
     args["load_model_path"] = args["load_multiple_model_path"][0]
     policy1 = load_policy(args, vecenv, env_name)
 
@@ -1355,17 +1894,20 @@ def zero_shot(env_name, args=None, vecenv=None, policies=None):
     policy2 = load_policy(args2, vecenv, env_name)
 
     print(f"Effective number of scenarios used: {len(vecenv.driver_env.agent_offsets) - 1}")
-    parts = args["load_multiple_model_path"][1].split("/") 
-    evaluator = OtherReplayEvaluator(args, mode=parts[4])
+    parts_population = args["load_multiple_model_path"][1].split("/") 
+    parts_ego = args["load_multiple_model_path"][0].split("/")
+    evaluator = OtherReplayEvaluator(args, mode=parts_population[4], exp=parts_ego[4])
 
     # Run save replay
     # todo: randomly save the state for calculating log diff
+
     if args["zero_shot_mode"] == "save-replay":
         results = evaluator.save_replay(args, vecenv, policy1, policy2)
     elif args["zero_shot_mode"] == "replay":
         results = evaluator.play_replay(args, vecenv, policy1, policy2)
     elif args["zero_shot_mode"] == "reactive-play":
         results = evaluator.play_reactive(args, vecenv, policy1, policy2)
+
     return results
 
 def linear_probe(env_name, args=None, vecenv=None, policy=None):
@@ -1509,7 +2051,17 @@ def load_env(env_name, args):
     module_name = "pufferlib.ocean" if package == "ocean" else f"pufferlib.environments.{package}"
     env_module = importlib.import_module(module_name)
     make_env = env_module.env_creator(env_name)
-    return pufferlib.vector.make(make_env, env_kwargs=args["env"], **args["vec"])
+    if env_name == "puffer_drive":
+        env_kwargs = {**args["env"]}
+    elif env_name == "puffer_drive_pbt":
+        env_kwargs = {**args["env"], **args.get("pbt", {})}
+    else:
+        return pufferlib.vector.make(make_env, env_kwargs={**args["env"]}, **args["vec"])
+
+    sp = args.get("eval", {}).get("scenario_log_path")
+    if sp is not None:
+        env_kwargs["scenario_log_path"] = sp
+    return pufferlib.vector.make(make_env, env_kwargs=env_kwargs, **args["vec"])
 
 
 def load_policy(args, vecenv, env_name=""):
@@ -1566,7 +2118,7 @@ def load_config(env_name, config_dir=None):
     parser.add_argument("--load-model-path", type=str, default=None, help="Path to a pretrained checkpoint")
     # for zero-shot evaluation
     parser.add_argument("--load-multiple-model-path", type=str, default=[], nargs="+", help="Path to a pretrained multiple checkpoints")
-    parser.add_argument('--zero-shot-mode', type=str, default='save-replay', 
+    parser.add_argument('--zero-shot-mode', type=str, default='save-replay',    
         choices=['reactive-play', 'replay', 'save-replay']
     )
     parser.add_argument('--lp-mode', type=str, default='generate', 
@@ -1654,6 +2206,9 @@ def main():
     env_name = sys.argv.pop(1)
     if mode == "train":
         train(env_name=env_name)
+    if mode == "train_pbt":
+        config_dir = "pufferlib/ocean/drive_pbt"
+        train_pbt(env_name=env_name, config=config_dir)
     elif mode == "eval":
         eval(env_name=env_name)
     elif mode == "sweep":

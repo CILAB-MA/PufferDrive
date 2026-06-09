@@ -1,8 +1,9 @@
+import os
+import time
 import numpy as np
 import gymnasium
 import json
 import struct
-import os
 import pufferlib
 from pufferlib.ocean.drive import binding
 from pufferlib.ocean.drive.scenario_log import (
@@ -11,12 +12,12 @@ from pufferlib.ocean.drive.scenario_log import (
     split_aggregate_and_scenario,
 )
 from multiprocessing import Pool, cpu_count
-from tqdm import tqdm
 
 _DRIVE_INI = "pufferlib/config/ocean/drive.ini"
+from tqdm import tqdm
+from pufferlib.pufferl import load_policy
 
-
-class Drive(pufferlib.PufferEnv):
+class Drive_PBT(pufferlib.PufferEnv):
     def __init__(
         self,
         render_mode=None,
@@ -54,6 +55,9 @@ class Drive(pufferlib.PufferEnv):
         control_mode="control_vehicles",
         map_dir="resources/drive/binaries/training",
         sequential_map_sampling=False,
+        pbt_mode="reactive", # for pbt
+        population_path=None, # for replay
+        ego_ratio=0.0, # for replay
         scenario_log_path=None,
     ):
         # env
@@ -81,7 +85,6 @@ class Drive(pufferlib.PufferEnv):
         self.termination_mode = termination_mode
         self.resample_frequency = resample_frequency
         self.dynamics_model = dynamics_model
-
         # Observation space calculation
         self.ego_features = {"classic": binding.EGO_FEATURES_CLASSIC, "jerk": binding.EGO_FEATURES_JERK}.get(
             dynamics_model
@@ -161,10 +164,11 @@ class Drive(pufferlib.PufferEnv):
         self.max_controlled_agents = int(max_controlled_agents)
 
         # Iterate through all maps to count total agents that can be initialized for each map
-        agent_offsets, map_ids, num_envs, _ = binding.shared(
+        agent_offsets, map_ids, num_envs, ego_indices = binding.shared(
             map_dir=map_dir,
             num_agents=num_agents,
             num_maps=num_maps,
+            ego_ratio=ego_ratio,
             init_mode=self.init_mode,
             control_mode=self.control_mode,
             init_steps=self.init_steps,
@@ -173,17 +177,23 @@ class Drive(pufferlib.PufferEnv):
             goal_target_distance=self.goal_target_distance,
             sequential_map_sampling=sequential_map_sampling,
         )
-
         # agent_offsets[-1] works in both cases, just making it explicit that num_agents is ignored if sequential_map_sampling is True
         self.num_agents = num_agents if not sequential_map_sampling else agent_offsets[-1]
         self.agent_offsets = agent_offsets
         self.map_ids = map_ids
         self.num_envs = num_envs
+        self.ego_indices = np.asarray(ego_indices, dtype=np.int64)
+        ao = np.asarray(agent_offsets, dtype=np.int64)
+        self.num_ego_per_env = [int(np.sum((self.ego_indices >= ao[i]) & (self.ego_indices < ao[i + 1]))) for i in range(num_envs)]
+        self.other_mask = np.ones(self.num_agents, dtype=bool)
+        self.other_mask[self.ego_indices] = False
+        self.other_indices_arr = np.flatnonzero(self.other_mask).astype(np.int64)
         super().__init__(buf=buf)
         env_ids = []
         for i in range(num_envs):
             cur = agent_offsets[i]
             nxt = agent_offsets[i + 1]
+            ego_local = (self.ego_indices - cur)[(self.ego_indices >= cur) & (self.ego_indices < nxt)].astype(np.int32).tolist()
             env_id = binding.env_init(
                 self.observations[cur:nxt],
                 self.actions[cur:nxt],
@@ -213,6 +223,8 @@ class Drive(pufferlib.PufferEnv):
                 max_controlled_agents=self.max_controlled_agents,
                 map_id=map_ids[i],
                 max_agents=nxt - cur,
+                num_ego=self.num_ego_per_env[i],
+                ego_local_indices=ego_local,
                 ini_file="pufferlib/config/ocean/drive.ini",
                 init_steps=init_steps,
                 init_mode=self.init_mode,
@@ -221,18 +233,69 @@ class Drive(pufferlib.PufferEnv):
                 scenario_log_path=self.scenario_log_path or "",
             )
             env_ids.append(env_id)
-
         self.c_envs = binding.vectorize(*env_ids)
+        self.ego_ratio = ego_ratio
+        self.population_path = population_path
+        self.pbt_mode = pbt_mode
+        if pbt_mode == "replay":
+            replay_dir = os.path.join(self.population_path, "replay")
+            fp_actions = os.path.join(replay_dir, "other_actions_actions.npy")
+            if os.path.isfile(fp_actions):
+                self.other_actions = np.load(fp_actions, mmap_mode="r")
+                self.actions_agent_offsets = np.load(
+                    os.path.join(replay_dir, "other_actions_agent_offsets.npy"), mmap_mode="r"
+                )
+                self.actions_map_id = np.load(
+                    os.path.join(replay_dir, "other_actions_map_ids.npy"), mmap_mode="r"
+                )
+            else:
+                npz = np.load(os.path.join(replay_dir, "other_actions.npz"), allow_pickle=True)
+                self.other_actions = npz["actions"]
+                self.actions_agent_offsets = npz["agent_offsets"]
+                self.actions_map_id = npz["map_ids"]
+                del npz
+            self._allocate_replay(self.num_agents, self.map_ids)
+        else:
+            populations = [
+                f for f in os.listdir(population_path)
+                if f.endswith(".pt")
+            ]
+            self.num_other_policies = len(populations)
+            self._allocate_other_indices(self.num_agents)
 
-    def reset(self, seed=0):
+    def reset(self, seed=0):    
         binding.vec_reset(self.c_envs, seed)
         self.tick = 0
-        info = [{"agent_offsets": self.agent_offsets, "map_ids": self.map_ids, "num_envs": self.num_envs}]
+        info = [{"agent_offsets": self.agent_offsets, "map_ids": self.map_ids, "num_envs": self.num_envs, "ego_indices": self.ego_indices}]
+        if self.pbt_mode == "reactive":
+            info[0]["other_indices"] = self.other_indices
         return self.observations, info
+
+    def _allocate_other_indices(self, num_agents):
+        other_indices = np.setdiff1d(np.arange(num_agents), self.ego_indices, assume_unique=False)
+        np.random.shuffle(other_indices)
+        splits = np.array_split(other_indices, self.num_other_policies)
+        self.other_indices = [s.astype(np.int64, copy=False) for s in splits]
+
+    def _allocate_replay(self, num_agents, map_ids):
+        self.replay_actions = np.zeros((num_agents, self.resample_frequency, 1), dtype=np.int32)
+        agent_ind = 0
+        for _, map_id in enumerate(map_ids):
+            num_rollout = self.other_actions.shape[0]
+            sample_ind = np.random.randint(0, num_rollout)
+            map_indices = np.where(self.actions_map_id[sample_ind] == map_id)[0][0]
+            agent_offsets = self.actions_agent_offsets[sample_ind, map_indices:map_indices+2]
+            num_agents_for_map = agent_offsets[1] - agent_offsets[0]
+            if agent_ind + num_agents_for_map> num_agents:
+                num_agents_for_map = num_agents - agent_ind
+            self.replay_actions[agent_ind:agent_ind+num_agents_for_map] = self.other_actions[sample_ind, agent_offsets[0]:agent_offsets[0] + num_agents_for_map].copy()
+            agent_ind += num_agents_for_map
 
     def step(self, actions):
         self.terminals[:] = 0
         self.actions[:] = actions
+        if self.pbt_mode == "replay":
+            self.actions[self.other_indices_arr] = self.replay_actions[self.other_indices_arr, self.tick, :]
         binding.vec_step(self.c_envs)
         self.tick += 1
         info = []
@@ -247,9 +310,10 @@ class Drive(pufferlib.PufferEnv):
         if self.tick > 0 and self.resample_frequency > 0 and self.tick % self.resample_frequency == 0:
             self.tick = 0
             binding.vec_close(self.c_envs)
-            agent_offsets, map_ids, num_envs, _ = binding.shared(
+            agent_offsets, map_ids, num_envs, ego_indices = binding.shared(
                 num_agents=self.num_agents,
                 num_maps=self.num_maps,
+                ego_ratio=self.ego_ratio,
                 init_mode=self.init_mode,
                 control_mode=self.control_mode,
                 init_steps=self.init_steps,
@@ -264,11 +328,22 @@ class Drive(pufferlib.PufferEnv):
             self.agent_offsets = agent_offsets
             self.map_ids = map_ids
             self.num_envs = num_envs
+            self.ego_indices = np.asarray(ego_indices, dtype=np.int64)
+            ao = np.asarray(agent_offsets, dtype=np.int64)
+            self.num_ego_per_env = [int(np.sum((self.ego_indices >= ao[i]) & (self.ego_indices < ao[i + 1]))) for i in range(num_envs)]
+            self.other_mask = np.ones(self.num_agents, dtype=bool)
+            self.other_mask[self.ego_indices] = False
+            self.other_indices_arr = np.flatnonzero(self.other_mask).astype(np.int64)
+            if self.pbt_mode == "replay":
+                self._allocate_replay(self.num_agents, self.map_ids)
+            else:
+                self._allocate_other_indices(self.num_agents)
             env_ids = []
             seed = np.random.randint(0, 2**32 - 1)
             for i in range(num_envs):
                 cur = agent_offsets[i]
                 nxt = agent_offsets[i + 1]
+                ego_local = (self.ego_indices - cur)[(self.ego_indices >= cur) & (self.ego_indices < nxt)].astype(np.int32).tolist()
                 env_id = binding.env_init(
                     self.observations[cur:nxt],
                     self.actions[cur:nxt],
@@ -297,6 +372,8 @@ class Drive(pufferlib.PufferEnv):
                     max_controlled_agents=self.max_controlled_agents,
                     map_id=map_ids[i],
                     max_agents=nxt - cur,
+                    num_ego=self.num_ego_per_env[i],
+                    ego_local_indices=ego_local,
                     ini_file="pufferlib/config/ocean/drive.ini",
                     init_steps=self.init_steps,
                     init_mode=self.init_mode,
@@ -309,6 +386,15 @@ class Drive(pufferlib.PufferEnv):
 
             binding.vec_reset(self.c_envs, seed)
             self.terminals[:] = 1
+        if len(info) == 0:
+            info = [{"agent_offsets": self.agent_offsets, "map_ids": self.map_ids, "num_envs": self.num_envs, "ego_indices": self.ego_indices}]
+        else:
+            info[0]["agent_offsets"] = self.agent_offsets
+            info[0]["map_ids"] = self.map_ids
+            info[0]["num_envs"] = self.num_envs
+            info[0]["ego_indices"] = self.ego_indices
+        if self.pbt_mode == "reactive":
+            info[0]["other_indices"] = self.other_indices
         # print(f"Rewards {self.rewards.max()} {self.rewards.mean()}")
         return (self.observations, self.rewards, self.terminals, self.truncations, info)
 
@@ -452,291 +538,3 @@ def dist(a, b):
     dx = a["x"] - b["x"]
     dy = a["y"] - b["y"]
     return dx * dx + dy * dy
-
-
-def simplify_polyline(geometry, polyline_reduction_threshold, max_segment_length):
-    """Simplify the given polyline using a method inspired by Visvalingham-Whyatt, optimized for Python."""
-    num_points = len(geometry)
-    if num_points < 3:
-        return geometry  # Not enough points to simplify
-
-    skip = [False] * num_points
-    skip_changed = True
-
-    while skip_changed:
-        skip_changed = False
-        k = 0
-        while k < num_points - 1:
-            k_1 = k + 1
-            while k_1 < num_points - 1 and skip[k_1]:
-                k_1 += 1
-            if k_1 >= num_points - 1:
-                break
-
-            k_2 = k_1 + 1
-            while k_2 < num_points and skip[k_2]:
-                k_2 += 1
-            if k_2 >= num_points:
-                break
-
-            point1 = geometry[k]
-            point2 = geometry[k_1]
-            point3 = geometry[k_2]
-            area = calculate_area(point1, point2, point3)
-            if area < polyline_reduction_threshold and dist(point1, point3) <= max_segment_length:
-                skip[k_1] = True
-                skip_changed = True
-                k = k_2
-            else:
-                k = k_1
-
-    return [geometry[i] for i in range(num_points) if not skip[i]]
-
-
-def save_map_binary(map_data, output_file, unique_map_id):
-    trajectory_length = 91
-    """Saves map data in a binary format readable by C"""
-    with open(output_file, "wb") as f:
-        # Get metadata
-        metadata = map_data.get("metadata", {})
-        sdc_track_index = metadata.get("sdc_track_index", -1)  # -1 as default if not found
-        tracks_to_predict = metadata.get("tracks_to_predict", [])
-
-        # Write sdc_track_index
-        f.write(struct.pack("i", sdc_track_index))
-
-        # Write tracks_to_predict info (indices only)
-        f.write(struct.pack("i", len(tracks_to_predict)))
-        for track in tracks_to_predict:
-            track_index = track.get("track_index", -1)
-            f.write(struct.pack("i", track_index))
-
-        # Count total entities
-        num_objects = len(map_data.get("objects", []))
-        num_roads = len(map_data.get("roads", []))
-        # num_entities = num_objects + num_roads
-        f.write(struct.pack("i", num_objects))
-        f.write(struct.pack("i", num_roads))
-        # f.write(struct.pack('i', num_entities))
-        # Write objects
-        for obj in map_data.get("objects", []):
-            # Write unique map id
-            f.write(struct.pack("i", unique_map_id))
-
-            # Write base entity data
-            obj_type = obj.get("type", 1)
-            if obj_type == "vehicle":
-                obj_type = 1
-            elif obj_type == "pedestrian":
-                obj_type = 2
-            elif obj_type == "cyclist":
-                obj_type = 3
-            f.write(struct.pack("i", obj_type))  # type
-            f.write(struct.pack("i", obj.get("id", 0)))  # id
-            f.write(struct.pack("i", trajectory_length))  # array_size
-            # Write position arrays
-            positions = obj.get("position", [])
-            for i in range(trajectory_length):
-                pos = positions[i] if i < len(positions) else {"x": 0.0, "y": 0.0, "z": 0.0}
-                f.write(struct.pack("f", float(pos.get("x", 0.0))))
-            for i in range(trajectory_length):
-                pos = positions[i] if i < len(positions) else {"x": 0.0, "y": 0.0, "z": 0.0}
-                f.write(struct.pack("f", float(pos.get("y", 0.0))))
-            for i in range(trajectory_length):
-                pos = positions[i] if i < len(positions) else {"x": 0.0, "y": 0.0, "z": 0.0}
-                f.write(struct.pack("f", float(pos.get("z", 0.0))))
-
-            # Write velocity arrays
-            velocities = obj.get("velocity", [])
-            for arr, key in [(velocities, "x"), (velocities, "y"), (velocities, "z")]:
-                for i in range(trajectory_length):
-                    vel = arr[i] if i < len(arr) else {"x": 0.0, "y": 0.0, "z": 0.0}
-                    f.write(struct.pack("f", float(vel.get(key, 0.0))))
-
-            # Write heading and valid arrays
-            headings = obj.get("heading", [])
-            f.write(
-                struct.pack(
-                    f"{trajectory_length}f",
-                    *[float(headings[i]) if i < len(headings) else 0.0 for i in range(trajectory_length)],
-                )
-            )
-
-            valids = obj.get("valid", [])
-            f.write(
-                struct.pack(
-                    f"{trajectory_length}i",
-                    *[int(valids[i]) if i < len(valids) else 0 for i in range(trajectory_length)],
-                )
-            )
-
-            # Write scalar fields
-            f.write(struct.pack("f", float(obj.get("width", 0.0))))
-            f.write(struct.pack("f", float(obj.get("length", 0.0))))
-            f.write(struct.pack("f", float(obj.get("height", 0.0))))
-            goal_pos = obj.get("goalPosition", {"x": 0, "y": 0, "z": 0})  # Get goalPosition object with default
-            f.write(struct.pack("f", float(goal_pos.get("x", 0.0))))  # Get x value
-            f.write(struct.pack("f", float(goal_pos.get("y", 0.0))))  # Get y value
-            f.write(struct.pack("f", float(goal_pos.get("z", 0.0))))  # Get z value
-            f.write(struct.pack("i", obj.get("mark_as_expert", 0)))
-
-        # Write roads
-        for idx, road in enumerate(map_data.get("roads", [])):
-            f.write(struct.pack("i", unique_map_id))
-
-            geometry = road.get("geometry", [])
-            road_type = road.get("map_element_id", 0)
-            road_type_word = road.get("type", 0)
-            if road_type_word == "lane":
-                road_type = 2
-            elif road_type_word == "road_edge":
-                road_type = 15
-            # breakpoint()
-            if len(geometry) > 10 and road_type <= 16:
-                geometry = simplify_polyline(geometry, 0.1, 250)
-            size = len(geometry)
-            # breakpoint()
-            if road_type >= 0 and road_type <= 3:
-                road_type = 4
-            elif road_type >= 5 and road_type <= 13:
-                road_type = 5
-            elif road_type >= 14 and road_type <= 16:
-                road_type = 6
-            elif road_type == 17:
-                road_type = 7
-            elif road_type == 18:
-                road_type = 8
-            elif road_type == 19:
-                road_type = 9
-            elif road_type == 20:
-                road_type = 10
-            # Write base entity data
-            f.write(struct.pack("i", road_type))  # type
-            f.write(struct.pack("i", road.get("id", 0)))  # id
-            f.write(struct.pack("i", size))  # array_size
-
-            # Write position arrays
-            for coord in ["x", "y", "z"]:
-                for point in geometry:
-                    f.write(struct.pack("f", float(point.get(coord, 0.0))))
-
-            # Write scalar fields
-            f.write(struct.pack("f", float(road.get("width", 0.0))))
-            f.write(struct.pack("f", float(road.get("length", 0.0))))
-            f.write(struct.pack("f", float(road.get("height", 0.0))))
-            goal_pos = road.get("goalPosition", {"x": 0, "y": 0, "z": 0})  # Get goalPosition object with default
-            f.write(struct.pack("f", float(goal_pos.get("x", 0.0))))  # Get x value
-            f.write(struct.pack("f", float(goal_pos.get("y", 0.0))))  # Get y value
-            f.write(struct.pack("f", float(goal_pos.get("z", 0.0))))  # Get z value
-            f.write(struct.pack("i", road.get("mark_as_expert", 0)))
-
-
-def load_map(map_name, unique_map_id, binary_output=None):
-    """Loads a JSON map and optionally saves it as binary"""
-    with open(map_name, "r") as f:
-        map_data = json.load(f)
-
-    if binary_output:
-        save_map_binary(map_data, binary_output, unique_map_id)
-
-
-def _process_single_map(args):
-    """Worker function to process a single map file"""
-    i, map_path, binary_path = args
-    try:
-        load_map(str(map_path), i, str(binary_path))
-        return (i, map_path.name, True, None)
-    except Exception as e:
-        return (i, map_path.name, False, str(e))
-
-
-def process_all_maps(
-    data_folder="data/processed/training",
-    max_maps=10_000,
-    num_workers=None,
-):
-    """Process all maps and save them as binaries using multiprocessing
-
-    Args:
-        data_folder: Path to the folder containing JSON map files
-        max_maps: Maximum number of maps to process
-        num_workers: Number of parallel workers (defaults to cpu_count())
-    """
-    from pathlib import Path
-
-    if num_workers is None:
-        num_workers = cpu_count()
-
-    # Path to the training data
-    data_dir = Path(data_folder)
-    dataset_name = data_dir.name
-
-    # Create the binaries directory if it doesn't exist
-    binary_dir = Path(f"/data/puffer/resources/drive/binaries/{dataset_name}")
-    binary_dir.mkdir(parents=True, exist_ok=True)
-
-    # Get all JSON files in the training directory
-    json_files = sorted(data_dir.glob("*.json"))
-
-    # Prepare arguments for parallel processing
-    tasks = []
-    for i, map_path in enumerate(json_files[:max_maps]):
-        binary_file = f"map_{i:03d}.bin"
-        binary_path = binary_dir / binary_file
-        tasks.append((i, map_path, binary_path))
-
-    # Process maps in parallel with progress bar
-    with Pool(num_workers) as pool:
-        results = list(
-            tqdm(pool.imap(_process_single_map, tasks), total=len(tasks), desc="Processing maps", unit="map")
-        )
-
-    # Collect statistics
-    successful = sum(1 for _, _, success, _ in results if success)
-    failed = sum(1 for _, _, success, _ in results if not success)
-
-    if failed > 0:
-        print(f"\nFailed {failed}/{len(results)} files:")
-        for i, name, success, error in results:
-            if not success:
-                print(f"  {name}: {error}")
-
-
-def test_performance(timeout=10, atn_cache=1024, num_agents=1024):
-    import time
-
-    env = Drive(
-        num_agents=num_agents,
-        num_maps=1,
-        control_mode="control_vehicles",
-        init_mode="create_all_valid",
-        init_steps=0,
-        episode_length=91,
-    )
-
-    env.reset()
-
-    tick = 0
-    actions = np.stack(
-        [np.random.randint(0, space.n + 1, (atn_cache, num_agents)) for space in env.single_action_space], axis=-1
-    )
-
-    start = time.time()
-    while time.time() - start < timeout:
-        atn = actions[tick % atn_cache]
-        env.step(atn)
-        tick += 1
-
-    print(f"SPS: {num_agents * tick / (time.time() - start)}")
-
-    env.close()
-
-
-if __name__ == "__main__":
-    # test_performance()
-    # Process the train dataset
-    process_all_maps(data_folder="/data/puffer/data/training", max_maps=10_000)
-    # Process the validation/test dataset
-    # process_all_maps(data_folder="data/processed/validation")
-    # # Process the validation_interactive dataset
-    # process_all_maps(data_folder="data/processed/validation_interactive")

@@ -13,9 +13,8 @@ def run_human_replay_eval_in_subprocess(config, logger, global_step):
     """
     try:
         run_id = logger.run_id
-        model_dir = os.path.join(config["data_dir"], f"{config['env']}_{run_id}")
+        model_dir = os.path.join(config["data_dir"], f"{config['model_env_name']}_{run_id}")
         model_files = glob.glob(os.path.join(model_dir, "model_*.pt"))
-
         if not model_files:
             print("No model files found for human replay evaluation")
             return
@@ -30,21 +29,24 @@ def run_human_replay_eval_in_subprocess(config, logger, global_step):
             "pufferlib.pufferl",
             "eval",
             config["env"],
+            "--env-name",
+            "puffer_drive",
             "--load-model-path",
             latest_cpt,
             "--eval.wosac-realism-eval",
             "False",
             "--eval.human-replay-eval",
             "True",
-            "--eval.human-replay-num-agents",
-            str(eval_config["human_replay_num_agents"]),
             "--eval.human-replay-control-mode",
             str(eval_config["human_replay_control_mode"]),
+            "--env.termination-mode",
+            "0",
+            "--eval.human-replay-save-results",
+            "False",
         ]
 
         # Run human replay evaluation in subprocess
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=600, cwd=os.getcwd())
-
         if result.returncode == 0:
             # Extract JSON from stdout between markers
             stdout = result.stdout
@@ -88,7 +90,7 @@ def run_wosac_eval_in_subprocess(config, logger, global_step):
     """
     try:
         run_id = logger.run_id
-        model_dir = os.path.join(config["data_dir"], f"{config['env']}_{run_id}")
+        model_dir = os.path.join(config["data_dir"], f"{config['model_env_name']}_{run_id}")
         model_files = glob.glob(os.path.join(model_dir, "model_*.pt"))
 
         # Prepare evaluation command
@@ -99,6 +101,8 @@ def run_wosac_eval_in_subprocess(config, logger, global_step):
             "pufferlib.pufferl",
             "eval",
             config["env"],
+            "--env-name",
+            "puffer_drive",
             "--eval.wosac-realism-eval",
             "True",
             "--eval.wosac-num-maps",
@@ -117,6 +121,8 @@ def run_wosac_eval_in_subprocess(config, logger, global_step):
             str(eval_config.get("wosac_sanity_check", False)),
             "--eval.wosac-aggregate-results",
             str(eval_config.get("wosac_aggregate_results", True)),
+            "--eval.wosac-save-results",
+            "False",
         ]
 
         if not model_files:
