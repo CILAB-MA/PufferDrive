@@ -33,27 +33,41 @@ def _reverse_entity_lookup(env):
     return out
 
 
+def _tracked_mask(env):
+    md = env.minimum_distance
+    return np.isfinite(md) & (env.minimum_ego_idx >= 0) & (env.minimum_other_idx >= 0)
+
+
 def summarize(env, step: int, top_k: int = 8) -> None:
-    md = env.minimum_distance[:, 0]
-    n_ego = int(np.sum(md == -np.inf))
-    finite = np.isfinite(md) & (md != -np.inf)
-    n_partner = int(np.sum(finite))
-    n_inf = int(np.sum(np.isinf(md)))
+    md = env.minimum_distance
+    tracked = _tracked_mask(env)
+    n_partner = int(np.sum(tracked))
+    n_untracked = int(np.sum(np.isinf(md)))
 
     print(f"\n=== step {step} tick={env.tick} ===")
-    print(f"corpus size={env.total_agents}  ego(-inf)={n_ego}  partner(updated)={n_partner}  untouched(inf)={n_inf}")
+    print(
+        f"other agents={md.size}  partner(tracked)={n_partner}  "
+        f"untracked(inf)={n_untracked}"
+    )
 
     if n_partner == 0:
         return
 
-    idx = np.flatnonzero(finite)
+    idx = np.flatnonzero(tracked)
     order = idx[np.argsort(md[idx])][:top_k]
     rev = _reverse_entity_lookup(env)
-    mi = env.minimum_index[:, 0]
-    print(f"{'corpus':>8} {'map':>6} {'entity':>8} {'ego_idx':>8} {'min_dist(m)':>12}")
-    for g in order:
-        map_id, entity_id = rev.get(int(g), (-1, -1))
-        print(f"{g:8d} {map_id:6d} {entity_id:8d} {mi[g]:8d} {md[g]:12.2f}")
+    print(
+        f"{'slot':>6} {'other':>6} {'corpus':>8} {'map':>6} {'entity':>8} "
+        f"{'ego_idx':>8} {'min_dist(m)':>12}"
+    )
+    for slot in order:
+        corpus_idx = int(env.minimum_other_idx[slot])
+        other_idx = int(env.other_indices_arr[slot])
+        map_id, entity_id = rev.get(corpus_idx, (-1, -1))
+        print(
+            f"{slot:6d} {other_idx:6d} {corpus_idx:8d} {map_id:6d} {entity_id:8d} "
+            f"{env.minimum_ego_idx[slot]:8d} {md[slot]:12.2f}"
+        )
 
 
 def _step_visible_audit(env, max_rows: int = 8) -> None:
@@ -61,8 +75,8 @@ def _step_visible_audit(env, max_rows: int = 8) -> None:
     visible = (rel_xy[:, :, 0] != 0) | (rel_xy[:, :, 1] != 0)
     partner_states = env.get_global_partner_state()
     other_ids = partner_states["other_id"]
+    entity_to_agent = env._live_entity_to_agent()
     ao = np.asarray(env.agent_offsets, dtype=np.int64)
-    md = env.minimum_distance[:, 0]
 
     hits = misses = skipped_ego = would_update = 0
     rows = []
@@ -76,22 +90,24 @@ def _step_visible_audit(env, max_rows: int = 8) -> None:
                 entity_id = int(other_ids[ego_idx, slot])
                 corpus_idx = env._corpus_index(map_id, entity_id)
                 dist = float(np.linalg.norm(rel_xy[ego_idx, slot]) / 0.02)
+                partner_idx = entity_to_agent.get((map_id, entity_id))
                 if corpus_idx is None:
                     misses += 1
                     slot_kind = "miss"
+                elif partner_idx is None or partner_idx in env._ego_index_set:
+                    skipped_ego += 1
+                    slot_kind = "ego/skip"
+                elif env._other_slot_for_agent(partner_idx) is None:
+                    slot_kind = "not-other"
                 else:
                     hits += 1
-                    if md[corpus_idx] == -np.inf:
-                        skipped_ego += 1
-                        slot_kind = "ego(-inf)"
-                    else:
-                        would_update += 1
-                        slot_kind = "partner"
+                    would_update += 1
+                    slot_kind = "partner"
                 if len(rows) < max_rows:
                     rows.append((map_id, entity_id, corpus_idx, dist, slot_kind))
     print(
         f"visible lookup: hit={hits} miss={misses}  "
-        f"skipped_ego_slot={skipped_ego}  would_update_partner={would_update}"
+        f"skipped_ego={skipped_ego}  would_update_partner={would_update}"
     )
     if rows:
         print(f"{'map':>6} {'entity':>8} {'corpus':>8} {'dist(m)':>10} {'slot':>12}")
@@ -117,43 +133,48 @@ def summarize_ego_returns(env, top_k: int = 8) -> None:
 
 
 def summarize_commit_preview(env, rollout: int, top_k: int = 10) -> None:
-    md = env.minimum_distance[:, 0]
-    partner_mask = np.isfinite(md) & (md != -np.inf)
-    committed = partner_mask & (env.minimum_index[:, 0] >= 0)
+    tracked = _tracked_mask(env)
+    md = env.minimum_distance
 
     print(f"\n--- resample preview (rollout {rollout}, tick={env.tick}) ---")
     print(
-        f"partner_slots={int(partner_mask.sum())}  "
-        f"commit_candidates={int(committed.sum())}"
+        f"partner_slots={int(tracked.sum())}  "
+        f"commit_candidates={int(tracked.sum())}"
     )
     summarize_ego_returns(env)
-    if committed.sum() == 0:
-        print("(no commit candidates — visible partner never hit a corpus partner slot this rollout)")
+    if tracked.sum() == 0:
+        print("(no commit candidates — visible partner never matched a live other agent)")
         return
 
     rev = _reverse_entity_lookup(env)
     print("score_metric will copy linked ego return (not ego sum above):")
-    print(f"{'corpus':>8} {'map':>6} {'entity':>8} {'ego':>6} {'dist':>8} {'return':>10}")
-    for g in np.flatnonzero(committed)[:top_k]:
-        ego_idx = int(env.minimum_index[g, 0])
-        map_id, entity_id = rev.get(int(g), (-1, -1))
+    print(
+        f"{'slot':>6} {'corpus':>8} {'map':>6} {'entity':>8} {'other':>6} "
+        f"{'ego':>6} {'dist':>8} {'return':>10}"
+    )
+    order = np.flatnonzero(tracked)
+    order = order[np.argsort(md[order])][:top_k]
+    for slot in order:
+        corpus_idx = int(env.minimum_other_idx[slot])
+        ego_idx = int(env.minimum_ego_idx[slot])
+        other_idx = int(env.other_indices_arr[slot])
+        map_id, entity_id = rev.get(corpus_idx, (-1, -1))
         print(
-            f"{g:8d} {map_id:6d} {entity_id:8d} {ego_idx:6d} "
-            f"{md[g]:8.2f} {env._episode_return[ego_idx]:10.3f}"
+            f"{slot:6d} {corpus_idx:8d} {map_id:6d} {entity_id:8d} {other_idx:6d} "
+            f"{ego_idx:6d} {md[slot]:8.2f} {env._episode_return[ego_idx]:10.3f}"
         )
 
 
 def summarize_resample_commit(env, rollout: int, score_before: np.ndarray, top_k: int = 10) -> None:
     sm = env.score_metric[:, 0]
     changed = np.flatnonzero(sm != score_before)
-    md = env.minimum_distance[:, 0]
-    n_partner = int(np.sum(np.isfinite(md) & (md != -np.inf)))
+    n_partner = int(_tracked_mask(env).sum())
 
     print(f"\n--- resample committed (rollout {rollout}) ---")
     print(
         f"score_metric changed={changed.size}  "
         f"_episode_return sum={float(env._episode_return.sum()):.3f} (expect 0)  "
-        f"partner slots after reset={n_partner} (expect 0)"
+        f"partner slots after reset={n_partner}"
     )
     if changed.size == 0:
         print("(score_metric unchanged — check commit_candidates / ego return)")
@@ -206,7 +227,7 @@ def main() -> int:
     env.reset(seed=args.seed)
     print(f"resample_frequency={args.resample_frequency}  steps={args.steps}")
     print(f"live maps={env.map_ids[:env.num_envs]}  ego_indices={env.ego_indices.tolist()}")
-    print(f"corpus lookup entries={len(env._entity_to_corpus)}")
+    print(f"other agents={env.other_indices_arr.size}  corpus lookup entries={len(env._entity_to_corpus)}")
     summarize(env, step=0)
     _step_visible_audit(env)
 
@@ -229,10 +250,9 @@ def main() -> int:
 
     print(
         "\nNotes:"
-        "\n  - ego rollout return sum CAN be large while score_metric stays small:"
-        "\n    score_metric[g] = _episode_return[minimum_index[g]] (closest ego only)"
-        "\n  - rollout with partner_slots=0: returns still accumulate, but nothing commits"
-        "\n  - many egos show ~-0.02 over 20 steps with zero actions (only tiny per-step reward)"
+        "\n  - minimum_distance is indexed by live other agent (size num_agents - num_ego)"
+        "\n  - minimum_other_idx stores corpus index; minimum_ego_idx stores closest ego"
+        "\n  - score_metric[corpus] = _episode_return[minimum_ego_idx] at resample"
     )
     return 0
 
