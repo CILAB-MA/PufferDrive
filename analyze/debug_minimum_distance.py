@@ -147,7 +147,7 @@ def summarize_commit_preview(env, rollout: int, top_k: int = 10) -> None:
         return
 
     rev = _reverse_entity_lookup(env)
-    print("score_metric will copy linked ego return (not ego sum above):")
+    print("score_metric[other_slot] will copy linked ego return (not ego sum above):")
     print(
         f"{'slot':>6} {'corpus':>8} {'map':>6} {'entity':>8} {'other':>6} "
         f"{'ego':>6} {'dist':>8} {'return':>10}"
@@ -165,30 +165,53 @@ def summarize_commit_preview(env, rollout: int, top_k: int = 10) -> None:
         )
 
 
-def summarize_resample_commit(env, rollout: int, score_before: np.ndarray, top_k: int = 10) -> None:
-    sm = env.score_metric[:, 0]
-    changed = np.flatnonzero(sm != score_before)
+def summarize_resample_commit(
+    env,
+    rollout: int,
+    score_before: np.ndarray,
+    new_score_before: np.ndarray | None,
+    top_k: int = 10,
+) -> None:
+    changed_slots = np.flatnonzero(score_before != 0)
     n_partner = int(_tracked_mask(env).sum())
 
     print(f"\n--- resample committed (rollout {rollout}) ---")
     print(
-        f"score_metric changed={changed.size}  "
+        f"score_metric slots set={changed_slots.size}  "
         f"_episode_return sum={float(env._episode_return.sum()):.3f} (expect 0)  "
         f"partner slots after reset={n_partner}"
     )
-    if changed.size == 0:
-        print("(score_metric unchanged — check commit_candidates / ego return)")
-        return
+    if changed_slots.size > 0:
+        rev = _reverse_entity_lookup(env)
+        print(f"{'slot':>6} {'corpus':>8} {'map':>6} {'entity':>8} {'score':>10}")
+        order = changed_slots[np.argsort(np.abs(score_before[changed_slots]))[::-1]][:top_k]
+        for slot in order:
+            corpus_idx = int(env.minimum_other_idx[slot])
+            map_id, entity_id = rev.get(corpus_idx, (-1, -1))
+            print(
+                f"{slot:6d} {corpus_idx:8d} {map_id:6d} {entity_id:8d} "
+                f"{score_before[slot]:10.3f}"
+            )
+    elif changed_slots.size == 0:
+        print("(no per-slot score_metric — check commit_candidates / ego return)")
 
-    rev = _reverse_entity_lookup(env)
-    order = changed[np.argsort(np.abs(sm[changed]))[::-1]][:top_k]
-    print(f"{'corpus':>8} {'map':>6} {'entity':>8} {'before':>10} {'after':>10}")
-    for g in order:
-        map_id, entity_id = rev.get(int(g), (-1, -1))
-        print(
-            f"{g:8d} {map_id:6d} {entity_id:8d} "
-            f"{score_before[g]:10.3f} {sm[g]:10.3f}"
-        )
+    sampler = getattr(env, "agent_sampler", None)
+    if sampler is not None:
+        ns = sampler.new_score
+        if new_score_before is None:
+            changed_mask = ns != 0
+        else:
+            changed_mask = ns != new_score_before
+        corpus_idx, policy_idx = np.where(changed_mask)
+        print(f"agent_sampler.new_score changed={corpus_idx.size}")
+        if corpus_idx.size > 0:
+            rev = _reverse_entity_lookup(env)
+            order = np.argsort(np.abs(ns[corpus_idx, policy_idx]))[::-1][:top_k]
+            print(f"{'corpus':>8} {'policy':>6} {'map':>6} {'entity':>8} {'score':>10}")
+            for i in order:
+                g, p = int(corpus_idx[i]), int(policy_idx[i])
+                map_id, entity_id = rev.get(g, (-1, -1))
+                print(f"{g:8d} {p:6d} {map_id:6d} {entity_id:8d} {ns[g, p]:10.3f}")
 
 
 def main() -> int:
@@ -236,11 +259,13 @@ def main() -> int:
         if env.tick + 1 == args.resample_frequency:
             summarize_commit_preview(env, rollout)
 
-        score_before = env.score_metric[:, 0].copy()
+        score_before = env.score_metric.copy()
+        sampler = getattr(env, "agent_sampler", None)
+        new_score_before = sampler.new_score.copy() if sampler is not None else None
         env.step(np.zeros((env.num_agents, 1), dtype=np.int32))
 
         if env.tick == 0 and t > 0:
-            summarize_resample_commit(env, rollout, score_before)
+            summarize_resample_commit(env, rollout, score_before, new_score_before)
             rollout += 1
 
         if args.verbose_steps or env.tick == 0 or t <= 2:
@@ -252,7 +277,8 @@ def main() -> int:
         "\nNotes:"
         "\n  - minimum_distance is indexed by live other agent (size num_agents - num_ego)"
         "\n  - minimum_other_idx stores corpus index; minimum_ego_idx stores closest ego"
-        "\n  - score_metric[corpus] = _episode_return[minimum_ego_idx] at resample"
+        "\n  - score_metric[slot] = _episode_return[minimum_ego_idx] at resample"
+        "\n  - agent_sampler.new_score[corpus] from distance-filtered score_metric"
     )
     return 0
 
