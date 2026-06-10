@@ -958,6 +958,9 @@ class OtherReplayEvaluator:
         obs, info_list = puffer_env.reset()
         map_ids = puffer_env.map_ids.copy()
         agent_offsets = puffer_env.agent_offsets.copy()
+        # Map-local entity index in entities[]; matches partner_state other_id / ego_id
+        # (NOT get_global_agent_state()["id"], which is WOMD track id)
+        agent_ids = puffer_env.get_global_partner_state()["ego_id"].copy()
         print(len(agent_offsets), len(map_ids), obs.shape)
         pool = np.arange(obs.shape[0], dtype=np.int64)
         pool = np.random.permutation(pool)
@@ -1009,7 +1012,7 @@ class OtherReplayEvaluator:
         df = pd.DataFrame(total_results)
         mean_per_key = df.mean(numeric_only=True).to_dict()
         print(mean_per_key)
-        return other_action_buf, agent_offsets, map_ids
+        return other_action_buf, agent_offsets, map_ids, agent_ids
 
     def replay_rollouts(self, args, puffer_env, loaded_actions):
         import numpy as np
