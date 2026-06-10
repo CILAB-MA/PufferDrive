@@ -14,6 +14,7 @@ from pufferlib.ocean.drive.scenario_log import (
 from multiprocessing import Pool, cpu_count
 
 _DRIVE_INI = "pufferlib/config/ocean/drive.ini"
+_PARTNER_REL_SCALE = 0.02  # drive.h: rel_xy stored as meters * 0.02
 from tqdm import tqdm
 from pufferlib.pufferl import load_policy
 
@@ -58,6 +59,7 @@ class Drive_PBT(pufferlib.PufferEnv):
         pbt_mode="reactive", # for pbt
         population_path=None, # for replay
         ego_ratio=0.0, # for replay
+        agent_sampling=False,
         scenario_log_path=None,
     ):
         # env
@@ -188,6 +190,9 @@ class Drive_PBT(pufferlib.PufferEnv):
         self.other_mask = np.ones(self.num_agents, dtype=bool)
         self.other_mask[self.ego_indices] = False
         self.other_indices_arr = np.flatnonzero(self.other_mask).astype(np.int64)
+        self._entity_to_corpus = None
+        self._other_agent_to_slot = None
+        self._ego_index_set = set(self.ego_indices.tolist())
         super().__init__(buf=buf)
         env_ids = []
         for i in range(num_envs):
@@ -237,23 +242,22 @@ class Drive_PBT(pufferlib.PufferEnv):
         self.ego_ratio = ego_ratio
         self.population_path = population_path
         self.pbt_mode = pbt_mode
+        self.agent_sampling = agent_sampling
+        # self.agent_sampler = AgentSampler(self.population_path, self.agent_sampling) # TODO: add agent sampler
+        saved_dir = os.path.join(self.population_path, "saved")
+        fp_ao = os.path.join(saved_dir, "other_actions_agent_offsets.npy")
+        fp_m = os.path.join(saved_dir, "other_actions_map_ids.npy")
+        fp_ids = os.path.join(saved_dir, "other_actions_agent_ids.npy")
+        self.actions_agent_offsets = np.load(fp_ao, mmap_mode="r")
+        self.actions_map_id = np.load(fp_m, mmap_mode="r")
+        if self.agent_sampling:
+            self.actions_agent_ids = np.load(fp_ids, mmap_mode="r")
+            self.total_agents = int(self.actions_agent_offsets[0, -1])
+            self._init_minimum_distance()
+            self._init_corpus_entity_lookup()
         if pbt_mode == "replay":
-            replay_dir = os.path.join(self.population_path, "replay")
-            fp_actions = os.path.join(replay_dir, "other_actions_actions.npy")
-            if os.path.isfile(fp_actions):
-                self.other_actions = np.load(fp_actions, mmap_mode="r")
-                self.actions_agent_offsets = np.load(
-                    os.path.join(replay_dir, "other_actions_agent_offsets.npy"), mmap_mode="r"
-                )
-                self.actions_map_id = np.load(
-                    os.path.join(replay_dir, "other_actions_map_ids.npy"), mmap_mode="r"
-                )
-            else:
-                npz = np.load(os.path.join(replay_dir, "other_actions.npz"), allow_pickle=True)
-                self.other_actions = npz["actions"]
-                self.actions_agent_offsets = npz["agent_offsets"]
-                self.actions_map_id = npz["map_ids"]
-                del npz
+            fp_actions = os.path.join(saved_dir, "other_actions_actions.npy")
+            self.other_actions = np.load(fp_actions, mmap_mode="r")
             self._allocate_replay(self.num_agents, self.map_ids)
         else:
             populations = [
@@ -263,9 +267,131 @@ class Drive_PBT(pufferlib.PufferEnv):
             self.num_other_policies = len(populations)
             self._allocate_other_indices(self.num_agents)
 
-    def reset(self, seed=0):    
+    def _init_minimum_distance(self):
+        if self.total_agents < 1:
+            raise ValueError(f"total_agents must be >= 1, got {self.total_agents}")
+        self.score_metric = np.zeros((self.total_agents, 1), dtype=np.float32)
+        self._episode_return = np.zeros(self.num_agents, dtype=np.float32)
+        self._reinit_other_tracking()
+
+    def _reinit_other_tracking(self):
+        n_other = int(self.other_indices_arr.size)
+        if n_other < 1:
+            raise ValueError(f"num other agents must be >= 1, got {n_other}")
+        self.minimum_distance = np.full(n_other, np.inf, dtype=np.float32)
+        self.minimum_ego_idx = np.full(n_other, -1, dtype=np.int64)
+        self.minimum_other_idx = np.full(n_other, -1, dtype=np.int64)
+        self._build_other_slot_lookup()
+
+    def _build_other_slot_lookup(self):
+        self._other_agent_to_slot = {
+            int(agent_idx): i for i, agent_idx in enumerate(self.other_indices_arr)
+        }
+
+    def _other_slot_for_agent(self, agent_idx):
+        if self._other_agent_to_slot is None:
+            return None
+        return self._other_agent_to_slot.get(int(agent_idx))
+
+    def _live_entity_to_agent(self):
+        partner_states = self.get_global_partner_state()
+        live_entity_ids = partner_states["ego_id"]
+        ao = np.asarray(self.agent_offsets, dtype=np.int64)
+        lookup = {}
+        for env_i in range(self.num_envs):
+            map_id = int(self.map_ids[env_i])
+            cur, nxt = ao[env_i], ao[env_i + 1]
+            for agent_idx in range(cur, nxt):
+                entity_id = int(live_entity_ids[agent_idx])
+                if entity_id >= 0:
+                    lookup[(map_id, entity_id)] = agent_idx
+        return lookup
+
+    def _init_corpus_entity_lookup(self):
+        """(map_id, entity_id) -> index in actions_agent_offsets flatten."""
+        ref_ao = np.asarray(self.actions_agent_offsets[0], dtype=np.int64)
+        ref_maps = np.asarray(self.actions_map_id[0], dtype=np.int64)
+        ref_ids = np.asarray(self.actions_agent_ids[0], dtype=np.int64)
+        self.corpus_agent_offsets = ref_ao
+        self.corpus_map_ids = ref_maps
+        self._entity_to_corpus = {}
+        for env_i in range(len(ref_maps)):
+            map_id = int(ref_maps[env_i])
+            cur, nxt = int(ref_ao[env_i]), int(ref_ao[env_i + 1])
+            for g in range(cur, nxt):
+                self._entity_to_corpus[(map_id, int(ref_ids[g]))] = g
+
+    def _corpus_index(self, map_id, entity_id):
+        if self._entity_to_corpus is None:
+            return None
+        return self._entity_to_corpus.get((int(map_id), int(entity_id)))
+
+    def _reset_minimum_distance(self):
+        if not self.agent_sampling:
+            return
+        self.minimum_distance.fill(np.inf)
+        self.minimum_ego_idx.fill(-1)
+        self.minimum_other_idx.fill(-1)
+
+    def _partner_obs(self):
+        start = self.ego_features
+        stop = start + self.max_partner_objects * self.partner_features
+        return self.observations[:, start:stop].reshape(
+            self.num_agents, self.max_partner_objects, self.partner_features
+        )
+
+    def _update_minimum_distance(self):
+        if not self.agent_sampling:
+            return
+        rel_xy = self._partner_obs()[:, :, :2]
+        dist = np.linalg.norm(rel_xy, axis=2) / _PARTNER_REL_SCALE
+        visible = (rel_xy[:, :, 0] != 0) | (rel_xy[:, :, 1] != 0)
+
+        partner_states = self.get_global_partner_state()
+        other_ids = partner_states["other_id"]
+        entity_to_agent = self._live_entity_to_agent()
+        ao = np.asarray(self.agent_offsets, dtype=np.int64)
+
+        for env_i in range(self.num_envs):
+            map_id = int(self.map_ids[env_i])
+            cur, nxt = ao[env_i], ao[env_i + 1]
+            for ego_idx in self.ego_indices:
+                if ego_idx < cur or ego_idx >= nxt:
+                    continue
+                for slot in np.flatnonzero(visible[ego_idx]):
+                    entity_id = int(other_ids[ego_idx, slot])
+                    corpus_idx = self._corpus_index(map_id, entity_id)
+                    if corpus_idx is None:
+                        continue
+                    partner_idx = entity_to_agent.get((map_id, entity_id))
+                    if partner_idx is None or partner_idx in self._ego_index_set:
+                        continue
+                    other_slot = self._other_slot_for_agent(partner_idx)
+                    if other_slot is None:
+                        continue
+                    new_dist = dist[ego_idx, slot]
+                    if new_dist < self.minimum_distance[other_slot]:
+                        self.minimum_distance[other_slot] = new_dist
+                        self.minimum_ego_idx[other_slot] = ego_idx
+                        self.minimum_other_idx[other_slot] = corpus_idx
+
+    def _on_episode_end(self):
+        if not self.agent_sampling:
+            return
+        tracked = np.isfinite(self.minimum_distance) & (self.minimum_ego_idx >= 0) & (self.minimum_other_idx >= 0)
+        for other_slot in np.flatnonzero(tracked):
+            corpus_idx = int(self.minimum_other_idx[other_slot])
+            ego_idx = int(self.minimum_ego_idx[other_slot])
+            self.score_metric[corpus_idx, 0] = self._episode_return[ego_idx]
+        self._episode_return.fill(0.0)
+
+    def reset(self, seed=0):
         binding.vec_reset(self.c_envs, seed)
         self.tick = 0
+        if self.agent_sampling:
+            self._episode_return.fill(0.0)
+        self._reset_minimum_distance()
+        self._update_minimum_distance()
         info = [{"agent_offsets": self.agent_offsets, "map_ids": self.map_ids, "num_envs": self.num_envs, "ego_indices": self.ego_indices}]
         if self.pbt_mode == "reactive":
             info[0]["other_indices"] = self.other_indices
@@ -297,6 +423,9 @@ class Drive_PBT(pufferlib.PufferEnv):
         if self.pbt_mode == "replay":
             self.actions[self.other_indices_arr] = self.replay_actions[self.other_indices_arr, self.tick, :]
         binding.vec_step(self.c_envs)
+        self._update_minimum_distance()
+        if self.agent_sampling: # TODO: 현재는 Return 기반만 구현되어 있음
+            self._episode_return[self.ego_indices] += self.rewards[self.ego_indices]
         self.tick += 1
         info = []
         if self.tick % self.report_interval == 0:
@@ -308,6 +437,7 @@ class Drive_PBT(pufferlib.PufferEnv):
                 if aggregate:
                     info.append(aggregate)
         if self.tick > 0 and self.resample_frequency > 0 and self.tick % self.resample_frequency == 0:
+            self._on_episode_end()
             self.tick = 0
             binding.vec_close(self.c_envs)
             agent_offsets, map_ids, num_envs, ego_indices = binding.shared(
@@ -334,10 +464,13 @@ class Drive_PBT(pufferlib.PufferEnv):
             self.other_mask = np.ones(self.num_agents, dtype=bool)
             self.other_mask[self.ego_indices] = False
             self.other_indices_arr = np.flatnonzero(self.other_mask).astype(np.int64)
+            self._ego_index_set = set(self.ego_indices.tolist())
             if self.pbt_mode == "replay":
                 self._allocate_replay(self.num_agents, self.map_ids)
             else:
                 self._allocate_other_indices(self.num_agents)
+            if self.agent_sampling:
+                self._reinit_other_tracking()
             env_ids = []
             seed = np.random.randint(0, 2**32 - 1)
             for i in range(num_envs):
@@ -386,6 +519,8 @@ class Drive_PBT(pufferlib.PufferEnv):
 
             binding.vec_reset(self.c_envs, seed)
             self.terminals[:] = 1
+            self._reset_minimum_distance()
+            self._update_minimum_distance()
         if len(info) == 0:
             info = [{"agent_offsets": self.agent_offsets, "map_ids": self.map_ids, "num_envs": self.num_envs, "ego_indices": self.ego_indices}]
         else:
