@@ -267,8 +267,9 @@ class Drive_PBT(pufferlib.PufferEnv):
             ]
             self.num_other_policies = len(populations)
             if self.agent_sampling:
-                self.agent_sampler = AgentSampler(num_policies=self.num_other_policies, total_agents=self.total_agents)
-            self._allocate_other_indices(self.num_agents)
+                self.agent_sampler.sample()
+            else:
+                self._allocate_other_indices(self.num_agents)
 
     def _init_minimum_distance(self):
         if self.total_agents < 1:
@@ -493,7 +494,12 @@ class Drive_PBT(pufferlib.PufferEnv):
             if self.pbt_mode == "replay":
                 self._allocate_replay(self.num_agents, self.map_ids)
             else:
-                self._allocate_other_indices(self.num_agents)
+                if self.agent_sampling:
+                    self.agent_sampler = AgentSampler(num_policies=self.num_other_policies, total_agents=self.total_agents, num_agents=self.num_agents)
+                    self.agent_sampler.sample()
+                else:
+                    self._allocate_other_indices(self.num_agents)
+                
             if self.agent_sampling:
                 self._reinit_other_tracking()
             env_ids = []
@@ -556,6 +562,10 @@ class Drive_PBT(pufferlib.PufferEnv):
         if self.pbt_mode == "reactive":
             info[0]["other_indices"] = self.other_indices
         # print(f"Rewards {self.rewards.max()} {self.rewards.mean()}")
+
+        if self.agent_sampling: #before agent update, we need to update the score. where is the best place?
+            self.agent_sampler.update_policy_score(score, agent_idx, policy_idx, minimum_distance, minimum_other_idx, policy_per_slot)
+        
         return (self.observations, self.rewards, self.terminals, self.truncations, info)
 
     def get_global_agent_state(self):
