@@ -6,7 +6,6 @@ class AgentSampler:
     def __init__(
         self,
         num_policies,
-        num_agents_per_map,
         num_actors=1,
         strategy="random",
         replay_schedule="fixed",
@@ -19,13 +18,10 @@ class AgentSampler:
         staleness_coef=0,
         staleness_transform="power",
         staleness_temperature=1.0,
+        total_agents=0,
     ):
         self.num_policies = int(num_policies)
-        self.num_agents_per_map = np.asarray(num_agents_per_map, dtype=np.float64)
-        if self.num_agents_per_map.ndim != 1:
-            raise ValueError("num_agents_per_map must be a 1-D array")
-        if np.any(self.num_agents_per_map <= 0):
-            raise ValueError("num_agents_per_map must be positive")
+        self.total_agents = int(total_agents)
 
         self.strategy = strategy
         self.replay_schedule = replay_schedule
@@ -40,18 +36,41 @@ class AgentSampler:
         self.staleness_temperature = staleness_temperature
 
         self.unseen_policy_weights = np.ones(self.num_policies, dtype=np.float64)
-        self.policy_scores = np.zeros(self.num_policies, dtype=np.float64)
+        self.policy_scores = np.zeros((self.total_agents, self.num_policies), dtype=np.float64)
         self.partial_policy_scores = np.zeros((num_actors, self.num_policies), dtype=np.float64)
         self.partial_policy_steps = np.zeros((num_actors, self.num_policies), dtype=np.int64)
         self.policy_staleness = np.zeros(self.num_policies, dtype=np.float64)
-
+        self.distance_threshold = 0.02 # TODO: args로 만들기
         self.next_policy_index = 0
+        self.new_score = np.zeros((self.total_agents, self.num_policies), dtype=np.float64)
 
-    def _distance_filtering(self, score, map_idx):
-        pass
-        
+    def _distance_filtering(self, score, minimum_distance, minimum_other_idx, policy_per_slot):
+        """Filter by distance, scatter per-slot scores into policy x corpus columns."""
+        score = np.asarray(score, dtype=np.float64).reshape(-1)
+        dist = np.asarray(minimum_distance, dtype=np.float64).reshape(-1)
+        corpus_idx = np.asarray(minimum_other_idx, dtype=np.int64).reshape(-1)
+        policy_per_slot = np.asarray(policy_per_slot, dtype=np.int64).reshape(-1)
+        if not (score.shape == dist.shape == corpus_idx.shape == policy_per_slot.shape):
+            raise ValueError(
+                "score, minimum_distance, minimum_other_idx, policy_per_slot must match, "
+                f"got {score.shape}, {dist.shape}, {corpus_idx.shape}, {policy_per_slot.shape}"
+            )
+
+        tracked = (corpus_idx >= 0) & np.isfinite(dist)
+        keep = tracked & (dist >= self.distance_threshold)
+
+        self.new_score.fill(0.0)
+        for slot in np.flatnonzero(keep):
+            policy_idx = int(policy_per_slot[slot])
+            if policy_idx < 0:
+                continue
+            g = int(corpus_idx[slot])
+            if 0 <= g < self.total_agents:
+                self.new_score[g, policy_idx] = score[slot]
+        return self.new_score
+
     def _normalize_score(self, score, map_idx):
-        return float(score) / self.num_agents_per_map[map_idx]
+        return float(score)
 
     @staticmethod
     def _agent_map_idx(agent_idx, agent_offsets):
@@ -85,8 +104,8 @@ class AgentSampler:
 
         self.unseen_policy_weights[policy_idx] = 0.0
 
-        old_score = self.policy_scores[policy_idx]
-        self.policy_scores[policy_idx] = (1 - self.alpha) * old_score + self.alpha * score
+        old_score = self.policy_scores[:, policy_idx]
+        self.policy_scores[:, policy_idx] = (1 - self.alpha) * old_score + self.alpha * score
 
     def _partial_update_policy_score(self, actor_index, policy_idx, score, num_steps, done=False):
         partial_score = self.partial_policy_scores[actor_index][policy_idx]
@@ -206,8 +225,8 @@ class AgentSampler:
             for policy_idx in range(self.partial_policy_scores.shape[1]):
                 partial = self.partial_policy_scores[actor_index][policy_idx]
                 if partial != 0:
-                    old_score = self.policy_scores[policy_idx]
-                    self.policy_scores[policy_idx] = (1 - self.alpha) * old_score + self.alpha * partial
+                    old_score = self.policy_scores[:, policy_idx]
+                    self.policy_scores[:, policy_idx] = (1 - self.alpha) * old_score + self.alpha * partial
                     self.unseen_policy_weights[policy_idx] = 0.0
         self.partial_policy_scores.fill(0)
         self.partial_policy_steps.fill(0)
@@ -259,7 +278,8 @@ class AgentSampler:
         return self._sample_unseen_policy()
 
     def sample_weights(self):
-        weights = self._score_transform(self.score_transform, self.temperature, self.policy_scores)
+        policy_scores = np.mean(self.policy_scores, axis=0)
+        weights = self._score_transform(self.score_transform, self.temperature, policy_scores)
         weights = weights * (1 - self.unseen_policy_weights)
 
         z = np.sum(weights)

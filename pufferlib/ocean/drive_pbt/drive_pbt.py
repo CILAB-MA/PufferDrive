@@ -17,6 +17,7 @@ _DRIVE_INI = "pufferlib/config/ocean/drive.ini"
 _PARTNER_REL_SCALE = 0.02  # drive.h: rel_xy stored as meters * 0.02
 from tqdm import tqdm
 from pufferlib.pufferl import load_policy
+from pufferlib.ocean.drive_pbt.agent_sampler import AgentSampler
 
 class Drive_PBT(pufferlib.PufferEnv):
     def __init__(
@@ -189,6 +190,7 @@ class Drive_PBT(pufferlib.PufferEnv):
         self.num_ego_per_env = [int(np.sum((self.ego_indices >= ao[i]) & (self.ego_indices < ao[i + 1]))) for i in range(num_envs)]
         self.other_mask = np.ones(self.num_agents, dtype=bool)
         self.other_mask[self.ego_indices] = False
+        # Canonical non-ego agents (ascending global index). Slot i <-> other_indices_arr[i].
         self.other_indices_arr = np.flatnonzero(self.other_mask).astype(np.int64)
         self._entity_to_corpus = None
         self._other_agent_to_slot = None
@@ -243,7 +245,6 @@ class Drive_PBT(pufferlib.PufferEnv):
         self.population_path = population_path
         self.pbt_mode = pbt_mode
         self.agent_sampling = agent_sampling
-        # self.agent_sampler = AgentSampler(self.population_path, self.agent_sampling) # TODO: add agent sampler
         saved_dir = os.path.join(self.population_path, "saved")
         fp_ao = os.path.join(saved_dir, "other_actions_agent_offsets.npy")
         fp_m = os.path.join(saved_dir, "other_actions_map_ids.npy")
@@ -265,12 +266,13 @@ class Drive_PBT(pufferlib.PufferEnv):
                 if f.endswith(".pt")
             ]
             self.num_other_policies = len(populations)
+            if self.agent_sampling:
+                self.agent_sampler = AgentSampler(num_policies=self.num_other_policies, total_agents=self.total_agents)
             self._allocate_other_indices(self.num_agents)
 
     def _init_minimum_distance(self):
         if self.total_agents < 1:
             raise ValueError(f"total_agents must be >= 1, got {self.total_agents}")
-        self.score_metric = np.zeros((self.total_agents, 1), dtype=np.float32)
         self._episode_return = np.zeros(self.num_agents, dtype=np.float32)
         self._reinit_other_tracking()
 
@@ -281,12 +283,25 @@ class Drive_PBT(pufferlib.PufferEnv):
         self.minimum_distance = np.full(n_other, np.inf, dtype=np.float32)
         self.minimum_ego_idx = np.full(n_other, -1, dtype=np.int64)
         self.minimum_other_idx = np.full(n_other, -1, dtype=np.int64)
+        self.score_metric = np.zeros(n_other, dtype=np.float32)
         self._build_other_slot_lookup()
+        self._build_policy_per_slot()
 
     def _build_other_slot_lookup(self):
         self._other_agent_to_slot = {
             int(agent_idx): i for i, agent_idx in enumerate(self.other_indices_arr)
         }
+
+    def _build_policy_per_slot(self):
+        if not hasattr(self, "other_indices"):
+            return
+        n_other = int(self.other_indices_arr.size)
+        self.policy_per_slot = np.full(n_other, -1, dtype=np.int64)
+        for policy_idx, agents in enumerate(self.other_indices):
+            for agent_idx in np.asarray(agents, dtype=np.int64).reshape(-1):
+                slot = self._other_agent_to_slot.get(int(agent_idx))
+                if slot is not None:
+                    self.policy_per_slot[slot] = policy_idx
 
     def _other_slot_for_agent(self, agent_idx):
         if self._other_agent_to_slot is None:
@@ -332,6 +347,7 @@ class Drive_PBT(pufferlib.PufferEnv):
         self.minimum_distance.fill(np.inf)
         self.minimum_ego_idx.fill(-1)
         self.minimum_other_idx.fill(-1)
+        self.score_metric.fill(0.0)
 
     def _partner_obs(self):
         start = self.ego_features
@@ -380,10 +396,16 @@ class Drive_PBT(pufferlib.PufferEnv):
             return
         tracked = np.isfinite(self.minimum_distance) & (self.minimum_ego_idx >= 0) & (self.minimum_other_idx >= 0)
         for other_slot in np.flatnonzero(tracked):
-            corpus_idx = int(self.minimum_other_idx[other_slot])
             ego_idx = int(self.minimum_ego_idx[other_slot])
-            self.score_metric[corpus_idx, 0] = self._episode_return[ego_idx]
+            self.score_metric[other_slot] = self._episode_return[ego_idx]
         self._episode_return.fill(0.0)
+        if getattr(self, "agent_sampler", None) is not None:
+            self.agent_sampler._distance_filtering(
+                self.score_metric,
+                self.minimum_distance,
+                self.minimum_other_idx,
+                self.policy_per_slot,
+            )
 
     def reset(self, seed=0):
         binding.vec_reset(self.c_envs, seed)
@@ -398,10 +420,13 @@ class Drive_PBT(pufferlib.PufferEnv):
         return self.observations, info
 
     def _allocate_other_indices(self, num_agents):
-        other_indices = np.setdiff1d(np.arange(num_agents), self.ego_indices, assume_unique=False)
-        np.random.shuffle(other_indices)
-        splits = np.array_split(other_indices, self.num_other_policies)
+        # other_indices is a shuffled policy split of other_indices_arr (same agent set).
+        shuffled = self.other_indices_arr.copy()
+        np.random.shuffle(shuffled)
+        splits = np.array_split(shuffled, self.num_other_policies)
         self.other_indices = [s.astype(np.int64, copy=False) for s in splits]
+        if getattr(self, "_other_agent_to_slot", None):
+            self._build_policy_per_slot()
 
     def _allocate_replay(self, num_agents, map_ids):
         self.replay_actions = np.zeros((num_agents, self.resample_frequency, 1), dtype=np.int32)
