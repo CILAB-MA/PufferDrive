@@ -1,18 +1,14 @@
 import numpy as np
-import torch
 
 
 class AgentSampler:
     def __init__(
         self,
         num_policies,
-        strategy="random",
-        replay_schedule="fixed",
         score_transform="power",
         temperature=1.0,
         eps=0.05,
         rho=0.2,
-        nu=0.5,
         alpha=1.0,
         staleness_coef=0,
         staleness_transform="power",
@@ -22,25 +18,21 @@ class AgentSampler:
         self.num_policies = int(num_policies)
         self.total_agents = int(total_agents)
 
-        self.strategy = strategy
-        self.replay_schedule = replay_schedule
         self.score_transform = score_transform
         self.temperature = temperature
         self.eps = eps
         self.rho = rho
-        self.nu = nu
         self.alpha = alpha
         self.staleness_coef = staleness_coef
         self.staleness_transform = staleness_transform
         self.staleness_temperature = staleness_temperature
 
-        self.unseen_policy_weights = np.ones(self.total_agents, self.num_policies, dtype=np.float64)
+        self.unseen_policy_weights = np.ones((self.total_agents, self.num_policies), dtype=np.float64)
         self.policy_scores = np.zeros((self.total_agents, self.num_policies), dtype=np.float64)
-        self.policy_staleness = np.zeros(self.total_agents, self.num_policies, dtype=np.float64)
+        self.policy_staleness = np.zeros((self.total_agents, self.num_policies), dtype=np.float64)
         self.distance_threshold = 0.02 # TODO: args로 만들기
-        self.new_score = np.zeros((self.total_agents, self.num_policies), dtype=np.float64)
-
-    def _distance_filtering(self, score, minimum_distance, minimum_other_idx, policy_per_slot):
+        
+    def _distance_filtering(self, score, minimum_distance, minimum_other_idx, policy_per_slot, agent_idx, policy_idx):
         """Filter by distance, scatter per-slot scores into policy x corpus columns."""
         score = np.asarray(score, dtype=np.float64).reshape(-1)
         dist = np.asarray(minimum_distance, dtype=np.float64).reshape(-1)
@@ -55,91 +47,93 @@ class AgentSampler:
         tracked = (corpus_idx >= 0) & np.isfinite(dist)
         keep = tracked & (dist >= self.distance_threshold)
 
-        self.new_score.fill(0.0)
+        new_score = np.zeros((self.total_agents, self.num_policies), dtype=np.float64)
+        new_score.fill(0.0)
         for slot in np.flatnonzero(keep):
             policy_idx = int(policy_per_slot[slot])
             if policy_idx < 0:
                 continue
             g = int(corpus_idx[slot])
             if 0 <= g < self.total_agents:
-                self.new_score[g, policy_idx] = score[slot]
-        return self.new_score
+                new_score[g, policy_idx] = score[slot]
 
-    @staticmethod
-    def _agent_map_idx(agent_idx, agent_offsets):
-        ao = np.asarray(agent_offsets, dtype=np.int64)
-        return int(np.searchsorted(ao[1:], agent_idx, side="right"))
-
-        self._update_with_rollouts(rollouts, score_function)
+        return new_score
 
     def update_policy_score(self, score, agent_idx, policy_idx, minimum_distance, minimum_other_idx, policy_per_slot):
 
-        score = __distance_filtering(self, score, minimum_distance, minimum_other_idx, policy_per_slot)
+        new_score = self._distance_filtering(score, minimum_distance, minimum_other_idx, policy_per_slot, agent_idx, policy_idx) # (total_agents, num_policies)
+        new_score_col = new_score[:, policy_idx]
 
-        self.unseen_policy_weights[agent_idx][policy_idx] = 0.0  # score (total_agent x N_policy), no longer unseen
+        self.unseen_policy_weights[agent_idx, policy_idx] = 0.0  #  no longer unseen -> 0 to unseen_policy_weights
 
         old_score = self.policy_scores[:, policy_idx]
-        self.policy_scores[:, policy_idx] = (1 - self.alpha) * old_score + self.alpha * score
 
-    def _update_staleness(self, agent_idx, selected_idx):
+        self.policy_scores[:, policy_idx] = (1 - self.alpha) * old_score + self.alpha * new_score_col
+
+    def _update_staleness(self, selected_idx):
         if self.staleness_coef > 0:
             self.policy_staleness = self.policy_staleness + 1 # update_staleness to all idx
-            self.policy_staleness[agent_idx, selected_idx] = 0
+            self.policy_staleness[np.arange(self.total_agents), selected_idx] = 0
 
-    def _sample_replay_policy(self):
-        sample_weights = self.sample_weights()
+    def _sample_replay_policy(self, agent_idx):
+        weights = self.sample_weights(agent_idx)
 
-        if np.isclose(np.sum(sample_weights), 0):
-            sample_weights = np.ones(self.num_policies, dtype=np.float64) / self.num_policies
+        if np.isclose(np.sum(weights), 0):
+            weights = np.ones(self.num_policies, dtype=np.float64) / self.num_policies
 
-        policy_idx = np.random.choice(self.num_policies, 1, p=sample_weights)[0]
-        self._update_staleness(agent_idx, policy_idx)
+        policy_idx = np.random.choice(self.num_policies, p=weights)
 
         return int(policy_idx)
 
-    def _sample_unseen_policy(self):
+    def _sample_unseen_policy(self, agent_idx):
+        weights = self.unseen_policy_weights[agent_idx].astype(np.float64)
 
-        weights = self.unseen_policy_weights.astype(float)
-        flat_weights = weights.flatten()
+        if weights.sum() == 0:
+            policy_idx = np.random.randint(self.num_policies)
+        else:
+            probs = weights / weights.sum()
+            policy_idx = np.random.choice(self.num_policies, p=probs)
 
-        probs = flat_weights / flat_weights.sum()
-
-        flat_idx = np.random.choice(len(flat_weights), p=probs)
-        agent_idx, policy_idx = np.unravel_index(flat_idx, weights.shape)
-
-        self._update_staleness(agent_idx, policy_idx)
-        
-        return agent_idx, policy_idx
+        return int(policy_idx)
 
     def sample(self):
+        policy_idx = np.empty(self.total_agents, dtype=np.int64)
 
-        policy_unseen = (self.unseen_policy_weights > 0).any(axis=0)
-        num_unseen = policy_unseen.sum()
+        for agent_idx in range(self.total_agents):
+            policy_unseen = self.unseen_policy_weights[agent_idx] > 0
+            num_unseen = policy_unseen.sum()
 
-        proportion_seen = (self.num_policies - num_unseen) / self.num_policies
+            proportion_seen = (self.num_policies - num_unseen) / self.num_policies
 
-        if proportion_seen >= self.rho and np.random.rand() < proportion_seen:
-            return self._sample_replay_policy()
-        else:
-            return self._sample_unseen_policy()
+            if proportion_seen >= self.rho and np.random.rand() < proportion_seen: # proportional prioritization sampling (seen more, replay more)
+                policy_idx[agent_idx] = self._sample_replay_policy(agent_idx)
+            else:
+                policy_idx[agent_idx] = self._sample_unseen_policy(agent_idx)
+        
+        self._update_staleness(policy_idx)
 
-    # TODO need to fix consider the dimension
-    def sample_weights(self):
-        policy_scores = np.mean(self.policy_scores, axis=0)
-        weights = self._score_transform(self.score_transform, self.temperature, policy_scores)
-        weights = weights * (1 - self.unseen_policy_weights)
+        return policy_idx
+
+    def sample_weights(self, agent_idx):
+        scores = self.policy_scores[agent_idx]  # (num_policies,)
+        unseen = self.unseen_policy_weights[agent_idx]  # (num_policies,)
+
+        weights = self._score_transform(self.score_transform, self.temperature, scores, unseen)
+        weights = weights * (1 - unseen)
 
         z = np.sum(weights)
         if z > 0:
             weights /= z
 
         if self.staleness_coef > 0:
+            staleness = self.policy_staleness[agent_idx]
             staleness_weights = self._score_transform(
                 self.staleness_transform,
                 self.staleness_temperature,
-                self.policy_staleness,
+                staleness,
+                unseen,
             )
-            staleness_weights = staleness_weights * (1 - self.unseen_policy_weights)
+            staleness_weights = staleness_weights * (1 - unseen)
             z = np.sum(staleness_weights)
             if z > 0:
                 staleness_weights /= z
@@ -147,14 +141,16 @@ class AgentSampler:
 
         return weights
 
-    def _score_transform(self, transform, temperature, scores):
+    def _score_transform(self, transform, temperature, scores, unseen=None):
+        scores = np.asarray(scores, dtype=np.float64)
         if transform == "constant":
             weights = np.ones_like(scores)
         elif transform == "max":
             weights = np.zeros_like(scores)
-            scores = scores.copy()
-            scores[self.unseen_policy_weights > 0] = -float("inf")
-            argmax = np.random.choice(np.flatnonzero(np.isclose(scores, scores.max())))
+            masked_scores = scores.copy()
+            if unseen is not None:
+                masked_scores[unseen > 0] = -float("inf")
+            argmax = np.random.choice(np.flatnonzero(np.isclose(masked_scores, masked_scores.max())))
             weights[argmax] = 1.0
         elif transform == "eps_greedy":
             weights = np.zeros_like(scores)
@@ -167,9 +163,9 @@ class AgentSampler:
             weights = 1 / ranks ** (1.0 / temperature)
         elif transform == "power":
             eps = 0 if self.staleness_coef > 0 else 1e-3
-            weights = (np.array(scores) + eps) ** (1.0 / temperature)
+            weights = (scores + eps) ** (1.0 / temperature)
         elif transform == "softmax":
-            weights = np.exp(np.array(scores) / temperature)
+            weights = np.exp(scores / temperature)
         else:
             raise ValueError(f"Unsupported score transform, {transform}")
 
