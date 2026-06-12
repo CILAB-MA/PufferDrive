@@ -713,6 +713,7 @@ class HumanReplayEvaluator:
                 results = info_list[0]
                 return results
 
+
 class OtherReplayEvaluator:
     """Evaluates policies against other policies replays in PufferDrive."""
 
@@ -947,6 +948,26 @@ class OtherReplayEvaluator:
                 self.save_result(f"/data/puffer/results/{self.mode}/zeroshot.json", res_dict)
                 return results
 
+    def build_global_ids(self, agent_offsets, map_ids, entity_ids, num_maps):
+        """global_ids[map_id, entity_id] = flatten index g (agent_offsets order)."""
+        ao = np.asarray(agent_offsets, dtype=np.int64)
+        maps = np.asarray(map_ids, dtype=np.int64)
+        ids = np.asarray(entity_ids, dtype=np.int64)
+        valid = ids[ids >= 0]
+        max_entity = int(valid.max()) + 1 if valid.size else 1
+        global_ids = np.full((num_maps, max_entity), -1, dtype=np.int32)
+        for env_i in range(maps.size):
+            map_id = int(maps[env_i])
+            if not (0 <= map_id < num_maps):
+                raise ValueError(f"map_id {map_id} out of range [0, {num_maps})")
+            cur, nxt = int(ao[env_i]), int(ao[env_i + 1])
+            for g in range(cur, nxt):
+                eid = int(ids[g])
+                if eid < 0:
+                    continue
+                global_ids[map_id, eid] = g
+        return global_ids
+
     def collect_rollouts(self, args, puffer_env, policies):
         import numpy as np
         import torch
@@ -958,10 +979,11 @@ class OtherReplayEvaluator:
         obs, info_list = puffer_env.reset()
         map_ids = puffer_env.map_ids.copy()
         agent_offsets = puffer_env.agent_offsets.copy()
-        # Map-local entity index in entities[]; matches partner_state other_id / ego_id
-        # (NOT get_global_agent_state()["id"], which is WOMD track id)
-        agent_ids = puffer_env.get_global_partner_state()["ego_id"].copy()
-        print(len(agent_offsets), len(map_ids), obs.shape)
+        entity_ids = puffer_env.get_global_partner_state()["ego_id"].copy()
+        global_ids = self.build_global_ids(
+            agent_offsets, map_ids, entity_ids, puffer_env.num_maps
+        )
+        print(len(agent_offsets), len(map_ids), global_ids.shape)
         pool = np.arange(obs.shape[0], dtype=np.int64)
         pool = np.random.permutation(pool)
         base, rem = divmod(obs.shape[0], len(policies))
@@ -1012,7 +1034,7 @@ class OtherReplayEvaluator:
         df = pd.DataFrame(total_results)
         mean_per_key = df.mean(numeric_only=True).to_dict()
         print(mean_per_key)
-        return other_action_buf, agent_offsets, map_ids, agent_ids
+        return other_action_buf, agent_offsets, map_ids, global_ids
 
     def replay_rollouts(self, args, puffer_env, loaded_actions):
         import numpy as np

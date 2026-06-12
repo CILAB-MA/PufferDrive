@@ -1830,15 +1830,20 @@ def zero_shot(env_name, args=None, vecenv=None, policies=None):
         fp_a = os.path.join(split_dir, f"actions_{tag}.npy")
         fp_ao = os.path.join(split_dir, f"agent_offsets_{tag}.npy")
         fp_m = os.path.join(split_dir, f"map_ids_{tag}.npy")
-        mm_a = mm_ao = mm_m = None
+        fp_gid = os.path.join(split_dir, f"global_ids_{tag}.npy")
+        mm_a = mm_ao = mm_m = mm_gid = None
         for local_i, global_i in enumerate(range(start_idx, end_idx)):
-            other_action_buf, agent_offsets, map_ids = evaluator.collect_rollouts(args, vecenv, policies)
+            other_action_buf, agent_offsets, map_ids, global_ids = evaluator.collect_rollouts(
+                args, vecenv, policies
+            )
             agent_offsets = np.asarray(agent_offsets, dtype=np.int32, order="C")
             map_ids = np.asarray(map_ids, dtype=np.int32, order="C")
+            global_ids = np.asarray(global_ids, dtype=np.int32, order="C")
             if local_i == 0:
                 na, T, c = other_action_buf.shape
                 jo = int(agent_offsets.size)
                 km = int(map_ids.size)
+                nm, me = int(global_ids.shape[0]), int(global_ids.shape[1])
                 mm_a = np.lib.format.open_memmap(
                     fp_a,
                     mode="w+",
@@ -1851,9 +1856,13 @@ def zero_shot(env_name, args=None, vecenv=None, policies=None):
                 mm_m = np.lib.format.open_memmap(
                     fp_m, mode="w+", dtype=np.int32, shape=(shard_len, km)
                 )
+                mm_gid = np.lib.format.open_memmap(
+                    fp_gid, mode="w+", dtype=np.int32, shape=(shard_len, nm, me)
+                )
             mm_a[local_i] = np.ascontiguousarray(other_action_buf)
             mm_ao[local_i] = agent_offsets.reshape(mm_ao.shape[1:])
             mm_m[local_i] = map_ids.reshape(mm_m.shape[1:])
+            mm_gid[local_i] = global_ids
             # to initialize
             vecenv.close()
             vecenv = load_env(env_name, args)
@@ -1861,7 +1870,7 @@ def zero_shot(env_name, args=None, vecenv=None, policies=None):
                 f"Collected shard {local_i + 1}/{shard_len} "
                 f"(global rollout {global_i + 1}/{num_collect_rollout}), shape: {other_action_buf.shape}"
             )
-        del mm_a, mm_ao, mm_m
+        del mm_a, mm_ao, mm_m, mm_gid
         print(
             f"Wrote split memmaps under {split_dir} tag={tag} "
             f"(shard_len={shard_len}, agents={na}, T={T}). "

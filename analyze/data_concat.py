@@ -6,9 +6,13 @@ Shards are written by puffer zeroshot save-population to::
     <population_path>/splits/actions_{start:06d}_{end:06d}.npy
     <population_path>/splits/agent_offsets_{start:06d}_{end:06d}.npy
     <population_path>/splits/map_ids_{start:06d}_{end:06d}.npy
+    <population_path>/splits/global_ids_{start:06d}_{end:06d}.npy
 
 where ``[start, end)`` is a half-open global rollout index range (same as
 ``collect_start_idx`` / ``collect_end_idx`` in the ``[pbt]`` config).
+
+``global_ids`` shards have shape ``(shard_len, num_maps, max_entity)``; each
+row is ``global_ids[map_id, entity_id] = corpus flatten index g``.
 
 Parallel example (total 50 rollouts)::
 
@@ -22,7 +26,8 @@ Then::
 
     python data_concat.py --population-path /path/to/population --total-rollouts 50
 
-This writes ``saved/other_actions_actions.npy`` (and offsets / map_ids) for ``Drive_PBT`` replay mode.
+This writes ``saved/other_actions_*.npy`` for ``Drive_PBT`` replay mode and
+``saved/global_ids.npy`` (2D LUT from corpus reference rollout 0).
 """
 
 from __future__ import annotations
@@ -78,8 +83,18 @@ def _matching_paths(splits_dir: str, start: int, end: int) -> Tuple[str, str, st
         os.path.join(splits_dir, f"actions_{tag}.npy"),
         os.path.join(splits_dir, f"agent_offsets_{tag}.npy"),
         os.path.join(splits_dir, f"map_ids_{tag}.npy"),
-        os.path.join(splits_dir, f"agent_ids_{tag}.npy"),
+        os.path.join(splits_dir, f"global_ids_{tag}.npy"),
     )
+
+
+def _load_corpus_global_ids(global_ids_path: str) -> np.ndarray:
+    """Return 2D global_ids LUT from rollout 0 of a shard file."""
+    gid = np.load(global_ids_path, mmap_mode="r")
+    if gid.ndim == 3:
+        return np.ascontiguousarray(gid[0])
+    if gid.ndim == 2:
+        return np.ascontiguousarray(gid)
+    raise ValueError(f"{global_ids_path}: expected 2D or 3D array, got shape {gid.shape}")
 
 
 def main() -> int:
@@ -106,25 +121,33 @@ def main() -> int:
 
     # Shape / dtype from first shard
     start0, end0, actions_path = shards[0]
-    _, ao_path, m_path, id_path = _matching_paths(splits_dir, start0, end0)
+    _, ao_path, m_path, gid_path = _matching_paths(splits_dir, start0, end0)
 
     first_a = np.load(actions_path, mmap_mode="r")
     first_ao = np.load(ao_path, mmap_mode="r")
     first_m = np.load(m_path, mmap_mode="r")
-    has_agent_ids = os.path.isfile(id_path)
+    has_global_ids = os.path.isfile(gid_path)
     if first_a.shape[0] != end0 - start0:
         raise ValueError(f"{actions_path}: leading dim {first_a.shape[0]} != {end0 - start0}")
     na, T, c = int(first_a.shape[1]), int(first_a.shape[2]), int(first_a.shape[3])
     jo = int(first_ao.shape[1])
     km = int(first_m.shape[1])
     dtype_a = first_a.dtype
-    if has_agent_ids:
-        first_id = np.load(id_path, mmap_mode="r")
-        if first_id.shape != (end0 - start0, na):
-            raise ValueError(f"{id_path}: shape {first_id.shape} != ({end0 - start0}, {na})")
+    if has_global_ids:
+        first_gid = np.load(gid_path, mmap_mode="r")
+        if first_gid.ndim == 3:
+            if first_gid.shape[0] != end0 - start0:
+                raise ValueError(
+                    f"{gid_path}: leading dim {first_gid.shape[0]} != {end0 - start0}"
+                )
+            num_maps, max_entity = int(first_gid.shape[1]), int(first_gid.shape[2])
+        elif first_gid.ndim == 2:
+            num_maps, max_entity = int(first_gid.shape[0]), int(first_gid.shape[1])
+        else:
+            raise ValueError(f"{gid_path}: expected shape (shard, num_maps, max_entity) or (num_maps, max_entity)")
 
     for start, end, ap in shards[1:]:
-        _, ao_p, m_p, id_p = _matching_paths(splits_dir, start, end)
+        _, ao_p, m_p, gid_p = _matching_paths(splits_dir, start, end)
         aa = np.load(ap, mmap_mode="r")
         aao = np.load(ao_p, mmap_mode="r")
         am = np.load(m_p, mmap_mode="r")
@@ -132,19 +155,25 @@ def main() -> int:
             raise ValueError(f"Shape/dtype mismatch: {ap} vs {actions_path}")
         if aao.shape[1:] != (jo,) or am.shape[1:] != (km,):
             raise ValueError(f"offsets/map_ids shape mismatch: shard [{start},{end})")
-        if has_agent_ids:
-            if not os.path.isfile(id_p):
-                raise ValueError(f"Missing agent_ids shard: {id_p}")
-            aid = np.load(id_p, mmap_mode="r")
-            if aid.shape != (end - start, na):
-                raise ValueError(f"agent_ids shape mismatch: {id_p}")
+        if has_global_ids:
+            if not os.path.isfile(gid_p):
+                raise ValueError(f"Missing global_ids shard: {gid_p}")
+            gid = np.load(gid_p, mmap_mode="r")
+            if gid.ndim == 3:
+                if gid.shape != (end - start, num_maps, max_entity):
+                    raise ValueError(f"global_ids shape mismatch: {gid_p}")
+            elif gid.ndim == 2:
+                if gid.shape != (num_maps, max_entity):
+                    raise ValueError(f"global_ids shape mismatch: {gid_p}")
+            else:
+                raise ValueError(f"global_ids shape mismatch: {gid_p}")
         if aa.shape[0] != end - start:
             raise ValueError(f"{ap}: leading dim {aa.shape[0]} != {end - start}")
 
     out_a = os.path.join(saved_dir, "other_actions_actions.npy")
     out_ao = os.path.join(saved_dir, "other_actions_agent_offsets.npy")
     out_m = os.path.join(saved_dir, "other_actions_map_ids.npy")
-    out_id = os.path.join(saved_dir, "other_actions_agent_ids.npy")
+    out_gid = os.path.join(saved_dir, "global_ids.npy")
     os.makedirs(saved_dir, exist_ok=True)
 
     mm_a = np.lib.format.open_memmap(
@@ -152,15 +181,10 @@ def main() -> int:
     )
     mm_ao = np.lib.format.open_memmap(out_ao, mode="w+", dtype=np.int32, shape=(args.total_rollouts, jo))
     mm_m = np.lib.format.open_memmap(out_m, mode="w+", dtype=np.int32, shape=(args.total_rollouts, km))
-    mm_id = None
-    if has_agent_ids:
-        mm_id = np.lib.format.open_memmap(
-            out_id, mode="w+", dtype=np.int32, shape=(args.total_rollouts, na)
-        )
 
     offset = 0
     for start, end, ap in shards:
-        _, ao_p, m_p, id_p = _matching_paths(splits_dir, start, end)
+        _, ao_p, m_p, _ = _matching_paths(splits_dir, start, end)
         sl = end - start
         aa = np.load(ap, mmap_mode="r")
         aao = np.load(ao_p, mmap_mode="r")
@@ -168,18 +192,16 @@ def main() -> int:
         mm_a[offset : offset + sl] = np.ascontiguousarray(aa)
         mm_ao[offset : offset + sl] = np.ascontiguousarray(aao)
         mm_m[offset : offset + sl] = np.ascontiguousarray(am)
-        if has_agent_ids:
-            mm_id[offset : offset + sl] = np.ascontiguousarray(np.load(id_p, mmap_mode="r"))
         offset += sl
     del mm_a, mm_ao, mm_m
-    if mm_id is not None:
-        del mm_id
 
     print(f"Wrote {out_a}")
     print(f"Wrote {out_ao}")
     print(f"Wrote {out_m}")
-    if has_agent_ids:
-        print(f"Wrote {out_id}")
+    if has_global_ids:
+        corpus_global_ids = _load_corpus_global_ids(gid_path)
+        np.save(out_gid, corpus_global_ids)
+        print(f"Wrote {out_gid} shape={corpus_global_ids.shape} (corpus reference rollout 0)")
     print(f"total_rollouts={args.total_rollouts} shards={len(shards)}")
     return 0
 
