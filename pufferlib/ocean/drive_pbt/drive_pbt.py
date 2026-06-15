@@ -505,10 +505,6 @@ class Drive_PBT(pufferlib.PufferEnv):
             self.other_mask[self.ego_indices] = False
             self.other_indices_arr = np.flatnonzero(self.other_mask).astype(np.int64)
             self._ego_index_set = set(self.ego_indices.tolist())
-            if self.agent_sampling or self.pbt_mode == "reactive":
-                self._reset_other_indices()
-            if self.agent_sampling:
-                self._update_minimum_distance()
             if self.pbt_mode == "replay":
                 self._allocate_replay(self.num_agents, self.map_ids)
 
@@ -560,6 +556,10 @@ class Drive_PBT(pufferlib.PufferEnv):
 
             binding.vec_reset(self.c_envs, seed)
             self.terminals[:] = 1
+            if self.agent_sampling or self.pbt_mode == "reactive":
+                self._reset_other_indices()
+            if self.agent_sampling:
+                self._update_minimum_distance()
         if len(info) == 0:
             info = [{"agent_offsets": self.agent_offsets, "map_ids": self.map_ids, "num_envs": self.num_envs, "ego_indices": self.ego_indices}]
         else:
