@@ -1,34 +1,4 @@
 #!/usr/bin/env python3
-"""Concatenate save-population replay shards into Drive_PBT replay .npy files.
-
-Shards are written by puffer zeroshot save-population to::
-
-    <population_path>/splits/actions_{start:06d}_{end:06d}.npy
-    <population_path>/splits/agent_offsets_{start:06d}_{end:06d}.npy
-    <population_path>/splits/map_ids_{start:06d}_{end:06d}.npy
-    <population_path>/splits/global_ids_{start:06d}_{end:06d}.npy
-
-where ``[start, end)`` is a half-open global rollout index range (same as
-``collect_start_idx`` / ``collect_end_idx`` in the ``[pbt]`` config).
-
-``global_ids`` shards have shape ``(shard_len, num_maps, max_entity)``; each
-row is ``global_ids[map_id, entity_id] = corpus flatten index g``.
-
-Parallel example (total 50 rollouts)::
-
-    # job A
-    puffer zeroshot ... --pbt.num-collect-rollout=50 --pbt.collect-start-idx=0 --pbt.collect-end-idx=25 \\
-        ...
-    # job B
-    puffer zeroshot ... --pbt.num-collect-rollout=50 --pbt.collect-start-idx=25 --pbt.collect-end-idx=50 \\
-
-Then::
-
-    python data_concat.py --population-path /path/to/population --total-rollouts 50
-
-This writes ``saved/other_actions_*.npy`` for ``Drive_PBT`` replay mode and
-``saved/global_ids.npy`` (2D LUT from corpus reference rollout 0).
-"""
 
 from __future__ import annotations
 

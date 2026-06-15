@@ -145,16 +145,11 @@ class PuffeRL:
                 if config["pbt_mode"] == "reactive":
                     self.other_lstm_cs = []
                     self.other_lstm_hs = []
-                    num_other = n - num_ego
-                    num_other_policies = len(other_policies)
-                    self.num_other_policies = num_other_policies
-                    base, rem = divmod(num_other, num_other_policies)
-                    counts = [base + (i < rem) for i in range(num_other_policies)]
-                    for count in counts:
-                        other_lstm_h = {i * self.num_agents_per_env: torch.zeros(count, h, device=device) for i in range(total_agents // self.num_agents_per_env)}
-                        other_lstm_c = {i * self.num_agents_per_env: torch.zeros(count, h, device=device) for i in range(total_agents // self.num_agents_per_env)}
-                        self.other_lstm_hs.append(other_lstm_h)
-                        self.other_lstm_cs.append(other_lstm_c)
+                    self.num_other_policies = len(other_policies)
+                    self._other_lstm_hidden = h
+                    for _ in range(self.num_other_policies):
+                        self.other_lstm_hs.append({})
+                        self.other_lstm_cs.append({})
         if config.get("use_pbt"):
             self._total_actions_buffer = np.zeros((n, 1), dtype=np.int64)
 
@@ -256,7 +251,7 @@ class PuffeRL:
 
         # Dashboard
         self.model_size = sum(p.numel() for p in policy.parameters() if p.requires_grad)
-        self.print_dashboard(clear=True)
+        # self.print_dashboard(clear=True)
 
     @property
     def uptime(self):
@@ -268,6 +263,20 @@ class PuffeRL:
             return 0
 
         return (self.global_step - self.last_log_step) / (time.time() - self.last_log_time)
+
+    def _sync_other_lstm(self, other_indices, key, device, force_reset=False):
+        """Match other-policy LSTM buffers to env other_indices; reset on resample."""
+        h = self._other_lstm_hidden
+        for policy_idx, other_idx in enumerate(other_indices):
+            batch_size = len(other_idx)
+            hs = self.other_lstm_hs[policy_idx]
+            cs = self.other_lstm_cs[policy_idx]
+            if key not in hs or hs[key].shape[0] != batch_size:
+                hs[key] = torch.zeros(batch_size, h, device=device)
+                cs[key] = torch.zeros(batch_size, h, device=device)
+            elif force_reset:
+                hs[key].zero_()
+                cs[key].zero_()
 
     def evaluate_pbt_replay(self):
         '''Collect rollout'''
@@ -408,8 +417,9 @@ class PuffeRL:
                 self.lstm_h[k] = torch.zeros(self.lstm_h[k].shape, device=device)
                 self.lstm_c[k] = torch.zeros(self.lstm_c[k].shape, device=device)
                 for l in range(len(self.other_lstm_hs)):
-                    self.other_lstm_hs[l][k] = torch.zeros(self.other_lstm_hs[l][k].shape, device=device)
-                    self.other_lstm_cs[l][k] = torch.zeros(self.other_lstm_cs[l][k].shape, device=device)
+                    for key in self.other_lstm_hs[l]:
+                        self.other_lstm_hs[l][key].zero_()
+                        self.other_lstm_cs[l][key].zero_()
     
         self.full_rows = 0
         while self.full_rows < self.segments:
@@ -417,9 +427,12 @@ class PuffeRL:
             o, r, d, t, info, env_id, mask = self.vecenv.recv()
             ego_indices = []
             other_indices = [[] for _ in range(self.num_other_policies)]
+            partner_resampled = False
             env_id = env_id * self.ego_ratio
             env_id = env_id.astype(np.int64)
             for i, info_i in enumerate(info):
+                if info_i.get("partner_resampled"):
+                    partner_resampled = True
                 if "ego_indices" in info_i.keys():
                     ego = np.asarray(info_i["ego_indices"], dtype=np.int64)
                     offset = self.num_agents_per_env * i
@@ -433,6 +446,9 @@ class PuffeRL:
             profile("eval_misc", epoch)
             env_id = slice(env_id[0], env_id[-1] + 1)
             done_mask = d + t  # TODO: Handle truncations separately
+
+            if config["use_rnn"]:
+                self._sync_other_lstm(other_indices, env_id.start, device, force_reset=partner_resampled)
 
             profile("eval_copy", epoch)
             o = torch.as_tensor(o)
@@ -796,7 +812,7 @@ class PuffeRL:
         if done_training or self.global_step == 0 or time.time() > self.last_log_time + 0.25:
             logs = self.mean_and_log()
             self.losses = losses
-            self.print_dashboard()
+            # self.print_dashboard()
             self.stats = defaultdict(list)
             self.last_log_time = time.time()
             self.last_log_step = self.global_step
@@ -1366,7 +1382,7 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
     if logs is not None:
         all_logs.append(logs)
 
-    pufferl.print_dashboard()
+    # pufferl.print_dashboard()
     model_path = pufferl.close()
     pufferl.logger.close(model_path)
     return all_logs
@@ -1457,7 +1473,7 @@ def train_pbt(env_name, args=None, vecenv=None, policy=None, logger=None, config
     if logs is not None:
         all_logs.append(logs)
 
-    pufferl.print_dashboard()
+    # pufferl.print_dashboard()
     model_path = pufferl.close()
     pufferl.logger.close(model_path)
     return all_logs
@@ -1823,7 +1839,6 @@ def zero_shot(env_name, args=None, vecenv=None, policies=None):
             args2["load_model_path"] = os.path.join(args["pbt"]["population_path"], op)
             policy2 = load_policy(args2, vecenv, env_name)
             policies.append(policy2.eval())
-        replay_dir = os.path.join(args["pbt"]["population_path"], "replay")
         split_dir = os.path.join(args["pbt"]["population_path"], "splits")
         os.makedirs(split_dir, exist_ok=True)
         tag = f"{start_idx:06d}_{end_idx:06d}"

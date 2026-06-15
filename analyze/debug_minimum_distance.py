@@ -26,16 +26,23 @@ from pufferlib.ocean.drive_pbt.drive_pbt import Drive_PBT
 
 def _reverse_entity_lookup(env):
     out = {}
-    if env._entity_to_corpus is None:
+    gid = env.global_ids
+    if gid is None:
         return out
-    for (map_id, entity_id), corpus_idx in env._entity_to_corpus.items():
-        out[int(corpus_idx)] = (int(map_id), int(entity_id))
+    for map_id in range(gid.shape[0]):
+        row = gid[map_id]
+        for entity_id in np.flatnonzero(row >= 0):
+            out[int(row[entity_id])] = (int(map_id), int(entity_id))
     return out
 
 
 def _tracked_mask(env):
     md = env.minimum_distance
-    return np.isfinite(md) & (env.minimum_ego_idx >= 0) & (env.minimum_other_idx >= 0)
+    return (
+        np.isfinite(md)
+        & (env.minimum_ego_idx >= 0)
+        & (env.minimum_other_global_idx >= 0)
+    )
 
 
 def summarize(env, step: int, top_k: int = 8) -> None:
@@ -61,9 +68,10 @@ def summarize(env, step: int, top_k: int = 8) -> None:
         f"{'ego_idx':>8} {'min_dist(m)':>12}"
     )
     for slot in order:
-        corpus_idx = int(env.minimum_other_idx[slot])
+        corpus_idx = int(env.minimum_other_global_idx[slot])
+        entity_id = int(env.minimum_other_local_idx[slot])
         other_idx = int(env.other_indices_arr[slot])
-        map_id, entity_id = rev.get(corpus_idx, (-1, -1))
+        map_id = rev.get(corpus_idx, (-1, -1))[0]
         print(
             f"{slot:6d} {other_idx:6d} {corpus_idx:8d} {map_id:6d} {entity_id:8d} "
             f"{env.minimum_ego_idx[slot]:8d} {md[slot]:12.2f}"
@@ -71,49 +79,50 @@ def summarize(env, step: int, top_k: int = 8) -> None:
 
 
 def _step_visible_audit(env, max_rows: int = 8) -> None:
-    rel_xy = env._partner_obs()[:, :, :2]
-    visible = (rel_xy[:, :, 0] != 0) | (rel_xy[:, :, 1] != 0)
     partner_states = env.get_global_partner_state()
-    other_ids = partner_states["other_id"]
-    entity_to_agent = env._live_entity_to_agent()
-    ao = np.asarray(env.agent_offsets, dtype=np.int64)
+    other_ids = partner_states["other_id"].astype(np.int64)
+    rel_xy = env._partner_obs()[:, :, :2]
+    dist = np.linalg.norm(rel_xy, axis=2) / 0.02
+    map_per_agent = env._map_per_agent()
+    map_ids = np.broadcast_to(map_per_agent[:, np.newaxis], other_ids.shape)
+    lut = env._local_to_other_slot
 
-    hits = misses = skipped_ego = would_update = 0
+    ego_mask = np.zeros(env.num_agents, dtype=bool)
+    ego_mask[env.ego_indices] = True
+    valid = (
+        ego_mask[:, np.newaxis]
+        & (other_ids >= 0)
+        & (map_ids >= 0)
+        & (map_ids < lut.shape[0])
+        & (other_ids < lut.shape[1])
+    )
+
+    hits = misses = would_update = 0
     rows = []
-    for env_i in range(env.num_envs):
-        map_id = int(env.map_ids[env_i])
-        cur, nxt = ao[env_i], ao[env_i + 1]
-        for ego_idx in env.ego_indices:
-            if ego_idx < cur or ego_idx >= nxt:
-                continue
-            for slot in np.flatnonzero(visible[ego_idx]):
-                entity_id = int(other_ids[ego_idx, slot])
-                corpus_idx = env._corpus_index(map_id, entity_id)
-                dist = float(np.linalg.norm(rel_xy[ego_idx, slot]) / 0.02)
-                partner_idx = entity_to_agent.get((map_id, entity_id))
-                if corpus_idx is None:
-                    misses += 1
-                    slot_kind = "miss"
-                elif partner_idx is None or partner_idx in env._ego_index_set:
-                    skipped_ego += 1
-                    slot_kind = "ego/skip"
-                elif env._other_slot_for_agent(partner_idx) is None:
-                    slot_kind = "not-other"
-                else:
-                    hits += 1
-                    would_update += 1
-                    slot_kind = "partner"
-                if len(rows) < max_rows:
-                    rows.append((map_id, entity_id, corpus_idx, dist, slot_kind))
+    ego_idx, partner_slot = np.where(valid)
+    for i in range(ego_idx.size):
+        e, p = int(ego_idx[i]), int(partner_slot[i])
+        map_id = int(map_ids[e, p])
+        entity_id = int(other_ids[e, p])
+        other_slot = int(lut[map_id, entity_id])
+        d = float(dist[e, p])
+        if other_slot < 0:
+            misses += 1
+            slot_kind = "not-other"
+        else:
+            hits += 1
+            would_update += 1
+            slot_kind = f"slot={other_slot}"
+        if len(rows) < max_rows:
+            rows.append((map_id, entity_id, other_slot, d, slot_kind))
     print(
-        f"visible lookup: hit={hits} miss={misses}  "
-        f"skipped_ego={skipped_ego}  would_update_partner={would_update}"
+        f"visible lookup: hit={hits} miss={misses}  would_update_partner={would_update}"
     )
     if rows:
-        print(f"{'map':>6} {'entity':>8} {'corpus':>8} {'dist(m)':>10} {'slot':>12}")
-        for map_id, entity_id, corpus_idx, dist, slot_kind in rows:
-            c = "-" if corpus_idx is None else str(corpus_idx)
-            print(f"{map_id:6d} {entity_id:8d} {c:>8} {dist:10.2f} {slot_kind:>12}")
+        print(f"{'map':>6} {'entity':>8} {'slot':>8} {'dist(m)':>10} {'kind':>12}")
+        for map_id, entity_id, other_slot, d, slot_kind in rows:
+            s = "-" if other_slot < 0 else str(other_slot)
+            print(f"{map_id:6d} {entity_id:8d} {s:>8} {d:10.2f} {slot_kind:>12}")
 
 
 def summarize_ego_returns(env, top_k: int = 8) -> None:
@@ -155,10 +164,11 @@ def summarize_commit_preview(env, rollout: int, top_k: int = 10) -> None:
     order = np.flatnonzero(tracked)
     order = order[np.argsort(md[order])][:top_k]
     for slot in order:
-        corpus_idx = int(env.minimum_other_idx[slot])
+        corpus_idx = int(env.minimum_other_global_idx[slot])
+        entity_id = int(env.minimum_other_local_idx[slot])
         ego_idx = int(env.minimum_ego_idx[slot])
         other_idx = int(env.other_indices_arr[slot])
-        map_id, entity_id = rev.get(corpus_idx, (-1, -1))
+        map_id = _reverse_entity_lookup(env).get(corpus_idx, (-1, -1))[0]
         print(
             f"{slot:6d} {corpus_idx:8d} {map_id:6d} {entity_id:8d} {other_idx:6d} "
             f"{ego_idx:6d} {md[slot]:8.2f} {env._episode_return[ego_idx]:10.3f}"
@@ -186,8 +196,9 @@ def summarize_resample_commit(
         print(f"{'slot':>6} {'corpus':>8} {'map':>6} {'entity':>8} {'score':>10}")
         order = changed_slots[np.argsort(np.abs(score_before[changed_slots]))[::-1]][:top_k]
         for slot in order:
-            corpus_idx = int(env.minimum_other_idx[slot])
-            map_id, entity_id = rev.get(corpus_idx, (-1, -1))
+            corpus_idx = int(env.minimum_other_global_idx[slot])
+            entity_id = int(env.minimum_other_local_idx[slot])
+            map_id = rev.get(corpus_idx, (-1, -1))[0]
             print(
                 f"{slot:6d} {corpus_idx:8d} {map_id:6d} {entity_id:8d} "
                 f"{score_before[slot]:10.3f}"
@@ -229,7 +240,7 @@ def main() -> int:
     args = p.parse_args()
 
     saved = os.path.join(args.population_path, "saved")
-    for name in ("other_actions_agent_offsets.npy", "other_actions_map_ids.npy", "other_actions_agent_ids.npy"):
+    for name in ("other_actions_agent_offsets.npy", "other_actions_map_ids.npy", "global_ids.npy"):
         path = os.path.join(saved, name)
         if not os.path.isfile(path):
             raise FileNotFoundError(f"Missing corpus file: {path}")
@@ -250,7 +261,7 @@ def main() -> int:
     env.reset(seed=args.seed)
     print(f"resample_frequency={args.resample_frequency}  steps={args.steps}")
     print(f"live maps={env.map_ids[:env.num_envs]}  ego_indices={env.ego_indices.tolist()}")
-    print(f"other agents={env.other_indices_arr.size}  corpus lookup entries={len(env._entity_to_corpus)}")
+    print(f"other agents={env.other_indices_arr.size}  global_ids shape={env.global_ids.shape}")
     summarize(env, step=0)
     _step_visible_audit(env)
 
@@ -276,7 +287,8 @@ def main() -> int:
     print(
         "\nNotes:"
         "\n  - minimum_distance is indexed by live other agent (size num_agents - num_ego)"
-        "\n  - minimum_other_idx stores corpus index; minimum_ego_idx stores closest ego"
+        "\n  - minimum_other_local_idx = map-local entity index; minimum_other_global_idx = corpus g"
+        "\n  - minimum_ego_idx stores closest ego"
         "\n  - score_metric[slot] = _episode_return[minimum_ego_idx] at resample"
         "\n  - agent_sampler.new_score[corpus] from distance-filtered score_metric"
     )
