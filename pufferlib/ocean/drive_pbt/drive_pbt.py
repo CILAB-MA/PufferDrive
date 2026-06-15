@@ -301,20 +301,21 @@ class Drive_PBT(pufferlib.PufferEnv):
             self.minimum_other_local_idx[valid] = entity_ids[valid]
             self.minimum_other_global_idx[valid] = gid[map_ids[valid], entity_ids[valid]]
 
-            # (map, local entity) -> other slot
-            self._local_to_other_slot = np.full((gid.shape[0], gid.shape[1]), -1, dtype=np.int64)
-            map_per_other = self._map_per_agent()[self.other_indices_arr]
+            # (env_i, local entity id) -> other slot; map_id alone collides across envs on same map
+            max_entity = gid.shape[1]
+            self._env_entity_to_other_slot = np.full((self.num_envs, max_entity), -1, dtype=np.int64)
+            env_per_other = self._env_per_agent()[self.other_indices_arr]
             tracked = self.minimum_other_local_idx >= 0
             slots = np.flatnonzero(tracked)
-            maps = map_per_other[tracked]
+            envs = env_per_other[tracked]
             entities = self.minimum_other_local_idx[tracked]
             in_bounds = (
-                (maps >= 0)
-                & (maps < gid.shape[0])
+                (envs >= 0)
+                & (envs < self.num_envs)
                 & (entities >= 0)
-                & (entities < gid.shape[1])
+                & (entities < max_entity)
             )
-            self._local_to_other_slot[maps[in_bounds], entities[in_bounds]] = slots[in_bounds]
+            self._env_entity_to_other_slot[envs[in_bounds], entities[in_bounds]] = slots[in_bounds]
 
             flat = np.asarray(
                 self.agent_sampler.sample(self.minimum_other_global_idx), dtype=np.int64
@@ -336,10 +337,12 @@ class Drive_PBT(pufferlib.PufferEnv):
             for policy_idx in range(self.num_other_policies)
         ]
 
-    def _map_per_agent(self):
+    def _env_per_agent(self):
         ao = np.asarray(self.agent_offsets, dtype=np.int64)
-        env_i = np.searchsorted(ao[1:], np.arange(self.num_agents, dtype=np.int64), side="right")
-        return np.asarray(self.map_ids, dtype=np.int64)[env_i]
+        return np.searchsorted(ao[1:], np.arange(self.num_agents, dtype=np.int64), side="right")
+
+    def _map_per_agent(self):
+        return np.asarray(self.map_ids, dtype=np.int64)[self._env_per_agent()]
 
     def _partner_obs(self):
         start = self.ego_features
@@ -364,24 +367,24 @@ class Drive_PBT(pufferlib.PufferEnv):
         other_ids = partner_states["other_id"].astype(np.int64)
         rel_xy = self._partner_obs()[:, :, :2]
         dist = np.linalg.norm(rel_xy, axis=-1) / _PARTNER_REL_SCALE
-        map_per_agent = self._map_per_agent()
-        map_ids = np.broadcast_to(map_per_agent[:, np.newaxis], other_ids.shape)
-        lut = self._local_to_other_slot
+        env_per_agent = self._env_per_agent()
+        env_ids = np.broadcast_to(env_per_agent[:, np.newaxis], other_ids.shape)
+        lut = self._env_entity_to_other_slot
 
         ego_mask = np.zeros(self.num_agents, dtype=bool)
         ego_mask[self.ego_indices] = True
         valid = (
             ego_mask[:, np.newaxis]
             & (other_ids >= 0)
-            & (map_ids >= 0)
-            & (map_ids < lut.shape[0])
+            & (env_ids >= 0)
+            & (env_ids < lut.shape[0])
             & (other_ids < lut.shape[1])
         )
         if not np.any(valid):
             return
 
         other_slot = np.full(other_ids.shape, -1, dtype=np.int64)
-        other_slot[valid] = lut[map_ids[valid], other_ids[valid]]
+        other_slot[valid] = lut[env_ids[valid], other_ids[valid]]
         valid &= other_slot >= 0
         if not np.any(valid):
             return
