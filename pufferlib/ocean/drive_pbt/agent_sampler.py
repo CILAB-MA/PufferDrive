@@ -31,38 +31,37 @@ class AgentSampler:
         self.policy_scores = np.zeros((self.total_agents, self.num_policies), dtype=np.float64)
         self.policy_staleness = np.zeros((self.total_agents, self.num_policies), dtype=np.float64)
         self.distance_threshold = 0.02 # TODO: args로 만들기
+        self.new_score = np.zeros((self.total_agents, self.num_policies), dtype=np.float64)
         
-    def _distance_filtering(self, score, minimum_distance, minimum_other_idx, policy_per_slot, agent_idx, policy_idx):
+    def _distance_filtering(self, score, minimum_distance, policy_idx, agent_idx):
         """Filter by distance, scatter per-slot scores into policy x corpus columns."""
         score = np.asarray(score, dtype=np.float64).reshape(-1)
         dist = np.asarray(minimum_distance, dtype=np.float64).reshape(-1)
-        corpus_idx = np.asarray(minimum_other_idx, dtype=np.int64).reshape(-1)
-        policy_per_slot = np.asarray(policy_per_slot, dtype=np.int64).reshape(-1)
+        corpus_idx = np.asarray(agent_idx, dtype=np.int64).reshape(-1)
+        policy_per_slot = np.asarray(policy_idx, dtype=np.int64).reshape(-1)
         if not (score.shape == dist.shape == corpus_idx.shape == policy_per_slot.shape):
             raise ValueError(
-                "score, minimum_distance, minimum_other_idx, policy_per_slot must match, "
+                "score, minimum_distance, minimum_other_global_idx, policy_per_slot must match, "
                 f"got {score.shape}, {dist.shape}, {corpus_idx.shape}, {policy_per_slot.shape}"
             )
 
         tracked = (corpus_idx >= 0) & np.isfinite(dist)
         keep = tracked & (dist >= self.distance_threshold)
 
-        new_score = np.zeros((self.total_agents, self.num_policies), dtype=np.float64)
-        new_score.fill(0.0)
+        self.new_score.fill(0.0)
         for slot in np.flatnonzero(keep):
             policy_idx = int(policy_per_slot[slot])
             if policy_idx < 0:
                 continue
             g = int(corpus_idx[slot])
             if 0 <= g < self.total_agents:
-                new_score[g, policy_idx] = score[slot]
+                self.new_score[g, policy_idx] = score[slot]
 
-        return new_score
+    def update_policy_score(self, score, agent_idx, policy_idx, minimum_distance, ):
 
-    def update_policy_score(self, score, agent_idx, policy_idx, minimum_distance, minimum_other_idx, policy_per_slot):
-
-        new_score = self._distance_filtering(score, minimum_distance, minimum_other_idx, policy_per_slot, agent_idx, policy_idx) # (total_agents, num_policies)
-        new_score_col = new_score[:, policy_idx]
+        self._distance_filtering(score, minimum_distance, policy_idx, agent_idx) # (total_agents, num_policies)
+        # TODO: self.policy_per_slot이랑 self.policy_idx 맞는지 확인
+        new_score_col = self.new_score[:, policy_idx]
 
         self.unseen_policy_weights[agent_idx, policy_idx] = 0.0  #  no longer unseen -> 0 to unseen_policy_weights
 
@@ -96,20 +95,22 @@ class AgentSampler:
 
         return int(policy_idx)
 
-    def sample(self):
-        policy_idx = np.empty(self.total_agents, dtype=np.int64)
-
-        for agent_idx in range(self.total_agents):
-            policy_unseen = self.unseen_policy_weights[agent_idx] > 0
+    def sample(self, corpus_idx_per_slot):
+        corpus_idx_per_slot = np.asarray(corpus_idx_per_slot, dtype=np.int64).reshape(-1)
+        policy_idx = np.empty(corpus_idx_per_slot.shape[0], dtype=np.int64)
+        for slot in range(corpus_idx_per_slot.shape[0]):
+            g = int(corpus_idx_per_slot[slot])
+            if g < 0:
+                policy_idx[slot] = np.random.randint(self.num_policies)
+                continue
+            policy_unseen = self.unseen_policy_weights[g] > 0
             num_unseen = policy_unseen.sum()
-
             proportion_seen = (self.num_policies - num_unseen) / self.num_policies
-
-            if proportion_seen >= self.rho and np.random.rand() < proportion_seen: # proportional prioritization sampling (seen more, replay more)
-                policy_idx[agent_idx] = self._sample_replay_policy(agent_idx)
+            if proportion_seen >= self.rho and np.random.rand() < proportion_seen:
+                policy_idx[slot] = self._sample_replay_policy(g)
             else:
-                policy_idx[agent_idx] = self._sample_unseen_policy(agent_idx)
-        
+                policy_idx[slot] = self._sample_unseen_policy(g)
+
         self._update_staleness(policy_idx)
 
         return policy_idx

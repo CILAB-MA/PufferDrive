@@ -192,8 +192,6 @@ class Drive_PBT(pufferlib.PufferEnv):
         self.other_mask[self.ego_indices] = False
         # Canonical non-ego agents (ascending global index). Slot i <-> other_indices_arr[i].
         self.other_indices_arr = np.flatnonzero(self.other_mask).astype(np.int64)
-        self._entity_to_corpus = None
-        self._other_agent_to_slot = None
         self._ego_index_set = set(self.ego_indices.tolist())
         super().__init__(buf=buf)
         env_ids = []
@@ -248,14 +246,12 @@ class Drive_PBT(pufferlib.PufferEnv):
         saved_dir = os.path.join(self.population_path, "saved")
         fp_ao = os.path.join(saved_dir, "other_actions_agent_offsets.npy")
         fp_m = os.path.join(saved_dir, "other_actions_map_ids.npy")
-        fp_ids = os.path.join(saved_dir, "other_actions_agent_ids.npy")
+        fp_gid = os.path.join(saved_dir, "global_ids.npy")
         self.actions_agent_offsets = np.load(fp_ao, mmap_mode="r")
         self.actions_map_id = np.load(fp_m, mmap_mode="r")
         if self.agent_sampling:
-            self.actions_agent_ids = np.load(fp_ids, mmap_mode="r")
+            self.global_ids = np.load(fp_gid, mmap_mode="r")
             self.total_agents = int(self.actions_agent_offsets[0, -1])
-            self._init_minimum_distance()
-            self._init_corpus_entity_lookup()
         if pbt_mode == "replay":
             fp_actions = os.path.join(saved_dir, "other_actions_actions.npy")
             self.other_actions = np.load(fp_actions, mmap_mode="r")
@@ -267,88 +263,86 @@ class Drive_PBT(pufferlib.PufferEnv):
             ]
             self.num_other_policies = len(populations)
             if self.agent_sampling:
-                self.agent_sampler.sample()
-            else:
-                self._allocate_other_indices(self.num_agents)
+                if self.total_agents < 1:
+                    raise ValueError(f"total_agents must be >= 1, got {self.total_agents}")
+                self._episode_return = np.zeros(self.num_agents, dtype=np.float32)
+                n_other = int(self.other_indices_arr.size)
+                self.minimum_distance = np.full(n_other, np.inf, dtype=np.float32)
+                self.minimum_ego_idx = np.full(n_other, -1, dtype=np.int64)
+                self.minimum_other_local_idx = np.full(n_other, -1, dtype=np.int64)
+                self.minimum_other_global_idx = np.full(n_other, -1, dtype=np.int64)
+                self.score_metric = np.zeros(n_other, dtype=np.float32)
+                self.agent_sampler = AgentSampler(
+                    num_policies=self.num_other_policies, total_agents=self.total_agents
+                )
 
-    def _init_minimum_distance(self):
-        if self.total_agents < 1:
-            raise ValueError(f"total_agents must be >= 1, got {self.total_agents}")
-        self._episode_return = np.zeros(self.num_agents, dtype=np.float32)
-        self._reinit_other_tracking()
+    def _reset_other_indices(self):
+        """Episode/rollout start (after vec_reset): metrics, slot identity, LUT, policy assignment."""
+        if self.agent_sampling:
+            # init metrics
+            self.minimum_distance.fill(np.inf)
+            self.minimum_ego_idx.fill(-1)
+            self.minimum_other_local_idx.fill(-1)
+            self.minimum_other_global_idx.fill(-1)
+            self.score_metric.fill(0.0)
 
-    def _reinit_other_tracking(self):
-        n_other = int(self.other_indices_arr.size)
-        if n_other < 1:
-            raise ValueError(f"num other agents must be >= 1, got {n_other}")
-        self.minimum_distance = np.full(n_other, np.inf, dtype=np.float32)
-        self.minimum_ego_idx = np.full(n_other, -1, dtype=np.int64)
-        self.minimum_other_idx = np.full(n_other, -1, dtype=np.int64)
-        self.score_metric = np.zeros(n_other, dtype=np.float32)
-        self._build_other_slot_lookup()
-        self._build_policy_per_slot()
+            # assign other indices
+            live_entity_ids = self.get_global_partner_state()["ego_id"].astype(np.int64)
+            map_per_agent = self._map_per_agent()
+            entity_ids = live_entity_ids[self.other_mask]
+            map_ids = map_per_agent[self.other_mask]
+            gid = self.global_ids
+            valid = (
+                (entity_ids >= 0)
+                & (map_ids >= 0)
+                & (map_ids < gid.shape[0])
+                & (entity_ids < gid.shape[1])
+            )
+            self.minimum_other_local_idx[valid] = entity_ids[valid]
+            self.minimum_other_global_idx[valid] = gid[map_ids[valid], entity_ids[valid]]
 
-    def _build_other_slot_lookup(self):
-        self._other_agent_to_slot = {
-            int(agent_idx): i for i, agent_idx in enumerate(self.other_indices_arr)
-        }
+            # (env_i, local entity id) -> other slot; map_id alone collides across envs on same map
+            max_entity = gid.shape[1]
+            self._env_entity_to_other_slot = np.full((self.num_envs, max_entity), -1, dtype=np.int64)
+            env_per_other = self._env_per_agent()[self.other_indices_arr]
+            tracked = self.minimum_other_local_idx >= 0
+            slots = np.flatnonzero(tracked)
+            envs = env_per_other[tracked]
+            entities = self.minimum_other_local_idx[tracked]
+            in_bounds = (
+                (envs >= 0)
+                & (envs < self.num_envs)
+                & (entities >= 0)
+                & (entities < max_entity)
+            )
+            self._env_entity_to_other_slot[envs[in_bounds], entities[in_bounds]] = slots[in_bounds]
 
-    def _build_policy_per_slot(self):
-        if not hasattr(self, "other_indices"):
-            return
-        n_other = int(self.other_indices_arr.size)
-        self.policy_per_slot = np.full(n_other, -1, dtype=np.int64)
-        for policy_idx, agents in enumerate(self.other_indices):
-            for agent_idx in np.asarray(agents, dtype=np.int64).reshape(-1):
-                slot = self._other_agent_to_slot.get(int(agent_idx))
-                if slot is not None:
-                    self.policy_per_slot[slot] = policy_idx
+            flat = np.asarray(
+                self.agent_sampler.sample(self.minimum_other_global_idx), dtype=np.int64
+            ).reshape(-1)
+            self._set_policy_per_slot(flat)
+        elif self.pbt_mode == "reactive":  # TODO: agent_sampler와 통합
+            n_other = int(self.other_indices_arr.size)
+            flat = np.full(n_other, -1, dtype=np.int64)
+            for policy_idx, slots in enumerate(
+                np.array_split(np.random.permutation(n_other), self.num_other_policies)
+            ):
+                flat[slots] = policy_idx
+            self._set_policy_per_slot(flat)
 
-    def _other_slot_for_agent(self, agent_idx):
-        if self._other_agent_to_slot is None:
-            return None
-        return self._other_agent_to_slot.get(int(agent_idx))
+    def _set_policy_per_slot(self, flat):
+        self.policy_per_slot_flatten = np.asarray(flat, dtype=np.int64).reshape(-1)
+        self.policy_per_slot = [
+            self.other_indices_arr[self.policy_per_slot_flatten == policy_idx].astype(np.int64, copy=False)
+            for policy_idx in range(self.num_other_policies)
+        ]
 
-    def _live_entity_to_agent(self):
-        partner_states = self.get_global_partner_state()
-        live_entity_ids = partner_states["ego_id"]
+    def _env_per_agent(self):
         ao = np.asarray(self.agent_offsets, dtype=np.int64)
-        lookup = {}
-        for env_i in range(self.num_envs):
-            map_id = int(self.map_ids[env_i])
-            cur, nxt = ao[env_i], ao[env_i + 1]
-            for agent_idx in range(cur, nxt):
-                entity_id = int(live_entity_ids[agent_idx])
-                if entity_id >= 0:
-                    lookup[(map_id, entity_id)] = agent_idx
-        return lookup
+        return np.searchsorted(ao[1:], np.arange(self.num_agents, dtype=np.int64), side="right")
 
-    def _init_corpus_entity_lookup(self):
-        """(map_id, entity_id) -> index in actions_agent_offsets flatten."""
-        ref_ao = np.asarray(self.actions_agent_offsets[0], dtype=np.int64)
-        ref_maps = np.asarray(self.actions_map_id[0], dtype=np.int64)
-        ref_ids = np.asarray(self.actions_agent_ids[0], dtype=np.int64)
-        self.corpus_agent_offsets = ref_ao
-        self.corpus_map_ids = ref_maps
-        self._entity_to_corpus = {}
-        for env_i in range(len(ref_maps)):
-            map_id = int(ref_maps[env_i])
-            cur, nxt = int(ref_ao[env_i]), int(ref_ao[env_i + 1])
-            for g in range(cur, nxt):
-                self._entity_to_corpus[(map_id, int(ref_ids[g]))] = g
-
-    def _corpus_index(self, map_id, entity_id):
-        if self._entity_to_corpus is None:
-            return None
-        return self._entity_to_corpus.get((int(map_id), int(entity_id)))
-
-    def _reset_minimum_distance(self):
-        if not self.agent_sampling:
-            return
-        self.minimum_distance.fill(np.inf)
-        self.minimum_ego_idx.fill(-1)
-        self.minimum_other_idx.fill(-1)
-        self.score_metric.fill(0.0)
+    def _map_per_agent(self):
+        return np.asarray(self.map_ids, dtype=np.int64)[self._env_per_agent()]
 
     def _partner_obs(self):
         start = self.ego_features
@@ -358,76 +352,97 @@ class Drive_PBT(pufferlib.PufferEnv):
         )
 
     def _update_minimum_distance(self):
+        """
+        input:
+        dist: (num_agents, num_partners)
+        other_ids: (num_agents, num_partners)
+        map_ids: (num_agents, num_partners)
+        output:
+        minimum_distance: (num_others, )
+        minimum_ego_idx: (num_other, )
+        """
         if not self.agent_sampling:
             return
-        rel_xy = self._partner_obs()[:, :, :2]
-        dist = np.linalg.norm(rel_xy, axis=2) / _PARTNER_REL_SCALE
-        visible = (rel_xy[:, :, 0] != 0) | (rel_xy[:, :, 1] != 0)
-
         partner_states = self.get_global_partner_state()
-        other_ids = partner_states["other_id"]
-        entity_to_agent = self._live_entity_to_agent()
-        ao = np.asarray(self.agent_offsets, dtype=np.int64)
+        other_ids = partner_states["other_id"].astype(np.int64)
+        rel_xy = self._partner_obs()[:, :, :2]
+        dist = np.linalg.norm(rel_xy, axis=-1) / _PARTNER_REL_SCALE
+        env_per_agent = self._env_per_agent()
+        env_ids = np.broadcast_to(env_per_agent[:, np.newaxis], other_ids.shape)
+        lut = self._env_entity_to_other_slot
 
-        for env_i in range(self.num_envs):
-            map_id = int(self.map_ids[env_i])
-            cur, nxt = ao[env_i], ao[env_i + 1]
-            for ego_idx in self.ego_indices:
-                if ego_idx < cur or ego_idx >= nxt:
-                    continue
-                for slot in np.flatnonzero(visible[ego_idx]):
-                    entity_id = int(other_ids[ego_idx, slot])
-                    corpus_idx = self._corpus_index(map_id, entity_id)
-                    if corpus_idx is None:
-                        continue
-                    partner_idx = entity_to_agent.get((map_id, entity_id))
-                    if partner_idx is None or partner_idx in self._ego_index_set:
-                        continue
-                    other_slot = self._other_slot_for_agent(partner_idx)
-                    if other_slot is None:
-                        continue
-                    new_dist = dist[ego_idx, slot]
-                    if new_dist < self.minimum_distance[other_slot]:
-                        self.minimum_distance[other_slot] = new_dist
-                        self.minimum_ego_idx[other_slot] = ego_idx
-                        self.minimum_other_idx[other_slot] = corpus_idx
+        ego_mask = np.zeros(self.num_agents, dtype=bool)
+        ego_mask[self.ego_indices] = True
+        valid = (
+            ego_mask[:, np.newaxis]
+            & (other_ids >= 0)
+            & (env_ids >= 0)
+            & (env_ids < lut.shape[0])
+            & (other_ids < lut.shape[1])
+        )
+        if not np.any(valid):
+            return
+
+        other_slot = np.full(other_ids.shape, -1, dtype=np.int64)
+        other_slot[valid] = lut[env_ids[valid], other_ids[valid]]
+        valid &= other_slot >= 0
+        if not np.any(valid):
+            return
+
+        ego_idx, slot = np.where(valid)
+        flat_other = other_slot[ego_idx, slot]
+        flat_dist = dist[ego_idx, slot]
+        order = np.lexsort((flat_dist, flat_other)) # sort by distance and then by other id
+        flat_other = flat_other[order]
+        flat_dist = flat_dist[order]
+        flat_ego = ego_idx[order]
+
+        change = np.concatenate([[True], flat_other[1:] != flat_other[:-1]]) # detect change in other id
+        best_other = flat_other[change]
+        best_dist = flat_dist[change]
+        best_ego = flat_ego[change]
+
+        best = best_dist < self.minimum_distance[best_other]
+        if not np.any(best):
+            return
+        self.minimum_distance[best_other[best]] = best_dist[best]
+        self.minimum_ego_idx[best_other[best]] = best_ego[best]
 
     def _on_episode_end(self):
         if not self.agent_sampling:
             return
-        tracked = np.isfinite(self.minimum_distance) & (self.minimum_ego_idx >= 0) & (self.minimum_other_idx >= 0)
+        tracked = (
+            np.isfinite(self.minimum_distance)
+            & (self.minimum_ego_idx >= 0)
+            & (self.minimum_other_global_idx >= 0)
+        )
         for other_slot in np.flatnonzero(tracked):
             ego_idx = int(self.minimum_ego_idx[other_slot])
             self.score_metric[other_slot] = self._episode_return[ego_idx]
         self._episode_return.fill(0.0)
+        # Update Score
         if getattr(self, "agent_sampler", None) is not None:
-            self.agent_sampler._distance_filtering(
+            self.agent_sampler.update_policy_score(
                 self.score_metric,
+                self.minimum_other_global_idx,
+                self.policy_per_slot_flatten,
                 self.minimum_distance,
-                self.minimum_other_idx,
-                self.policy_per_slot,
             )
 
     def reset(self, seed=0):
         binding.vec_reset(self.c_envs, seed)
         self.tick = 0
+        partner_resampled = False
         if self.agent_sampling:
             self._episode_return.fill(0.0)
-        self._reset_minimum_distance()
-        self._update_minimum_distance()
+            self._reset_other_indices()
+            partner_resampled = True
+            self._update_minimum_distance()
         info = [{"agent_offsets": self.agent_offsets, "map_ids": self.map_ids, "num_envs": self.num_envs, "ego_indices": self.ego_indices}]
-        if self.pbt_mode == "reactive":
-            info[0]["other_indices"] = self.other_indices
+        if self.pbt_mode == "reactive" or self.agent_sampling:
+            info[0]["other_indices"] = self.policy_per_slot
+        info[0]["partner_resampled"] = partner_resampled
         return self.observations, info
-
-    def _allocate_other_indices(self, num_agents):
-        # other_indices is a shuffled policy split of other_indices_arr (same agent set).
-        shuffled = self.other_indices_arr.copy()
-        np.random.shuffle(shuffled)
-        splits = np.array_split(shuffled, self.num_other_policies)
-        self.other_indices = [s.astype(np.int64, copy=False) for s in splits]
-        if getattr(self, "_other_agent_to_slot", None):
-            self._build_policy_per_slot()
 
     def _allocate_replay(self, num_agents, map_ids):
         self.replay_actions = np.zeros((num_agents, self.resample_frequency, 1), dtype=np.int32)
@@ -454,6 +469,7 @@ class Drive_PBT(pufferlib.PufferEnv):
             self._episode_return[self.ego_indices] += self.rewards[self.ego_indices]
         self.tick += 1
         info = []
+        partner_resampled = False
         if self.tick % self.report_interval == 0:
             log = binding.vec_log(self.c_envs, self.num_agents)
             if log:
@@ -464,6 +480,7 @@ class Drive_PBT(pufferlib.PufferEnv):
                     info.append(aggregate)
         if self.tick > 0 and self.resample_frequency > 0 and self.tick % self.resample_frequency == 0:
             self._on_episode_end()
+            partner_resampled = True
             self.tick = 0
             binding.vec_close(self.c_envs)
             agent_offsets, map_ids, num_envs, ego_indices = binding.shared(
@@ -493,15 +510,7 @@ class Drive_PBT(pufferlib.PufferEnv):
             self._ego_index_set = set(self.ego_indices.tolist())
             if self.pbt_mode == "replay":
                 self._allocate_replay(self.num_agents, self.map_ids)
-            else:
-                if self.agent_sampling:
-                    self.agent_sampler = AgentSampler(num_policies=self.num_other_policies, total_agents=self.total_agents, num_agents=self.num_agents)
-                    self.agent_sampler.sample()
-                else:
-                    self._allocate_other_indices(self.num_agents)
-                
-            if self.agent_sampling:
-                self._reinit_other_tracking()
+
             env_ids = []
             seed = np.random.randint(0, 2**32 - 1)
             for i in range(num_envs):
@@ -550,8 +559,10 @@ class Drive_PBT(pufferlib.PufferEnv):
 
             binding.vec_reset(self.c_envs, seed)
             self.terminals[:] = 1
-            self._reset_minimum_distance()
-            self._update_minimum_distance()
+            if self.agent_sampling or self.pbt_mode == "reactive":
+                self._reset_other_indices()
+            if self.agent_sampling:
+                self._update_minimum_distance()
         if len(info) == 0:
             info = [{"agent_offsets": self.agent_offsets, "map_ids": self.map_ids, "num_envs": self.num_envs, "ego_indices": self.ego_indices}]
         else:
@@ -559,13 +570,10 @@ class Drive_PBT(pufferlib.PufferEnv):
             info[0]["map_ids"] = self.map_ids
             info[0]["num_envs"] = self.num_envs
             info[0]["ego_indices"] = self.ego_indices
-        if self.pbt_mode == "reactive":
-            info[0]["other_indices"] = self.other_indices
-        # print(f"Rewards {self.rewards.max()} {self.rewards.mean()}")
+        if self.pbt_mode == "reactive" or self.agent_sampling:
+            info[0]["other_indices"] = self.policy_per_slot
+        info[0]["partner_resampled"] = partner_resampled
 
-        if self.agent_sampling: #before agent update, we need to update the score. where is the best place?
-            self.agent_sampler.update_policy_score(score, agent_idx, policy_idx, minimum_distance, minimum_other_idx, policy_per_slot)
-        
         return (self.observations, self.rewards, self.terminals, self.truncations, info)
 
     def get_global_agent_state(self):
