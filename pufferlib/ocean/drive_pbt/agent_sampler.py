@@ -59,8 +59,21 @@ class AgentSampler:
             if 0 <= g < self.total_agents:
                 self.new_score[g, p] = score[slot]
 
+    def _normalize_scores(self):
+        """Min-max normalize new_score across active entries to [0, 1]."""
+        active = self.new_score != 0
+        if not np.any(active):
+            return
+        vals = self.new_score[active]
+        lo, hi = vals.min(), vals.max()
+        if hi > lo:
+            self.new_score[active] = (vals - lo) / (hi - lo)
+        else:
+            self.new_score[active] = 1.0
+
     def update_policy_score(self, score, agent_idx, policy_idx, minimum_distance):
         self._distance_filtering(score, minimum_distance, policy_idx, agent_idx)
+        self._normalize_scores()
 
         # Only update (g, p) pairs that received a new score — avoids zeroing scores for non-passing slots
         active = self.new_score != 0

@@ -535,6 +535,7 @@ class Drive_PBT(pufferlib.PufferEnv):
                     offroad_behavior=self.offroad_behavior,
                     dt=self.dt,
                     episode_length=(int(self.episode_length) if self.episode_length is not None else None),
+                    termination_mode=(int(self.termination_mode) if self.termination_mode is not None else 0),
                     max_controlled_agents=self.max_controlled_agents,
                     map_id=map_ids[i],
                     max_agents=nxt - cur,
