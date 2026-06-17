@@ -61,6 +61,7 @@ class Drive_PBT(pufferlib.PufferEnv):
         population_path=None, # for replay
         ego_ratio=0.0, # for replay
         agent_sampling=False,
+        strategy="prioritized",
         scenario_log_path=None,
     ):
         # env
@@ -273,7 +274,7 @@ class Drive_PBT(pufferlib.PufferEnv):
                 self.minimum_other_global_idx = np.full(n_other, -1, dtype=np.int64)
                 self.score_metric = np.zeros(n_other, dtype=np.float32)
                 self.agent_sampler = AgentSampler(
-                    num_policies=self.num_other_policies, total_agents=self.total_agents
+                    num_policies=self.num_other_policies, strategy=strategy, total_agents=self.total_agents
                 )
 
     def _reset_other_indices(self):
@@ -320,14 +321,6 @@ class Drive_PBT(pufferlib.PufferEnv):
             flat = np.asarray(
                 self.agent_sampler.sample(self.minimum_other_global_idx), dtype=np.int64
             ).reshape(-1)
-            self._set_policy_per_slot(flat)
-        elif self.pbt_mode == "reactive":  # TODO: agent_sampler와 통합
-            n_other = int(self.other_indices_arr.size)
-            flat = np.full(n_other, -1, dtype=np.int64)
-            for policy_idx, slots in enumerate(
-                np.array_split(np.random.permutation(n_other), self.num_other_policies)
-            ):
-                flat[slots] = policy_idx
             self._set_policy_per_slot(flat)
 
     def _set_policy_per_slot(self, flat):
