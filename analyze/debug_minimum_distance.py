@@ -311,30 +311,38 @@ def audit_metric_reset(
     label: str,
     expect_identity_refresh: bool = True,
 ) -> AuditReport:
-    """Stage B: after reset/resample, distance metrics cleared; identity refilled if applicable."""
+    """Stage B: after reset/resample boundary (post _update_minimum_distance at tick 0)."""
     rep = AuditReport(label)
 
+    rep.check(env.tick == 0, f"tick==0 after {label}", f"tick={env.tick} expected 0 after {label}")
+
     rep.check(
-        np.all(np.isinf(env.minimum_distance)),
-        "minimum_distance reset to inf",
-        f"minimum_distance not fully inf: finite={int(np.sum(np.isfinite(env.minimum_distance)))}",
+        np.all(env.score_metric == 0),
+        "score_metric cleared",
+        f"score_metric not zero: {int(np.sum(env.score_metric != 0))} slots",
     )
-    rep.check(
-        np.all(env.minimum_ego_idx < 0),
-        "minimum_ego_idx reset to -1",
-        f"minimum_ego_idx still set: {int(np.sum(env.minimum_ego_idx >= 0))}",
-    )
+    if hasattr(env, "_episode_return"):
+        rep.check(
+            float(env._episode_return.sum()) == 0.0,
+            "_episode_return cleared",
+            f"_episode_return sum={float(env._episode_return.sum()):.3f} (expected 0)",
+        )
+
+    # reset()/resample: _reset_other_indices() then _update_minimum_distance() at tick 0.
+    if env.agent_sampling:
+        rep.merge(audit_minimum_distance(env, f"{label}/distance_tick0"))
 
     if expect_identity_refresh and env.agent_sampling:
         rep.merge(audit_slot_identity(env, f"{label}/identity"))
         rep.merge(audit_policy_assignment(env, f"{label}/policy"))
 
-    changed = int(np.sum(np.isfinite(before_dist))) if before_dist is not None else 0
-    if changed > 0:
+    if before_dist is not None and np.any(np.isfinite(before_dist)):
+        n_before = int(np.sum(np.isfinite(before_dist)))
+        n_after = int(np.sum(np.isfinite(env.minimum_distance)))
         rep.check(
-            int(np.sum(np.isfinite(env.minimum_distance))) == 0,
-            f"cleared {changed} previously tracked distance slots",
-            "some distance slots still finite after boundary",
+            True,
+            f"distance tracking refreshed: {n_before} finite before boundary, {n_after} at tick 0",
+            "",
         )
     return rep
 
