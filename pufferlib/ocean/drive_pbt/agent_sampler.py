@@ -5,6 +5,7 @@ class AgentSampler:
     def __init__(
         self,
         num_policies,
+        strategy="prioritized",
         score_transform="power",
         temperature=1.0,
         eps=0.05,
@@ -17,6 +18,7 @@ class AgentSampler:
     ):
         self.num_policies = int(num_policies)
         self.total_agents = int(total_agents)
+        self.strategy = strategy
 
         self.score_transform = score_transform
         self.temperature = temperature
@@ -50,29 +52,46 @@ class AgentSampler:
 
         self.new_score.fill(0.0)
         for slot in np.flatnonzero(keep):
-            policy_idx = int(policy_per_slot[slot])
-            if policy_idx < 0:
+            p = int(policy_per_slot[slot])
+            if not (0 <= p < self.num_policies):
                 continue
             g = int(corpus_idx[slot])
             if 0 <= g < self.total_agents:
-                self.new_score[g, policy_idx] = score[slot]
+                self.new_score[g, p] = score[slot]
 
-    def update_policy_score(self, score, agent_idx, policy_idx, minimum_distance, ):
+    def _normalize_scores(self):
+        """Min-max normalize new_score across active entries to [0, 1]."""
+        active = self.new_score != 0
+        if not np.any(active):
+            return
+        vals = self.new_score[active]
+        lo, hi = vals.min(), vals.max()
+        if hi > lo:
+            self.new_score[active] = (vals - lo) / (hi - lo)
+        else:
+            self.new_score[active] = 1.0
 
-        self._distance_filtering(score, minimum_distance, policy_idx, agent_idx) # (total_agents, num_policies)
-        # TODO: self.policy_per_slot이랑 self.policy_idx 맞는지 확인
-        new_score_col = self.new_score[:, policy_idx]
+    def update_policy_score(self, score, agent_idx, policy_idx, minimum_distance):
+        self._distance_filtering(score, minimum_distance, policy_idx, agent_idx)
+        self._normalize_scores()
 
-        self.unseen_policy_weights[agent_idx, policy_idx] = 0.0  #  no longer unseen -> 0 to unseen_policy_weights
+        # Only update (g, p) pairs that received a new score — avoids zeroing scores for non-passing slots
+        active = self.new_score != 0
+        self.policy_scores[active] = (1 - self.alpha) * self.policy_scores[active] + self.alpha * self.new_score[active]
 
-        old_score = self.policy_scores[:, policy_idx]
+        # Mark as seen for all valid corpus entities that played this episode (distance와 무관)
+        a = np.asarray(agent_idx, dtype=np.int64).reshape(-1)
+        p = np.asarray(policy_idx, dtype=np.int64).reshape(-1)
+        valid = (a >= 0) & (a < self.total_agents) & (p >= 0) & (p < self.num_policies)
+        self.unseen_policy_weights[a[valid], p[valid]] = 0.0
 
-        self.policy_scores[:, policy_idx] = (1 - self.alpha) * old_score + self.alpha * new_score_col
-
-    def _update_staleness(self, selected_idx):
+    def _update_staleness(self, policy_per_corpus):
+        """policy_per_corpus: (total_agents,) with -1 for corpus entities not active this episode."""
         if self.staleness_coef > 0:
-            self.policy_staleness = self.policy_staleness + 1 # update_staleness to all idx
-            self.policy_staleness[np.arange(self.total_agents), selected_idx] = 0
+            self.policy_staleness += 1
+            assigned = np.flatnonzero(policy_per_corpus >= 0)
+            if assigned.size > 0:
+                self.policy_staleness[assigned, policy_per_corpus[assigned]] = 0
 
     def _sample_replay_policy(self, agent_idx):
         weights = self.sample_weights(agent_idx)
@@ -80,40 +99,53 @@ class AgentSampler:
         if np.isclose(np.sum(weights), 0):
             weights = np.ones(self.num_policies, dtype=np.float64) / self.num_policies
 
+        weights = weights / weights.sum()  # float 오차로 합이 1이 아닐 경우 재정규화
         policy_idx = np.random.choice(self.num_policies, p=weights)
 
         return int(policy_idx)
 
     def _sample_unseen_policy(self, agent_idx):
         weights = self.unseen_policy_weights[agent_idx].astype(np.float64)
+        s = weights.sum()
 
-        if weights.sum() == 0:
+        if s == 0:
             policy_idx = np.random.randint(self.num_policies)
         else:
-            probs = weights / weights.sum()
-            policy_idx = np.random.choice(self.num_policies, p=probs)
+            policy_idx = np.random.choice(self.num_policies, p=weights / s)
 
         return int(policy_idx)
 
     def sample(self, corpus_idx_per_slot):
         corpus_idx_per_slot = np.asarray(corpus_idx_per_slot, dtype=np.int64).reshape(-1)
-        policy_idx = np.empty(corpus_idx_per_slot.shape[0], dtype=np.int64)
-        for slot in range(corpus_idx_per_slot.shape[0]):
+        n_other = corpus_idx_per_slot.size
+        flat = np.full(n_other, -1, dtype=np.int64)
+
+        if self.strategy == "uniform":
+            for policy_idx, slots in enumerate(
+                np.array_split(np.random.permutation(n_other), self.num_policies)
+            ):
+                flat[slots] = policy_idx
+            return flat
+
+        # "prioritized": PLR-based sampling per corpus entity
+        policy_per_corpus = np.full(self.total_agents, -1, dtype=np.int64)
+        for slot in range(n_other):
             g = int(corpus_idx_per_slot[slot])
-            if g < 0:
-                policy_idx[slot] = np.random.randint(self.num_policies)
+            if not (0 <= g < self.total_agents):
+                flat[slot] = np.random.randint(self.num_policies)
                 continue
-            policy_unseen = self.unseen_policy_weights[g] > 0
-            num_unseen = policy_unseen.sum()
-            proportion_seen = (self.num_policies - num_unseen) / self.num_policies
-            if proportion_seen >= self.rho and np.random.rand() < proportion_seen:
-                policy_idx[slot] = self._sample_replay_policy(g)
-            else:
-                policy_idx[slot] = self._sample_unseen_policy(g)
+            if policy_per_corpus[g] < 0:  # sample once per corpus entity per episode
+                policy_unseen = self.unseen_policy_weights[g] > 0
+                num_unseen = policy_unseen.sum()
+                proportion_seen = (self.num_policies - num_unseen) / self.num_policies
+                if proportion_seen >= self.rho and np.random.rand() < proportion_seen:
+                    policy_per_corpus[g] = self._sample_replay_policy(g)
+                else:
+                    policy_per_corpus[g] = self._sample_unseen_policy(g)
+            flat[slot] = policy_per_corpus[g]
 
-        self._update_staleness(policy_idx)
-
-        return policy_idx
+        self._update_staleness(policy_per_corpus)
+        return flat
 
     def sample_weights(self, agent_idx):
         scores = self.policy_scores[agent_idx]  # (num_policies,)
