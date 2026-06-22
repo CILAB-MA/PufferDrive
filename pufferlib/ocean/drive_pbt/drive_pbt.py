@@ -256,13 +256,36 @@ class Drive_PBT(pufferlib.PufferEnv):
         if pbt_mode == "replay":
             fp_actions = os.path.join(saved_dir, "other_actions_actions.npy")
             self.other_actions = np.load(fp_actions, mmap_mode="r")
-            self._allocate_replay(self.num_agents, self.map_ids)
+            if not agent_sampling:
+                self._allocate_replay(self.num_agents, self.map_ids)
+            else:
+                self.replay_actions = np.zeros(
+                    (self.num_agents, self.resample_frequency, 1), dtype=np.int32
+                )
+            self._episode_return = np.zeros(self.num_agents, dtype=np.float32)
+            n_other = int(self.other_indices_arr.size)
+            self.minimum_distance = np.full(n_other, np.inf, dtype=np.float32)
+            self.minimum_ego_idx = np.full(n_other, -1, dtype=np.int64)
+            self.minimum_other_local_idx = np.full(n_other, -1, dtype=np.int64)
+            self.minimum_other_global_idx = np.full(n_other, -1, dtype=np.int64)
+            self.minimum_map_idx = np.full(n_other, -1, dtype=np.int64)
+            self.score_metric = np.zeros(n_other, dtype=np.float32)
+            self.rollout_flatten = np.full(n_other, -1, dtype=np.int64)
+
+            self.agent_sampler = AgentSampler(
+                num_population=int(self.other_actions.shape[0]),
+                strategy=strategy,
+                pbt_mode=self.pbt_mode,
+                num_assignments=self.num_maps,
+            )
         else:
             populations = [
                 f for f in os.listdir(population_path)
                 if f.endswith(".pt")
             ]
             self.num_other_policies = len(populations)
+            n_other = int(self.other_indices_arr.size)
+            self.policy_per_slot_flatten = np.full(n_other, -1, dtype=np.int64)
             if self.agent_sampling:
                 if self.total_agents < 1:
                     raise ValueError(f"total_agents must be >= 1, got {self.total_agents}")
@@ -274,61 +297,88 @@ class Drive_PBT(pufferlib.PufferEnv):
                 self.minimum_other_global_idx = np.full(n_other, -1, dtype=np.int64)
                 self.score_metric = np.zeros(n_other, dtype=np.float32)
                 self.agent_sampler = AgentSampler(
-                    num_policies=self.num_other_policies, strategy=strategy, total_agents=self.total_agents
+                    num_population=self.num_other_policies,
+                    strategy=strategy,
+                    pbt_mode=self.pbt_mode,
+                    num_assignments=self.total_agents,
                 )
 
     def _reset_other_indices(self):
         """Episode/rollout start (after vec_reset): metrics, slot identity, LUT, policy assignment."""
-        if self.agent_sampling:
-            # init metrics
-            self.minimum_distance.fill(np.inf)
-            self.minimum_ego_idx.fill(-1)
-            self.minimum_other_local_idx.fill(-1)
-            self.minimum_other_global_idx.fill(-1)
-            self.score_metric.fill(0.0)
+        # init metrics
+        self.minimum_distance.fill(np.inf)
+        self.minimum_ego_idx.fill(-1)
+        self.minimum_other_local_idx.fill(-1)
+        self.minimum_other_global_idx.fill(-1)
 
-            # assign other indices
-            live_entity_ids = self.get_global_partner_state()["ego_id"].astype(np.int64)
-            map_per_agent = self._map_per_agent()
-            entity_ids = live_entity_ids[self.other_mask]
-            map_ids = map_per_agent[self.other_mask]
-            gid = self.global_ids
-            valid = (
-                (entity_ids >= 0)
-                & (map_ids >= 0)
-                & (map_ids < gid.shape[0])
-                & (entity_ids < gid.shape[1])
-            )
-            self.minimum_other_local_idx[valid] = entity_ids[valid]
-            self.minimum_other_global_idx[valid] = gid[map_ids[valid], entity_ids[valid]]
+        if self.pbt_mode == "replay":
+            self.rollout_flatten.fill(-1)
+            self.replay_actions.fill(-1)
+            self.minimum_map_idx.fill(-1)
+        elif self.pbt_mode == "reactive":
+            self.policy_per_slot_flatten.fill(-1)
 
-            # (env_i, local entity id) -> other slot; map_id alone collides across envs on same map
-            max_entity = gid.shape[1]
-            self._env_entity_to_other_slot = np.full((self.num_envs, max_entity), -1, dtype=np.int64)
-            env_per_other = self._env_per_agent()[self.other_indices_arr]
-            tracked = self.minimum_other_local_idx >= 0
-            slots = np.flatnonzero(tracked)
-            envs = env_per_other[tracked]
-            entities = self.minimum_other_local_idx[tracked]
-            in_bounds = (
-                (envs >= 0)
-                & (envs < self.num_envs)
-                & (entities >= 0)
-                & (entities < max_entity)
-            )
-            self._env_entity_to_other_slot[envs[in_bounds], entities[in_bounds]] = slots[in_bounds]
+        # assign other indices
+        live_entity_ids = self.get_global_partner_state()["ego_id"].astype(np.int64)
+        map_per_agent = self._map_per_agent()
+        entity_ids = live_entity_ids[self.other_mask]
+        map_ids = map_per_agent[self.other_mask]
+        gid = self.global_ids
+        valid = (
+            (entity_ids >= 0)
+            & (map_ids >= 0)
+            & (map_ids < gid.shape[0])
+            & (entity_ids < gid.shape[1])
+        )
+        self.minimum_other_local_idx[valid] = entity_ids[valid]
+        self.minimum_other_global_idx[valid] = gid[map_ids[valid], entity_ids[valid]]
+        if self.pbt_mode == "replay":
+            self.minimum_map_idx[valid] = map_ids[valid]
 
-            flat = np.asarray(
-                self.agent_sampler.sample(self.minimum_other_global_idx), dtype=np.int64
-            ).reshape(-1)
+        # (env_i, local entity id) -> other slot; map_id alone collides across envs on same map
+        max_entity = gid.shape[1]
+        self._env_entity_to_other_slot = np.full((self.num_envs, max_entity), -1, dtype=np.int64)
+        env_per_other = self._env_per_agent()[self.other_indices_arr]
+        tracked = self.minimum_other_local_idx >= 0
+        slots = np.flatnonzero(tracked)
+        envs = env_per_other[tracked]
+        entities = self.minimum_other_local_idx[tracked]
+        in_bounds = (
+            (envs >= 0)
+            & (envs < self.num_envs)
+            & (entities >= 0)
+            & (entities < max_entity)
+        )
+        self._env_entity_to_other_slot[envs[in_bounds], entities[in_bounds]] = slots[in_bounds]
+        corpus_idx_per_slot = self.minimum_other_global_idx if self.pbt_mode == "reactive" else self.minimum_map_idx
+        flat = np.asarray(
+            self.agent_sampler.sample(corpus_idx_per_slot), dtype=np.int64
+        ).reshape(-1)
+        if self.pbt_mode == "reactive":
             self._set_policy_per_slot(flat)
+        elif self.pbt_mode == "replay":
+            self._set_replay_per_slot(flat)
 
     def _set_policy_per_slot(self, flat):
-        self.policy_per_slot_flatten = np.asarray(flat, dtype=np.int64).reshape(-1)
+        flat = np.asarray(flat, dtype=np.int64).reshape(-1)
+        np.copyto(self.policy_per_slot_flatten, flat)
         self.policy_per_slot = [
             self.other_indices_arr[self.policy_per_slot_flatten == policy_idx].astype(np.int64, copy=False)
             for policy_idx in range(self.num_other_policies)
         ]
+
+    def _set_replay_per_slot(self, flat):
+        flat = np.asarray(flat, dtype=np.int64).reshape(-1)
+        np.copyto(self.rollout_flatten, flat)
+        agent_ind = 0
+        for map_id, rollout_idx in enumerate(flat):
+            map_indices = np.where(self.actions_map_id == map_id)[0][0]
+            agent_offsets = self.actions_agent_offsets[rollout_idx, map_indices:map_indices+2]
+            num_agents_for_map = agent_offsets[1] - agent_offsets[0]
+            if agent_ind + num_agents_for_map> self.num_agents:
+                num_agents_for_map = self.num_agents - agent_ind
+            self.replay_actions[agent_ind:agent_ind+num_agents_for_map] = self.other_actions[rollout_idx, agent_offsets[0]:agent_offsets[0] + num_agents_for_map].copy()
+            agent_ind += num_agents_for_map
 
     def _env_per_agent(self):
         ao = np.asarray(self.agent_offsets, dtype=np.int64)
@@ -402,8 +452,6 @@ class Drive_PBT(pufferlib.PufferEnv):
         self.minimum_ego_idx[best_other[best]] = best_ego[best]
 
     def _on_episode_end(self):
-        if not self.agent_sampling:
-            return
         tracked = (
             np.isfinite(self.minimum_distance)
             & (self.minimum_ego_idx >= 0)
@@ -414,13 +462,24 @@ class Drive_PBT(pufferlib.PufferEnv):
             self.score_metric[other_slot] = self._episode_return[ego_idx]
         self._episode_return.fill(0.0)
         # Update Score
-        if getattr(self, "agent_sampler", None) is not None:
+        if self.pbt_mode == "reactive":
             self.agent_sampler.update_policy_score(
                 self.score_metric,
                 self.minimum_other_global_idx,
                 self.policy_per_slot_flatten,
                 self.minimum_distance,
             )
+        elif self.pbt_mode == "replay":
+            map_per_other = self._map_per_agent()[self.other_indices_arr]
+            self.agent_sampler.update_policy_score(
+                self.score_metric,
+                self.minimum_other_global_idx,
+                self.rollout_flatten,
+                self.minimum_distance,
+                map_idx=map_per_other, # Global map id in [0, env.num_maps]
+            )
+        else:
+            raise ValueError(f"Invalid pbt mode: {self.pbt_mode}")
 
     def reset(self, seed=0):
         binding.vec_reset(self.c_envs, seed)
@@ -432,7 +491,7 @@ class Drive_PBT(pufferlib.PufferEnv):
             partner_resampled = True
             self._update_minimum_distance()
         info = [{"agent_offsets": self.agent_offsets, "map_ids": self.map_ids, "num_envs": self.num_envs, "ego_indices": self.ego_indices}]
-        if self.pbt_mode == "reactive" or self.agent_sampling:
+        if self.pbt_mode == "reactive":
             info[0]["other_indices"] = self.policy_per_slot
         info[0]["partner_resampled"] = partner_resampled
         return self.observations, info
@@ -501,7 +560,7 @@ class Drive_PBT(pufferlib.PufferEnv):
             self.other_mask[self.ego_indices] = False
             self.other_indices_arr = np.flatnonzero(self.other_mask).astype(np.int64)
             self._ego_index_set = set(self.ego_indices.tolist())
-            if self.pbt_mode == "replay":
+            if self.pbt_mode == "replay" and not self.agent_sampling: # TODO: UNIFORM SAMPLING은 옮겨줘야 함
                 self._allocate_replay(self.num_agents, self.map_ids)
 
             env_ids = []
@@ -564,7 +623,7 @@ class Drive_PBT(pufferlib.PufferEnv):
             info[0]["map_ids"] = self.map_ids
             info[0]["num_envs"] = self.num_envs
             info[0]["ego_indices"] = self.ego_indices
-        if self.pbt_mode == "reactive" or self.agent_sampling:
+        if self.pbt_mode == "reactive":
             info[0]["other_indices"] = self.policy_per_slot
         info[0]["partner_resampled"] = partner_resampled
 
