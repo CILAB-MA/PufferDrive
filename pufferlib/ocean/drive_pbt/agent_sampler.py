@@ -12,7 +12,7 @@ class AgentSampler:
         eps=0.05,
         rho=0.2,
         alpha=1.0,
-        staleness_coef=0,
+        staleness_coef=0.1,
         staleness_transform="power",
         staleness_temperature=1.0,
         num_assignments=0, # when pbt_mode is replay, this is num_maps. when pbt_mode is reactive, this is total_agents.
@@ -33,9 +33,10 @@ class AgentSampler:
 
         self.unseen_population_weights = np.ones((self.num_assignments, self.num_population), dtype=np.float64)
         self.population_scores = np.zeros((self.num_assignments, self.num_population), dtype=np.float64)
-        self.population_staleness = np.zeros((self.num_assignments, self.num_population), dtype=np.float64)
+        self.population_staleness = np.zeros((self.num_assignments, self.num_population), dtype=np.float64) # Todo : population_staleness 의미가 있을까?
         self.distance_threshold = 0.02 # TODO: args로 만들기
         self.new_score = np.zeros((self.num_assignments, self.num_population), dtype=np.float64)
+        self.encountered = np.zeros(self.num_assignments, dtype=bool)
 
     def _distance_filtering(self, score, minimum_distance, assignment_idx, agent_idx, map_idx=None):
         score = np.asarray(score, dtype=np.float64).reshape(-1)
@@ -64,7 +65,7 @@ class AgentSampler:
         tracked = (corpus_idx >= 0) & np.isfinite(dist)
         keep = tracked & (dist >= self.distance_threshold)
 
-        self.new_score.fill(0.0)
+        self.new_score.fill(np.nan)
         if self.pbt_mode == "reactive":
             for slot in np.flatnonzero(keep):
                 p = int(policy_per_slot[slot])
@@ -112,16 +113,14 @@ class AgentSampler:
         return map_score
 
     def _normalize_scores(self):
-        """Min-max normalize new_score across active entries to [0, 1]."""
-        active = self.new_score != 0
+        """Min-max normalize new_score to [0, 1]. hi==lo → 0/0=nan → no EMA update."""
+        active = np.isfinite(self.new_score)
         if not np.any(active):
             return
         vals = self.new_score[active]
         lo, hi = vals.min(), vals.max()
-        if hi > lo:
+        with np.errstate(invalid="ignore"): # if hi == lo, 0/0 = nan skip
             self.new_score[active] = (vals - lo) / (hi - lo)
-        else:
-            self.new_score[active] = 1.0
 
     def update_policy_score(self, score, agent_idx, policy_idx, minimum_distance,
                             map_idx=None, rollout_idx=None):
@@ -132,7 +131,7 @@ class AgentSampler:
         self._normalize_scores()
 
         # Only update (g, p) pairs that received a new score — avoids zeroing scores for non-passing slots
-        active = self.new_score != 0
+        active = np.isfinite(self.new_score)
         self.population_scores[active] = (1 - self.alpha) * self.population_scores[active] + self.alpha * self.new_score[active]
 
         # Mark as seen for all valid corpus entities that played this episode (distance와 무관)
@@ -141,18 +140,20 @@ class AgentSampler:
             p = np.asarray(policy_idx, dtype=np.int64).reshape(-1)
             valid = (a >= 0) & (a < self.num_assignments) & (p >= 0) & (p < self.num_population)
             self.unseen_population_weights[a[valid], p[valid]] = 0.0
+            self.encountered[a[valid]] = True
         elif self.pbt_mode == "replay":
             m = np.asarray(map_idx, dtype=np.int64).reshape(-1)
             r = np.asarray(rollout_idx, dtype=np.int64).reshape(-1)
             valid = (m >= 0) & (m < self.num_assignments) & (r >= 0) & (r < self.num_population)
             self.unseen_population_weights[m[valid], r[valid]] = 0.0
+            self.encountered[m[valid]] = True
         else:
             raise ValueError(f"Invalid pbt mode: {self.pbt_mode}")
 
     def _update_staleness(self, assignment_per_corpus):
         """assignment_per_corpus: (num_assignments,) with -1 for corpus entities not active this episode."""
         if self.staleness_coef > 0:
-            self.population_staleness += 1
+            self.population_staleness[self.encountered] += 1
             assigned = np.flatnonzero(assignment_per_corpus >= 0)
             if assigned.size > 0:
                 self.population_staleness[assigned, assignment_per_corpus[assigned]] = 0
@@ -185,26 +186,26 @@ class AgentSampler:
         flat = np.full(n_other, -1, dtype=np.int64)
 
         if self.strategy == "uniform":
-            flat = corpus_idx_per_slot.copy()
+            flat = np.tile(np.arange(self.num_population), -(-n_other // self.num_population))[:n_other]
             np.random.shuffle(flat)
             return flat
 
         # "prioritized": PLR-based sampling per corpus entity
+        valid = (corpus_idx_per_slot >= 0) & (corpus_idx_per_slot < self.num_assignments)
+        flat[~valid] = np.random.randint(self.num_population, size=int((~valid).sum()))
+
+        if self.encountered.any():
+            global_proportion_seen = (self.unseen_population_weights[self.encountered] == 0).mean()
+        else:
+            global_proportion_seen = 0.0
+
         assignment_per_corpus = np.full(self.num_assignments, -1, dtype=np.int64)
-        for slot in range(n_other):
-            g = int(corpus_idx_per_slot[slot])
-            if not (0 <= g < self.num_assignments):
-                flat[slot] = np.random.randint(self.num_population)
-                continue
-            if assignment_per_corpus[g] < 0:  # sample once per corpus entity per episode
-                policy_unseen = self.unseen_population_weights[g] > 0
-                num_unseen = policy_unseen.sum()
-                proportion_seen = (self.num_population - num_unseen) / self.num_population
-                if proportion_seen >= self.rho and np.random.rand() < proportion_seen:
-                    assignment_per_corpus[g] = self._sample_replay_policy(g)
-                else:
-                    assignment_per_corpus[g] = self._sample_unseen_policy(g)
-            flat[slot] = assignment_per_corpus[g]
+        for g in np.unique(corpus_idx_per_slot[valid]):
+            if global_proportion_seen >= self.rho and np.random.rand() < global_proportion_seen:
+                assignment_per_corpus[g] = self._sample_replay_policy(int(g))
+            else:
+                assignment_per_corpus[g] = self._sample_unseen_policy(int(g))
+        flat[valid] = assignment_per_corpus[corpus_idx_per_slot[valid]]
 
         self._update_staleness(assignment_per_corpus)
         return flat
@@ -220,6 +221,7 @@ class AgentSampler:
         if z > 0:
             weights /= z
 
+        staleness_weights = 0
         if self.staleness_coef > 0:
             staleness = self.population_staleness[agent_idx]
             staleness_weights = self._score_transform(
@@ -245,8 +247,9 @@ class AgentSampler:
             masked_scores = scores.copy()
             if unseen is not None:
                 masked_scores[unseen > 0] = -float("inf")
-            argmax = np.random.choice(np.flatnonzero(np.isclose(masked_scores, masked_scores.max())))
-            weights[argmax] = 1.0
+            max_val = masked_scores.max()
+            candidates = np.flatnonzero(np.isclose(masked_scores, max_val)) if np.isfinite(max_val) else np.arange(len(masked_scores))
+            weights[np.random.choice(candidates)] = 1.0
         elif transform == "eps_greedy":
             weights = np.zeros_like(scores)
             weights[scores.argmax()] = 1.0 - self.eps
