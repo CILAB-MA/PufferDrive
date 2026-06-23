@@ -286,6 +286,7 @@ class Drive_PBT(pufferlib.PufferEnv):
             self.num_other_policies = len(populations)
             n_other = int(self.other_indices_arr.size)
             self.policy_per_slot_flatten = np.full(n_other, -1, dtype=np.int64)
+            self.policy_per_slot = [np.array([], dtype=np.int64) for _ in range(self.num_other_policies)]
             if self.agent_sampling:
                 if self.total_agents < 1:
                     raise ValueError(f"total_agents must be >= 1, got {self.total_agents}")
