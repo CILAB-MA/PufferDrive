@@ -75,42 +75,48 @@ class AgentSampler:
                 if 0 <= g < self.num_assignments:
                     self.new_score[g, p] = score[slot]
         elif self.pbt_mode == "replay":
-            map_score = self._aggregate_mean_by_map(score, keep, map_idx)
-            for slot in np.flatnonzero(keep):
-                m = int(map_idx[slot])
-                r = int(rollout_idx[slot])
+            map_ids, map_scores, map_rollouts = self._aggregate_mean_by_map(
+                score, keep, map_idx, rollout_idx
+            )
+            for i in range(map_ids.size):
+                m = int(map_ids[i])
+                r = int(map_rollouts[i])
                 if not (0 <= m < self.num_assignments):
                     continue
                 if not (0 <= r < self.num_population):
                     continue
-                self.new_score[m, r] = map_score[slot]
+                self.new_score[m, r] = map_scores[i]
         else:
             raise ValueError(f"Invalid pbt mode: {self.pbt_mode}")
 
-    def _aggregate_mean_by_map(self, score, keep, map_idx):
-        """Per-slot map mean: each slot gets the mean score of its map among kept slots."""
+    def _aggregate_mean_by_map(self, score, keep, map_idx, rollout_idx):
+        """Aggregate kept slot scores to unique maps; returns parallel (map_ids, scores, rollouts)."""
         map_idx = np.asarray(map_idx, dtype=np.int64).reshape(-1)
         score = np.asarray(score, dtype=np.float64).reshape(-1)
         keep = np.asarray(keep, dtype=bool).reshape(-1)
-        if not (score.shape == map_idx.shape == keep.shape):
+        rollout_idx = np.asarray(rollout_idx, dtype=np.int64).reshape(-1)
+        if not (score.shape == map_idx.shape == keep.shape == rollout_idx.shape):
             raise ValueError(
-                "score, keep, map_idx must match, "
-                f"got {score.shape}, {keep.shape}, {map_idx.shape}"
+                "score, keep, map_idx, rollout_idx must match, "
+                f"got {score.shape}, {keep.shape}, {map_idx.shape}, {rollout_idx.shape}"
             )
 
-        map_score = np.zeros_like(score)
         valid = keep & (map_idx >= 0) & (map_idx < self.num_assignments)
         if not np.any(valid):
-            return map_score
+            return (
+                np.empty(0, dtype=np.int64),
+                np.empty(0, dtype=np.float64),
+                np.empty(0, dtype=np.int64),
+            )
 
         vm = map_idx[valid]
         vs = score[valid]
-        unique_maps, inv = np.unique(vm, return_inverse=True)
-        means = np.bincount(inv, weights=vs) / np.bincount(inv)
-        map_mean = np.zeros(self.num_assignments, dtype=np.float64)
-        map_mean[unique_maps] = means
-        map_score[valid] = map_mean[map_idx[valid]]
-        return map_score
+        vr = rollout_idx[valid]
+        map_ids, inv = np.unique(vm, return_inverse=True)
+        _, first = np.unique(inv, return_index=True)
+        map_scores = np.bincount(inv, weights=vs) / np.bincount(inv)
+        map_rollouts = vr[first]
+        return map_ids, map_scores, map_rollouts
 
     def _normalize_scores(self):
         """Min-max normalize new_score to [0, 1]. hi==lo → 0/0=nan → no EMA update."""

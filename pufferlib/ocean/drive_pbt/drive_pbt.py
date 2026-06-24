@@ -248,11 +248,11 @@ class Drive_PBT(pufferlib.PufferEnv):
         fp_ao = os.path.join(saved_dir, "other_actions_agent_offsets.npy")
         fp_m = os.path.join(saved_dir, "other_actions_map_ids.npy")
         fp_gid = os.path.join(saved_dir, "global_ids.npy")
-        self.actions_agent_offsets = np.load(fp_ao, mmap_mode="r")
-        self.actions_map_id = np.load(fp_m, mmap_mode="r")
+        self.actions_agent_offsets = np.load(fp_ao, mmap_mode="r")[0] # TOOD: (10, 10001)으로 하는데, 그럴 필요 없음. 데이터 (10001,)으로 줄이기
+        self.actions_map_id = np.load(fp_m, mmap_mode="r")[0] # TOOD: (10, 10000)으로 하는데, 그럴 필요 없음. 데이터 (10000,)으로 줄이기
         if self.agent_sampling:
             self.global_ids = np.load(fp_gid, mmap_mode="r")
-            self.total_agents = int(self.actions_agent_offsets[0, -1])
+            self.total_agents = int(self.actions_agent_offsets[-1])
         if pbt_mode == "replay":
             fp_actions = os.path.join(saved_dir, "other_actions_actions.npy")
             self.other_actions = np.load(fp_actions, mmap_mode="r")
@@ -374,7 +374,7 @@ class Drive_PBT(pufferlib.PufferEnv):
         agent_ind = 0
         for map_id, rollout_idx in enumerate(flat):
             map_indices = np.where(self.actions_map_id == map_id)[0][0]
-            agent_offsets = self.actions_agent_offsets[rollout_idx, map_indices:map_indices+2]
+            agent_offsets = self.actions_agent_offsets[map_indices:map_indices+2]
             num_agents_for_map = agent_offsets[1] - agent_offsets[0]
             if agent_ind + num_agents_for_map> self.num_agents:
                 num_agents_for_map = self.num_agents - agent_ind
@@ -517,8 +517,8 @@ class Drive_PBT(pufferlib.PufferEnv):
         if self.pbt_mode == "replay":
             self.actions[self.other_indices_arr] = self.replay_actions[self.other_indices_arr, self.tick, :]
         binding.vec_step(self.c_envs)
-        self._update_minimum_distance()
         if self.agent_sampling: # TODO: 현재는 Return 기반만 구현되어 있음
+            self._update_minimum_distance()
             self._episode_return[self.ego_indices] += self.rewards[self.ego_indices]
         self.tick += 1
         info = []
@@ -532,7 +532,8 @@ class Drive_PBT(pufferlib.PufferEnv):
                 if aggregate:
                     info.append(aggregate)
         if self.tick > 0 and self.resample_frequency > 0 and self.tick % self.resample_frequency == 0:
-            self._on_episode_end()
+            if self.agent_sampling:
+                self._on_episode_end()
             partner_resampled = True
             self.tick = 0
             binding.vec_close(self.c_envs)
@@ -613,9 +614,8 @@ class Drive_PBT(pufferlib.PufferEnv):
 
             binding.vec_reset(self.c_envs, seed)
             self.terminals[:] = 1
-            if self.agent_sampling or self.pbt_mode == "reactive":
-                self._reset_other_indices()
             if self.agent_sampling:
+                self._reset_other_indices()
                 self._update_minimum_distance()
         if len(info) == 0:
             info = [{"agent_offsets": self.agent_offsets, "map_ids": self.map_ids, "num_envs": self.num_envs, "ego_indices": self.ego_indices}]
