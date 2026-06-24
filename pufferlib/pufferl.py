@@ -251,7 +251,7 @@ class PuffeRL:
 
         # Dashboard
         self.model_size = sum(p.numel() for p in policy.parameters() if p.requires_grad)
-        # self.print_dashboard(clear=True)
+        self.print_dashboard(clear=True)
 
     @property
     def uptime(self):
@@ -812,7 +812,7 @@ class PuffeRL:
         if done_training or self.global_step == 0 or time.time() > self.last_log_time + 0.25:
             logs = self.mean_and_log()
             self.losses = losses
-            # self.print_dashboard()
+            self.print_dashboard()
             self.stats = defaultdict(list)
             self.last_log_time = time.time()
             self.last_log_step = self.global_step
@@ -1382,7 +1382,7 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
     if logs is not None:
         all_logs.append(logs)
 
-    # pufferl.print_dashboard()
+    pufferl.print_dashboard()
     model_path = pufferl.close()
     pufferl.logger.close(model_path)
     return all_logs
@@ -1473,7 +1473,7 @@ def train_pbt(env_name, args=None, vecenv=None, policy=None, logger=None, config
     if logs is not None:
         all_logs.append(logs)
 
-    # pufferl.print_dashboard()
+    pufferl.print_dashboard()
     model_path = pufferl.close()
     pufferl.logger.close(model_path)
     return all_logs
