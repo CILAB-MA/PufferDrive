@@ -194,7 +194,7 @@ class AgentSampler:
         if self.strategy == "uniform":
             flat = np.tile(np.arange(self.num_population), -(-n_other // self.num_population))[:n_other]
             np.random.shuffle(flat)
-            return flat
+            return flat, {"global_proportion_seen": 0.0}
 
         # "prioritized": PLR-based sampling per corpus entity
         valid = (corpus_idx_per_slot >= 0) & (corpus_idx_per_slot < self.num_assignments)
@@ -204,7 +204,6 @@ class AgentSampler:
             global_proportion_seen = (self.unseen_population_weights[self.encountered] == 0).mean()
         else:
             global_proportion_seen = 0.0
-
         assignment_per_corpus = np.full(self.num_assignments, -1, dtype=np.int64)
         for g in np.unique(corpus_idx_per_slot[valid]):
             if global_proportion_seen >= self.rho and np.random.rand() < global_proportion_seen:
@@ -212,9 +211,11 @@ class AgentSampler:
             else:
                 assignment_per_corpus[g] = self._sample_unseen_policy(int(g))
         flat[valid] = assignment_per_corpus[corpus_idx_per_slot[valid]]
-
+        wandb_metrics = {
+            "global_proportion_seen": global_proportion_seen,
+        }
         self._update_staleness(assignment_per_corpus)
-        return flat
+        return flat, wandb_metrics
 
     def sample_weights(self, agent_idx):
         scores = self.population_scores[agent_idx]  # (num_population,)

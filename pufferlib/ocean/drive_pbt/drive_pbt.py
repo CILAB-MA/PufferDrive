@@ -278,6 +278,7 @@ class Drive_PBT(pufferlib.PufferEnv):
                 pbt_mode=self.pbt_mode,
                 num_assignments=self.num_maps,
             )
+            self._last_sampling_metrics = {}
         else:
             populations = [
                 f for f in os.listdir(population_path)
@@ -303,6 +304,7 @@ class Drive_PBT(pufferlib.PufferEnv):
                     pbt_mode=self.pbt_mode,
                     num_assignments=self.total_agents,
                 )
+                self._last_sampling_metrics = {}
 
     def _init_minimum_map_idx(self, map_ids):
         map_ids = np.asarray(map_ids, dtype=np.int64).reshape(-1)
@@ -359,9 +361,9 @@ class Drive_PBT(pufferlib.PufferEnv):
         )
         self._env_entity_to_other_slot[envs[in_bounds], entities[in_bounds]] = slots[in_bounds]
         corpus_idx_per_slot = self.minimum_other_global_idx if self.pbt_mode == "reactive" else self.minimum_map_idx
-        flat = np.asarray(
-            self.agent_sampler.sample(corpus_idx_per_slot), dtype=np.int64
-        ).reshape(-1)
+        flat, wandb_metrics = self.agent_sampler.sample(corpus_idx_per_slot)
+        flat = np.asarray(flat, dtype=np.int64).reshape(-1)
+        self._last_sampling_metrics = {k: float(v) for k, v in wandb_metrics.items()}
         if self.pbt_mode == "reactive":
             self._set_policy_per_slot(flat)
         elif self.pbt_mode == "replay":
@@ -539,6 +541,8 @@ class Drive_PBT(pufferlib.PufferEnv):
         if self.pbt_mode == "reactive":
             info[0]["other_indices"] = self.policy_per_slot
         info[0]["partner_resampled"] = partner_resampled
+        if self.agent_sampling and self._last_sampling_metrics:
+            info[0]["sampling"] = {k: float(v) for k, v in self._last_sampling_metrics.items()}
         return self.observations, info
 
     def _allocate_replay(self, num_agents, map_ids):
@@ -560,6 +564,7 @@ class Drive_PBT(pufferlib.PufferEnv):
         self.actions[:] = actions
         if self.pbt_mode == "replay":
             self.actions[self.other_indices_arr] = self.replay_actions[self.other_indices_arr, self.tick, :]
+            # self.actions[:] = self.replay_actions[:, self.tick, :]
         binding.vec_step(self.c_envs)
         if self.agent_sampling: # TODO: 현재는 Return 기반만 구현되어 있음
             self._update_minimum_distance()
@@ -672,6 +677,8 @@ class Drive_PBT(pufferlib.PufferEnv):
         if self.pbt_mode == "reactive":
             info[0]["other_indices"] = self.policy_per_slot
         info[0]["partner_resampled"] = partner_resampled
+        if self.agent_sampling and self._last_sampling_metrics:
+            info[0]["sampling"] = {k: float(v) for k, v in self._last_sampling_metrics.items()}
 
         return (self.observations, self.rewards, self.terminals, self.truncations, info)
 

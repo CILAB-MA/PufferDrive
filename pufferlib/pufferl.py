@@ -1066,7 +1066,8 @@ class PuffeRL:
                 continue
 
             u = left if i % 2 == 0 else right
-            u.add_row(f"{c2}{metric}", f"{b2}{value:.3f}")
+            display_metric = metric[len("sampling/") :] if metric.startswith("sampling/") else metric
+            u.add_row(f"{c2}{display_metric}", f"{b2}{value:.3f}")
             i += 1
             if i == 30:
                 break
@@ -1327,13 +1328,15 @@ class WandbLogger:
         self.run_id = wandb.run.id
 
     def log(self, logs, step):
-        env_prefix = "environment/"
         ego_prefix = "environment/ego_"
+        sampling_prefix = "environment/sampling/"
         logs_filtered = {}
         for k, v in logs.items():
             if k in WANDB_IGNORE_ENV_KEYS:
                 continue
-            if k.startswith(ego_prefix):
+            if k.startswith(sampling_prefix):
+                logs_filtered[f"sampling/{k[len(sampling_prefix):]}"] = v
+            elif k.startswith(ego_prefix):
                 logs_filtered[f"ego/{k[len(ego_prefix):]}"] = v
             else:
                 logs_filtered[k] = v
