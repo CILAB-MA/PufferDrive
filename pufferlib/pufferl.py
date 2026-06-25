@@ -1293,6 +1293,21 @@ class NeptuneLogger:
         return f"artifacts/{self.run_id}.pt"
 
 
+WANDB_IGNORE_ENV_KEYS = {
+    "environment/num_envs",
+    "environment/agent_offsets",
+    "environment/map_ids",
+    "environment/other_indices",
+    "environment/ego_n",
+    "environment/partner_resampled",
+    "environment/policy_ego_n",
+    "environment/metric_ego_n",
+    "environment/legacy_ego_n",
+    "environment/other_policy_n",
+    "environment/ego_metric_legacy_warning",
+}
+
+
 class WandbLogger:
     def __init__(self, args, load_id=None, resume="allow"):
         import wandb
@@ -1312,13 +1327,14 @@ class WandbLogger:
         self.run_id = wandb.run.id
 
     def log(self, logs, step):
-        ignore_keys = {"environment/num_envs", "environment/agent_offsets", "environment/map_ids", "environment/other_indices", "environment/ego_n"}
+        env_prefix = "environment/"
+        ego_prefix = "environment/ego_"
         logs_filtered = {}
         for k, v in logs.items():
-            if k in ignore_keys:
+            if k in WANDB_IGNORE_ENV_KEYS:
                 continue
-            elif "ego" in k:
-                logs_filtered[f"ego/{k[16:]}"] = v
+            if k.startswith(ego_prefix):
+                logs_filtered[f"ego/{k[len(ego_prefix):]}"] = v
             else:
                 logs_filtered[k] = v
         self.wandb.log(logs_filtered, step=step)
