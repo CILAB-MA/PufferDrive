@@ -890,6 +890,13 @@ class PuffeRL:
             if n > en and en > 0:
                 other_implicit = (s * n - es * en) / (n - en)
                 self.stats["other_score_implicit"] = float(np.clip(other_implicit, 0, 1))
+            if "policy_ego_n" in self.stats and "legacy_ego_n" in self.stats:
+                pen = float(np.mean(self.stats["policy_ego_n"]))
+                leg = float(np.mean(self.stats["legacy_ego_n"]))
+                self.stats["policy_ego_n"] = pen
+                self.stats["legacy_ego_n"] = leg
+                if leg > 0.5:
+                    self.stats["ego_metric_legacy_warning"] = leg
 
         device = config["device"]
         agent_steps = int(dist_sum(self.global_step, device))
@@ -1038,11 +1045,21 @@ class PuffeRL:
         right.add_column(f"{c1}User Stats", justify="left", width=20)
         right.add_column(f"{c1}Value", justify="right", width=10)
         i = 0
+        dashboard_ignore_stats = {
+            "partner_resampled",
+            "metric_ego_n",
+            "legacy_ego_n",
+            "other_policy_n",
+            "policy_ego_n",
+            "ego_metric_legacy_warning",
+        }
 
         if self.stats:
             self.last_stats = self.stats
 
         for metric, value in (self.stats or self.last_stats).items():
+            if metric in dashboard_ignore_stats:
+                continue
             try:  # Discard non-numeric values
                 int(value)
             except:

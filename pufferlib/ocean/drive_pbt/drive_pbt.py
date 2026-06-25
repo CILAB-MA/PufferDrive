@@ -268,9 +268,9 @@ class Drive_PBT(pufferlib.PufferEnv):
             self.minimum_ego_idx = np.full(n_other, -1, dtype=np.int64)
             self.minimum_other_local_idx = np.full(n_other, -1, dtype=np.int64)
             self.minimum_other_global_idx = np.full(n_other, -1, dtype=np.int64)
-            self.minimum_map_idx = np.full(n_other, -1, dtype=np.int64)
             self.score_metric = np.zeros(n_other, dtype=np.float32)
             self.rollout_flatten = np.full(n_other, -1, dtype=np.int64)
+            self._init_minimum_map_idx(self.map_ids)
 
             self.agent_sampler = AgentSampler(
                 num_population=int(self.other_actions.shape[0]),
@@ -304,6 +304,15 @@ class Drive_PBT(pufferlib.PufferEnv):
                     num_assignments=self.total_agents,
                 )
 
+    def _init_minimum_map_idx(self, map_ids):
+        map_ids = np.asarray(map_ids, dtype=np.int64).reshape(-1)
+        n = int(map_ids.size)
+        if not hasattr(self, "minimum_map_idx") or self.minimum_map_idx.shape[0] != n:
+            self.minimum_map_idx = np.full(n, -1, dtype=np.int64)
+        else:
+            self.minimum_map_idx.fill(-1)
+        np.copyto(self.minimum_map_idx, map_ids)
+
     def _reset_other_indices(self):
         """Episode/rollout start (after vec_reset): metrics, slot identity, LUT, policy assignment."""
         # init metrics
@@ -313,9 +322,9 @@ class Drive_PBT(pufferlib.PufferEnv):
         self.minimum_other_global_idx.fill(-1)
 
         if self.pbt_mode == "replay":
+            self._init_minimum_map_idx(self.map_ids)
             self.rollout_flatten.fill(-1)
             self.replay_actions.fill(-1)
-            self.minimum_map_idx.fill(-1)
         elif self.pbt_mode == "reactive":
             self.policy_per_slot_flatten.fill(-1)
 
@@ -333,8 +342,6 @@ class Drive_PBT(pufferlib.PufferEnv):
         )
         self.minimum_other_local_idx[valid] = entity_ids[valid]
         self.minimum_other_global_idx[valid] = gid[map_ids[valid], entity_ids[valid]]
-        if self.pbt_mode == "replay":
-            self.minimum_map_idx[valid] = map_ids[valid]
 
         # (env_i, local entity id) -> other slot; map_id alone collides across envs on same map
         max_entity = gid.shape[1]
@@ -370,15 +377,24 @@ class Drive_PBT(pufferlib.PufferEnv):
 
     def _set_replay_per_slot(self, flat):
         flat = np.asarray(flat, dtype=np.int64).reshape(-1)
-        np.copyto(self.rollout_flatten, flat)
+        if flat.shape[0] != self.minimum_map_idx.shape[0]:
+            raise ValueError(
+                f"rollout flat length {flat.shape[0]} != num env maps {self.minimum_map_idx.shape[0]}"
+            )
+        env_per_other = self._env_per_agent()[self.other_indices_arr]
+        self.rollout_flatten[:] = flat[env_per_other]
         agent_ind = 0
-        for map_id, rollout_idx in enumerate(flat):
+        for map_id, rollout_idx in zip(self.minimum_map_idx, flat):
+            map_id = int(map_id)
+            rollout_idx = int(rollout_idx)
             map_indices = np.where(self.actions_map_id == map_id)[0][0]
-            agent_offsets = self.actions_agent_offsets[map_indices:map_indices+2]
+            agent_offsets = self.actions_agent_offsets[map_indices:map_indices + 2]
             num_agents_for_map = agent_offsets[1] - agent_offsets[0]
-            if agent_ind + num_agents_for_map> self.num_agents:
+            if agent_ind + num_agents_for_map > self.num_agents:
                 num_agents_for_map = self.num_agents - agent_ind
-            self.replay_actions[agent_ind:agent_ind+num_agents_for_map] = self.other_actions[rollout_idx, agent_offsets[0]:agent_offsets[0] + num_agents_for_map].copy()
+            self.replay_actions[agent_ind:agent_ind + num_agents_for_map] = self.other_actions[
+                rollout_idx, agent_offsets[0]:agent_offsets[0] + num_agents_for_map
+            ].copy()
             agent_ind += num_agents_for_map
 
     def _env_per_agent(self):
@@ -387,6 +403,34 @@ class Drive_PBT(pufferlib.PufferEnv):
 
     def _map_per_agent(self):
         return np.asarray(self.map_ids, dtype=np.int64)[self._env_per_agent()]
+
+    def _metric_ego_global_indices(self):
+        """Global flatten indices that C add_log counts in the ego_* bucket (matches drive.h)."""
+        ao = np.asarray(self.agent_offsets, dtype=np.int64)
+        ego = np.asarray(self.ego_indices, dtype=np.int64)
+        c_ego = []
+        for i in range(self.num_envs):
+            cur, nxt = int(ao[i]), int(ao[i + 1])
+            ego_local = (ego - cur)[(ego >= cur) & (ego < nxt)]
+            if ego_local.size > 0:
+                c_ego.extend((cur + ego_local).tolist())
+            elif self.num_ego_per_env[i] > 0:
+                c_ego.append(cur)
+        return np.asarray(c_ego, dtype=np.int64)
+
+    def _enrich_aggregate_metrics(self, aggregate):
+        """Attach policy vs C-metric ego counts for dashboard / audit."""
+        policy_ego_n = int(self.ego_indices.size)
+        metric_ego = self._metric_ego_global_indices()
+        metric_ego_n = int(metric_ego.size)
+        aggregate["policy_ego_n"] = float(policy_ego_n)
+        aggregate["metric_ego_n"] = float(metric_ego_n)
+        legacy_n = int(np.setdiff1d(metric_ego, self.ego_indices, assume_unique=False).size)
+        aggregate["legacy_ego_n"] = float(legacy_n)
+        aggregate["other_policy_n"] = float(int(self.other_indices_arr.size))
+        reported_ego_n = float(aggregate.get("ego_n", metric_ego_n))
+        if reported_ego_n > 0 and legacy_n > 0:
+            aggregate["ego_n_mismatch"] = float(reported_ego_n - policy_ego_n)
 
     def _partner_obs(self):
         start = self.ego_features
@@ -477,7 +521,7 @@ class Drive_PBT(pufferlib.PufferEnv):
                 self.minimum_other_global_idx,
                 self.rollout_flatten,
                 self.minimum_distance,
-                map_idx=map_per_other, # Global map id in [0, env.num_maps]
+                map_idx=map_per_other,
             )
         else:
             raise ValueError(f"Invalid pbt mode: {self.pbt_mode}")
@@ -530,6 +574,7 @@ class Drive_PBT(pufferlib.PufferEnv):
                 if scenarios and self.scenario_log_path:
                     append_scenario_logs(self.scenario_log_path, scenarios)
                 if aggregate:
+                    self._enrich_aggregate_metrics(aggregate)
                     info.append(aggregate)
         if self.tick > 0 and self.resample_frequency > 0 and self.tick % self.resample_frequency == 0:
             if self.agent_sampling:

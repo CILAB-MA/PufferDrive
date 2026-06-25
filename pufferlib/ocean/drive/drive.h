@@ -402,7 +402,11 @@ void add_log(Drive *env) {
         env->log.speed_at_goal += env->logs[i].speed_at_goal;
         env->log.episode_length += env->logs[i].episode_length;
         env->log.episode_return += env->logs[i].episode_return;
-        if ((env->num_ego_local > 0 && is_ego_local(env, i)) || (env->num_ego_local == 0 && i == 0)) {
+        // ego_local_indices from Python when num_ego_local > 0; legacy i==0 only when
+        // num_ego > 0 but ego_local was not passed (old single-ego setups). When num_ego == 0
+        // (PBT env with no ego in this map), do not count local 0 as ego.
+        if ((env->num_ego_local > 0 && is_ego_local(env, i)) ||
+            (env->num_ego_local == 0 && env->num_ego > 0 && i == 0)) {
             env->log.ego_score += (frac_goal_reached > threshold && !collision_occurred) ? 1.0f : 0.0f;
             env->log.ego_offroad_rate += offroad;
             env->log.ego_collision_rate += collided;
