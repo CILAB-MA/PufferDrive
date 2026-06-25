@@ -251,7 +251,7 @@ class PuffeRL:
 
         # Dashboard
         self.model_size = sum(p.numel() for p in policy.parameters() if p.requires_grad)
-        # self.print_dashboard(clear=True)
+        self.print_dashboard(clear=True)
 
     @property
     def uptime(self):
@@ -812,7 +812,7 @@ class PuffeRL:
         if done_training or self.global_step == 0 or time.time() > self.last_log_time + 0.25:
             logs = self.mean_and_log()
             self.losses = losses
-            # self.print_dashboard()
+            self.print_dashboard()
             self.stats = defaultdict(list)
             self.last_log_time = time.time()
             self.last_log_step = self.global_step
@@ -890,6 +890,13 @@ class PuffeRL:
             if n > en and en > 0:
                 other_implicit = (s * n - es * en) / (n - en)
                 self.stats["other_score_implicit"] = float(np.clip(other_implicit, 0, 1))
+            if "policy_ego_n" in self.stats and "legacy_ego_n" in self.stats:
+                pen = float(np.mean(self.stats["policy_ego_n"]))
+                leg = float(np.mean(self.stats["legacy_ego_n"]))
+                self.stats["policy_ego_n"] = pen
+                self.stats["legacy_ego_n"] = leg
+                if leg > 0.5:
+                    self.stats["ego_metric_legacy_warning"] = leg
 
         device = config["device"]
         agent_steps = int(dist_sum(self.global_step, device))
@@ -1038,18 +1045,29 @@ class PuffeRL:
         right.add_column(f"{c1}User Stats", justify="left", width=20)
         right.add_column(f"{c1}Value", justify="right", width=10)
         i = 0
+        dashboard_ignore_stats = {
+            "partner_resampled",
+            "metric_ego_n",
+            "legacy_ego_n",
+            "other_policy_n",
+            "policy_ego_n",
+            "ego_metric_legacy_warning",
+        }
 
         if self.stats:
             self.last_stats = self.stats
 
         for metric, value in (self.stats or self.last_stats).items():
+            if metric in dashboard_ignore_stats:
+                continue
             try:  # Discard non-numeric values
                 int(value)
             except:
                 continue
 
             u = left if i % 2 == 0 else right
-            u.add_row(f"{c2}{metric}", f"{b2}{value:.3f}")
+            display_metric = metric[len("sampling/") :] if metric.startswith("sampling/") else metric
+            u.add_row(f"{c2}{display_metric}", f"{b2}{value:.3f}")
             i += 1
             if i == 30:
                 break
@@ -1276,6 +1294,21 @@ class NeptuneLogger:
         return f"artifacts/{self.run_id}.pt"
 
 
+WANDB_IGNORE_ENV_KEYS = {
+    "environment/num_envs",
+    "environment/agent_offsets",
+    "environment/map_ids",
+    "environment/other_indices",
+    "environment/ego_n",
+    "environment/partner_resampled",
+    "environment/policy_ego_n",
+    "environment/metric_ego_n",
+    "environment/legacy_ego_n",
+    "environment/other_policy_n",
+    "environment/ego_metric_legacy_warning",
+}
+
+
 class WandbLogger:
     def __init__(self, args, load_id=None, resume="allow"):
         import wandb
@@ -1295,13 +1328,16 @@ class WandbLogger:
         self.run_id = wandb.run.id
 
     def log(self, logs, step):
-        ignore_keys = {"environment/num_envs", "environment/agent_offsets", "environment/map_ids", "environment/other_indices", "environment/ego_n"}
+        ego_prefix = "environment/ego_"
+        sampling_prefix = "environment/sampling/"
         logs_filtered = {}
         for k, v in logs.items():
-            if k in ignore_keys:
+            if k in WANDB_IGNORE_ENV_KEYS:
                 continue
-            elif "ego" in k:
-                logs_filtered[f"ego/{k[16:]}"] = v
+            if k.startswith(sampling_prefix):
+                logs_filtered[f"sampling/{k[len(sampling_prefix):]}"] = v
+            elif k.startswith(ego_prefix):
+                logs_filtered[f"ego/{k[len(ego_prefix):]}"] = v
             else:
                 logs_filtered[k] = v
         self.wandb.log(logs_filtered, step=step)
@@ -1382,7 +1418,7 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
     if logs is not None:
         all_logs.append(logs)
 
-    # pufferl.print_dashboard()
+    pufferl.print_dashboard()
     model_path = pufferl.close()
     pufferl.logger.close(model_path)
     return all_logs
@@ -1473,7 +1509,7 @@ def train_pbt(env_name, args=None, vecenv=None, policy=None, logger=None, config
     if logs is not None:
         all_logs.append(logs)
 
-    # pufferl.print_dashboard()
+    pufferl.print_dashboard()
     model_path = pufferl.close()
     pufferl.logger.close(model_path)
     return all_logs
