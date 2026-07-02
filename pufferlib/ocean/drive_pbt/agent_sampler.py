@@ -134,6 +134,7 @@ class AgentSampler:
         if self.pbt_mode == "replay" and rollout_idx is None:
             rollout_idx = policy_idx
         self._distance_filtering(score, minimum_distance, policy_idx, agent_idx, map_idx=map_idx)
+        raw_return_metrics = self._raw_return_summary_metrics()
         self._normalize_scores()
 
         # Only update (g, p) pairs that received a new score — avoids zeroing scores for non-passing slots
@@ -155,6 +156,27 @@ class AgentSampler:
             self.encountered[m[valid]] = True
         else:
             raise ValueError(f"Invalid pbt mode: {self.pbt_mode}")
+
+        return raw_return_metrics
+
+    def _raw_return_summary_metrics(self):
+        """Per-corpus raw (pre-normalization) return, aggregated across policies, for corpus entities scored this step.
+
+        Must be read from self.new_score before _normalize_scores() overwrites it in place.
+        """
+        active = np.isfinite(self.new_score)
+        touched = np.flatnonzero(active.any(axis=1))
+        if touched.size == 0:
+            return {}
+        default_prefix = "map" if self.pbt_mode == "replay" else "agent"
+        metrics = {}
+        for g in touched:
+            vals = self.new_score[g][active[g]]
+            label = f"{default_prefix}_{int(g)}"
+            metrics[f"{label}_raw_return_mean"] = float(vals.mean())
+            metrics[f"{label}_raw_return_min"] = float(vals.min())
+            metrics[f"{label}_raw_return_max"] = float(vals.max())
+        return metrics
 
     def _update_staleness(self, assignment_per_corpus):
         """assignment_per_corpus: (num_assignments,) with -1 for corpus entities not active this episode."""
@@ -194,7 +216,7 @@ class AgentSampler:
         if self.strategy == "uniform":
             flat = np.tile(np.arange(self.num_population), -(-n_other // self.num_population))[:n_other]
             np.random.shuffle(flat)
-            return flat, {"global_proportion_seen": 0.0}
+            return flat, {}
 
         # "prioritized": PLR-based sampling per corpus entity
         valid = (corpus_idx_per_slot >= 0) & (corpus_idx_per_slot < self.num_assignments)
@@ -214,8 +236,23 @@ class AgentSampler:
         wandb_metrics = {
             "global_proportion_seen": global_proportion_seen,
         }
+        wandb_metrics.update(self._sampling_weight_summary_metrics(assignment_per_corpus))
         self._update_staleness(assignment_per_corpus)
         return flat, wandb_metrics
+
+    def _sampling_weight_summary_metrics(self, assignment_per_corpus):
+        """Per-corpus sampling-weight concentration (mean/max across policies) for corpus entities assigned this step."""
+        touched = np.flatnonzero(assignment_per_corpus >= 0)
+        if touched.size == 0:
+            return {}
+        default_prefix = "map" if self.pbt_mode == "replay" else "agent"
+        metrics = {}
+        for g in touched:
+            weights = self.sample_weights(int(g))
+            label = f"{default_prefix}_{int(g)}"
+            metrics[f"{label}_weight_mean"] = float(weights.mean())
+            metrics[f"{label}_weight_max"] = float(weights.max())
+        return metrics
 
     def sample_weights(self, agent_idx):
         scores = self.population_scores[agent_idx]  # (num_population,)

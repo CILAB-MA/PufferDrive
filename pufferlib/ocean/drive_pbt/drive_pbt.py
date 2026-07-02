@@ -279,6 +279,7 @@ class Drive_PBT(pufferlib.PufferEnv):
                 num_assignments=self.num_maps,
             )
             self._last_sampling_metrics = {}
+            self._last_raw_return_metrics = {}
         else:
             populations = [
                 f for f in os.listdir(population_path)
@@ -305,6 +306,7 @@ class Drive_PBT(pufferlib.PufferEnv):
                     num_assignments=self.total_agents,
                 )
                 self._last_sampling_metrics = {}
+                self._last_raw_return_metrics = {}
 
     def _init_minimum_map_idx(self, map_ids):
         map_ids = np.asarray(map_ids, dtype=np.int64).reshape(-1)
@@ -364,6 +366,7 @@ class Drive_PBT(pufferlib.PufferEnv):
         flat, wandb_metrics = self.agent_sampler.sample(corpus_idx_per_slot)
         flat = np.asarray(flat, dtype=np.int64).reshape(-1)
         self._last_sampling_metrics = {k: float(v) for k, v in wandb_metrics.items()}
+        self._last_sampling_metrics.update(self._last_raw_return_metrics)
         if self.pbt_mode == "reactive":
             self._set_policy_per_slot(flat)
         elif self.pbt_mode == "replay":
@@ -510,7 +513,7 @@ class Drive_PBT(pufferlib.PufferEnv):
         self._episode_return.fill(0.0)
         # Update Score
         if self.pbt_mode == "reactive":
-            self.agent_sampler.update_policy_score(
+            raw_return_metrics = self.agent_sampler.update_policy_score(
                 self.score_metric,
                 self.minimum_other_global_idx,
                 self.policy_per_slot_flatten,
@@ -518,7 +521,7 @@ class Drive_PBT(pufferlib.PufferEnv):
             )
         elif self.pbt_mode == "replay":
             map_per_other = self._map_per_agent()[self.other_indices_arr]
-            self.agent_sampler.update_policy_score(
+            raw_return_metrics = self.agent_sampler.update_policy_score(
                 self.score_metric,
                 self.minimum_other_global_idx,
                 self.rollout_flatten,
@@ -527,6 +530,7 @@ class Drive_PBT(pufferlib.PufferEnv):
             )
         else:
             raise ValueError(f"Invalid pbt mode: {self.pbt_mode}")
+        self._last_raw_return_metrics = raw_return_metrics
 
     def reset(self, seed=0):
         binding.vec_reset(self.c_envs, seed)
