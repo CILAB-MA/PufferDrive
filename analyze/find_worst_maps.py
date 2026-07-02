@@ -8,12 +8,24 @@ produced during zeroshot/selfplay runs: a dict keyed by scenario/map id -> metri
 Usage:
     python3 analyze/find_worst_maps.py /data/puffer/results/selfplay/selfplay/scenario_logs/e729wx4e_selfplay.json
     python3 analyze/find_worst_maps.py <path> --top 50 --sort-by collision_rate --out worst.csv
+    python3 analyze/find_worst_maps.py <path> --filter "score<1" "collision_rate>0" --out worst.csv
 """
 
 import argparse
 import json
+import re
 
 import pandas as pd
+
+_FILTER_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(>=|<=|==|!=|>|<)\s*(-?\d+\.?\d*)\s*$")
+_FILTER_OPS = {
+    ">=": lambda s, v: s >= v,
+    "<=": lambda s, v: s <= v,
+    "==": lambda s, v: s == v,
+    "!=": lambda s, v: s != v,
+    ">": lambda s, v: s > v,
+    "<": lambda s, v: s < v,
+}
 
 DISPLAY_COLUMNS = [
     "map_id",
@@ -57,6 +69,20 @@ def add_failure_flags(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def apply_filters(df: pd.DataFrame, filter_strs) -> pd.DataFrame:
+    """AND-combine conditions like 'score<1' or 'collision_rate>=0.5'."""
+    mask = pd.Series(True, index=df.index)
+    for f in filter_strs:
+        m = _FILTER_RE.match(f)
+        if not m:
+            raise ValueError(f"Invalid --filter condition: {f!r} (expected e.g. 'score<1' or 'collision_rate>=0.5')")
+        col, op, val = m.groups()
+        if col not in df.columns:
+            raise ValueError(f"Unknown column in --filter: {col!r} (available: {', '.join(df.columns)})")
+        mask &= _FILTER_OPS[op](df[col], float(val))
+    return df[mask]
+
+
 def print_summary(df: pd.DataFrame) -> None:
     n = len(df)
     print(f"Total maps: {n}")
@@ -79,11 +105,23 @@ def main():
         help="Ranking metric (default: failure_score, a combined badness score)",
     )
     parser.add_argument("--out", default=None, help="Write the full sorted table to this CSV path")
+    parser.add_argument(
+        "--filter",
+        nargs="+",
+        default=None,
+        metavar="COND",
+        help="One or more AND-combined conditions, e.g. --filter \"score<1\" \"collision_rate>0\"",
+    )
     args = parser.parse_args()
 
     df = load_scenario_log(args.path)
     df = add_failure_flags(df)
     print_summary(df)
+
+    if args.filter:
+        before = len(df)
+        df = apply_filters(df, args.filter)
+        print(f"Filter ({' AND '.join(args.filter)}): {len(df)}/{before} maps matched\n")
 
     ascending = args.sort_by == "score"
     ranked = df.sort_values(args.sort_by, ascending=ascending)
