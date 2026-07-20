@@ -18,6 +18,7 @@ from typing import Iterator
 import torch
 
 _CKPT_RE = re.compile(r"^model_.+_(\d{6})\.pt$")
+_FINAL_CKPT_RE = re.compile(r"^puffer_drive_(.+)\.pt$")
 
 
 def checkpoint_step(path: str) -> int:
@@ -27,6 +28,98 @@ def checkpoint_step(path: str) -> int:
     if not match:
         raise ValueError(f"Not a step checkpoint: {path}")
     return int(match.group(1))
+
+
+def is_flat_policy_ckpt(path: str) -> bool:
+    """True for exported ``puffer_drive_{id}.pt`` files (not run-dir checkpoints)."""
+    return os.path.isfile(path) and bool(_FINAL_CKPT_RE.match(os.path.basename(path)))
+
+
+def find_final_policy_ckpts(exp_path: str) -> list[tuple[str, str]]:
+    """Flat exported policies at experiment root: ``puffer_drive_{id}.pt``.
+
+    Does **not** descend into ``puffer_drive_*`` run subdirectories.
+    """
+    exp_path = os.path.abspath(exp_path)
+    if not os.path.isdir(exp_path):
+        raise FileNotFoundError(f"Experiment path does not exist: {exp_path}")
+
+    runs: list[tuple[str, str]] = []
+    for path in sorted(glob.glob(os.path.join(exp_path, "puffer_drive_*.pt"))):
+        if not os.path.isfile(path):
+            continue
+        name = os.path.basename(path)
+        match = _FINAL_CKPT_RE.match(name)
+        if match:
+            runs.append((match.group(1), path))
+    return runs
+
+
+def resolve_final_policy_ckpt(
+    exp_path: str,
+    *,
+    sweep_id: str | None = None,
+) -> str:
+    """Resolve a single flat ``puffer_drive_{id}.pt`` under an experiment directory."""
+    finals = find_final_policy_ckpts(exp_path)
+    if not finals:
+        raise FileNotFoundError(
+            f"No flat puffer_drive_*.pt checkpoints under {exp_path}"
+        )
+    if sweep_id is not None:
+        for sid, path in finals:
+            if sid == sweep_id:
+                return path
+        ids = ", ".join(s for s, _ in finals)
+        raise FileNotFoundError(
+            f"No puffer_drive_{sweep_id}.pt under {exp_path} (have: {ids})"
+        )
+    if len(finals) == 1:
+        return finals[0][1]
+    ids = ", ".join(s for s, _ in finals)
+    raise ValueError(
+        f"Multiple flat puffer_drive_*.pt under {exp_path}; pass sweep_id. Found: {ids}"
+    )
+
+
+def resolve_policy_location(
+    base_path: str,
+    exp_name: str,
+    location: str | None = None,
+    *,
+    sweep_id: str | None = None,
+    prefer_final: bool = True,
+) -> str:
+    """Resolve a policy checkpoint path.
+
+    Priority:
+      1. Explicit ``location`` (.pt file or run dir with ``model_*.pt``)
+      2. Flat ``puffer_drive_{id}.pt`` at experiment root (default)
+      3. Legacy run subdirectory (only when ``prefer_final=False`` or no flat ckpts)
+    """
+    if location:
+        loc = os.path.abspath(location)
+        if is_flat_policy_ckpt(loc):
+            return loc
+        if os.path.isdir(loc) and glob.glob(os.path.join(loc, "model_*.pt")):
+            return loc
+        if os.path.isfile(loc) and loc.endswith(".pt"):
+            return loc
+        raise FileNotFoundError(f"Not a policy checkpoint: {loc}")
+
+    exp_path = os.path.join(os.path.abspath(base_path), exp_name)
+    if prefer_final:
+        try:
+            return resolve_final_policy_ckpt(exp_path, sweep_id=sweep_id)
+        except FileNotFoundError:
+            pass
+
+    if prefer_final:
+        raise FileNotFoundError(
+            f"No flat puffer_drive_*.pt under {exp_path}. "
+            "Export final weights to the experiment root or pass an explicit --run-dir / --policy-run-dirs path."
+        )
+    return resolve_run_dir(exp_path)
 
 
 def resolve_run_dir(path: str, run_name: str | None = None) -> str:

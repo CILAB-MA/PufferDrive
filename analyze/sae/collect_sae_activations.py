@@ -53,13 +53,13 @@ from sae_rollout import (  # noqa: E402
     partner_vehicle_size_mask,
     pick_checkpoint,
     resolve_output_dir,
-    resolve_run_dir,
+    resolve_policy_location,
     safe_close_vecenv,
     save_npz_atomic,
     save_scene_context,
 )
 
-SAE_COLLECT_VERSION = 6
+SAE_COLLECT_VERSION = 7
 ACTIVATIONS_FILENAME = "activations.npz"
 # Future partner trajectory window stored for visualization (steps after t, inclusive of t).
 FUTURE_TRAJ_HORIZON = 20
@@ -67,6 +67,8 @@ FUTURE_TRAJ_HORIZON = 20
 DEFAULT_MAX_TIMESTEPS_PER_PAIR = 4
 DEFAULT_MIN_TIMESTEP_GAP = 8
 DEFAULT_MAX_SAMPLES_PER_SCENE = 64
+DEFAULT_MIN_OTHER_SPEED_MPS = 0.5
+DEFAULT_MIN_EGO_SPEED_MPS = 0.0
 # Matches drive.h MAX_SPEED (obs stores signed_speed / MAX_SPEED).
 OBS_MAX_SPEED_M_S = 100.0
 EGO_STATE_KEYS = ("x", "y", "heading", "speed")
@@ -208,6 +210,8 @@ def build_sae_transition_rows(
     agent_scenario: np.ndarray,
     *,
     max_min_dist_m: float | None = None,
+    min_other_speed_mps: float = DEFAULT_MIN_OTHER_SPEED_MPS,
+    min_ego_speed_mps: float = DEFAULT_MIN_EGO_SPEED_MPS,
     future_traj_horizon: int = FUTURE_TRAJ_HORIZON,
     max_timesteps_per_pair: int = DEFAULT_MAX_TIMESTEPS_PER_PAIR,
     min_timestep_gap: int = DEFAULT_MIN_TIMESTEP_GAP,
@@ -215,16 +219,20 @@ def build_sae_transition_rows(
 ) -> dict[str, np.ndarray]:
     """Select (agent, partner_slot, t) rows + visualization metadata.
 
-    Current-time filters only (no LP future labels). Each kept row includes
-    ego/other state and a short partner ``future_traj`` window for plotting.
-    Timesteps are thinned so SAE sees more independent scenes, not adjacent frames.
+    Row selection (default): moving partners only, no distance cap.
+    Optional ``max_min_dist_m`` keeps near partners for conflict-focused subsets.
     """
     other_ids = other_traj["other_id"]
     other_speed = other_traj["other_speed"]
     obs_traj = ego_traj["obs"]  # (A, obs_dim, T)
     num_agents, num_slots, num_steps = other_ids.shape
 
-    valid = (other_ids != -1) & (other_speed > 0)
+    valid = other_ids != -1
+    if min_other_speed_mps > 0:
+        valid = valid & (other_speed > float(min_other_speed_mps))
+    if min_ego_speed_mps > 0:
+        ego_speed_at = obs_traj[:, 2, :] * OBS_MAX_SPEED_M_S
+        valid = valid & (ego_speed_at[:, None, :] > float(min_ego_speed_mps))
     valid = valid & termination_mask[:, None, :]
     valid = valid & partner_vehicle_size_mask(
         obs_traj, num_partner_slots=num_slots
@@ -441,6 +449,8 @@ def collect_shared_activations(
     save_raw: bool = False,
     save_obs: bool = False,
     max_min_dist_m: float | None = None,
+    min_other_speed_mps: float = DEFAULT_MIN_OTHER_SPEED_MPS,
+    min_ego_speed_mps: float = DEFAULT_MIN_EGO_SPEED_MPS,
     max_timesteps_per_pair: int = DEFAULT_MAX_TIMESTEPS_PER_PAIR,
     min_timestep_gap: int = DEFAULT_MIN_TIMESTEP_GAP,
     max_samples_per_scene: int | None = DEFAULT_MAX_SAMPLES_PER_SCENE,
@@ -479,6 +489,8 @@ def collect_shared_activations(
         termination_mask,
         agent_scenario,
         max_min_dist_m=max_min_dist_m,
+        min_other_speed_mps=min_other_speed_mps,
+        min_ego_speed_mps=min_ego_speed_mps,
         max_timesteps_per_pair=max_timesteps_per_pair,
         min_timestep_gap=min_timestep_gap,
         max_samples_per_scene=max_samples_per_scene,
@@ -489,7 +501,9 @@ def collect_shared_activations(
     device = torch.device(args["train"]["device"])
     activations: dict[str, np.ndarray] = {}
     for exp_name in experiments:
-        run_dir = policy_run_dirs.get(exp_name) or resolve_run_dir(base_path, exp_name)
+        run_dir = policy_run_dirs.get(exp_name) or resolve_policy_location(
+            base_path, exp_name, prefer_final=True
+        )
         ckpt = pick_checkpoint(run_dir, device=str(device), probe_step=reference_step)
         assert ckpt.state_dict is not None
         load_policy_from_checkpoint(policy, ckpt.state_dict)
@@ -653,11 +667,10 @@ def main() -> None:
         type=str,
         default=None,
         help=(
-            "Per-experiment encode checkpoints: "
-            "replay_0.25=/path;reactive_0.25=/path;selfplay=/path "
+            "Per-experiment policy checkpoints: "
+            "record=/path/to/puffer_drive_id.pt;reactive_0.25=/path;selfplay=/path "
             "(aliases record/reactive/selfplay also ok). "
-            "Overrides default resolve_run_dir for encoding; "
-            "--run-dir still selects the reference rollout policy."
+            "Defaults to flat puffer_drive_*.pt at experiment root."
         ),
     )
     parser.add_argument(
@@ -680,8 +693,20 @@ def main() -> None:
     parser.add_argument(
         "--max-min-dist-m",
         type=float,
-        default=10.0,
+        default=-1.0,
         help="Keep transitions with partner dist@t <= this (m). Negative = no filter.",
+    )
+    parser.add_argument(
+        "--min-other-speed-mps",
+        type=float,
+        default=DEFAULT_MIN_OTHER_SPEED_MPS,
+        help="Require partner speed > this (m/s). <= 0 disables moving filter.",
+    )
+    parser.add_argument(
+        "--min-ego-speed-mps",
+        type=float,
+        default=DEFAULT_MIN_EGO_SPEED_MPS,
+        help="Require ego speed > this (m/s). <= 0 keeps stationary-ego rows.",
     )
     parser.add_argument(
         "--max-timesteps-per-pair",
@@ -709,11 +734,17 @@ def main() -> None:
         raise ValueError("--experiments is empty")
     max_min_dist_m = None if args_cli.max_min_dist_m < 0 else float(args_cli.max_min_dist_m)
 
-    reference_run = resolve_run_dir(args_cli.base_path, args_cli.reference_exp, args_cli.run_dir)
-    reference_ckpt = pick_checkpoint(
-        reference_run, device=args_cli.device, probe_step=args_cli.probe_step
+    reference_location = resolve_policy_location(
+        args_cli.base_path, args_cli.reference_exp, args_cli.run_dir
     )
-    probe_step = int(reference_ckpt.step)
+    reference_ckpt = pick_checkpoint(
+        reference_location, device=args_cli.device, probe_step=args_cli.probe_step
+    )
+    probe_step = (
+        int(args_cli.probe_step)
+        if args_cli.probe_step is not None
+        else int(reference_ckpt.step)
+    )
     assert reference_ckpt.state_dict is not None
     policy_run_dirs = parse_policy_run_dirs(args_cli.policy_run_dirs)
     if policy_run_dirs:
@@ -745,6 +776,12 @@ def main() -> None:
         print("  save_obs=True (raw obs stored for policy steering)")
     if max_min_dist_m is not None:
         print(f"  dist@t filter: partner dist_at_t <= {max_min_dist_m:.2f} m")
+    else:
+        print("  dist@t filter: off (all distances)")
+    print(
+        f"  moving filter: other_speed > {args_cli.min_other_speed_mps:.2f} m/s"
+        f", ego_speed > {args_cli.min_ego_speed_mps:.2f} m/s"
+    )
     print(
         f"  diversity: max_timesteps_per_pair={args_cli.max_timesteps_per_pair} "
         f"min_gap={args_cli.min_timestep_gap} "
@@ -774,6 +811,8 @@ def main() -> None:
         save_raw=args_cli.save_raw,
         save_obs=bool(args_cli.save_obs),
         max_min_dist_m=max_min_dist_m,
+        min_other_speed_mps=float(args_cli.min_other_speed_mps),
+        min_ego_speed_mps=float(args_cli.min_ego_speed_mps),
         max_timesteps_per_pair=int(args_cli.max_timesteps_per_pair),
         min_timestep_gap=int(args_cli.min_timestep_gap),
         max_samples_per_scene=(

@@ -250,6 +250,43 @@ def encode_with_slot_override(
     return hidden, actions, value
 
 
+def encode_with_slot_override_step(
+    policy: torch.nn.Module,
+    obs: torch.Tensor,
+    partner_slot: torch.Tensor,
+    slot_embedding: torch.Tensor,
+    *,
+    pool_mode: str = "max",
+    baseline_slot_embedding: torch.Tensor | None = None,
+    lstm_h: torch.Tensor | None = None,
+    lstm_c: torch.Tensor | None = None,
+    skip_lstm: bool = False,
+):
+    """One recurrent step with explicit next LSTM state (for rollouts / impulse tests).
+
+    Returns ``(hidden_post_lstm, actions, value, h_next, c_next)``.
+    """
+    net = drive_backbone(policy)
+    encoded = encode_observations_with_slot_override(
+        policy,
+        obs,
+        partner_slot,
+        slot_embedding,
+        pool_mode=pool_mode,
+        baseline_slot_embedding=baseline_slot_embedding,
+    )
+    if skip_lstm:
+        hidden = encoded
+        h_next = encoded
+        c_next = torch.zeros_like(encoded)
+    else:
+        hidden, h_next, c_next = apply_lstm(
+            policy, encoded, lstm_h=lstm_h, lstm_c=lstm_c
+        )
+    actions, value = net.decode_actions(hidden)
+    return hidden, actions, value, h_next, c_next
+
+
 def encode_with_lstm_hidden_override(
     policy: torch.nn.Module,
     obs: torch.Tensor,
@@ -274,16 +311,19 @@ def action_stats_from_logits(actions) -> dict[str, torch.Tensor]:
         steer = actions.loc[:, 1].float() if actions.loc.shape[-1] > 1 else torch.zeros_like(accel)
         # differential entropy of Normal (sum over dims)
         entropy = actions.entropy().sum(dim=-1).float()
+        p_brake = torch.sigmoid(-accel)
+        p_throttle = torch.sigmoid(accel)
         return {
             "accel": accel,
             "steer": steer,
             "steer_mag": steer.abs(),
-            "p_brake": torch.sigmoid(-accel),
-            "p_throttle": torch.sigmoid(accel),
+            "p_brake": p_brake,
+            "p_throttle": p_throttle,
             "p_neg_accel": torch.sigmoid(-accel),
             "p_strong_brake": torch.sigmoid(-accel - 1.0),
             "brake_proxy": (-accel),
             "log_p_brake": torch.nn.functional.logsigmoid(-accel),
+            "brake_minus_throttle": p_brake - p_throttle,
             "entropy": entropy,
         }
 
@@ -301,16 +341,18 @@ def action_stats_from_logits(actions) -> dict[str, torch.Tensor]:
         entropy = -(probs * (probs.clamp_min(1e-8).log())).sum(dim=-1)
         half = max(1, logit.shape[-1] // 2)
         p_brake = probs[:, :half].sum(-1)
+        p_throttle = probs[:, half:].sum(-1)
         return {
             "accel": -expected,
             "steer": torch.zeros_like(expected),
             "steer_mag": torch.zeros_like(expected),
             "p_brake": p_brake,
-            "p_throttle": probs[:, half:].sum(-1),
+            "p_throttle": p_throttle,
             "p_neg_accel": p_brake,
             "p_strong_brake": p_brake,
             "brake_proxy": -expected,
             "log_p_brake": p_brake.clamp_min(1e-8).log(),
+            "brake_minus_throttle": p_brake - p_throttle,
             "entropy": entropy,
         }
 
@@ -337,6 +379,7 @@ def action_stats_from_logits(actions) -> dict[str, torch.Tensor]:
         "p_strong_brake": p_strong_brake,
         "brake_proxy": -accel,
         "log_p_brake": p_brake.clamp_min(1e-8).log(),
+        "brake_minus_throttle": p_brake - p_throttle,
         "entropy": entropy,
     }
 

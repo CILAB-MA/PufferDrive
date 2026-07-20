@@ -74,29 +74,81 @@ def build_human_replay_drive_args(
     return args
 
 
-def resolve_run_dir(base_path: str, exp_name: str, run_dir: str | None = None) -> str:
-    from load_ckpt import find_run_dirs
+def is_flat_policy_ckpt(path: str) -> bool:
+    from load_ckpt import is_flat_policy_ckpt as _is_flat
 
-    if run_dir:
+    return _is_flat(path)
+
+
+def resolve_policy_location(
+    base_path: str,
+    exp_name: str,
+    location: str | None = None,
+    *,
+    sweep_id: str | None = None,
+    prefer_final: bool = True,
+) -> str:
+    from load_ckpt import resolve_policy_location as _resolve
+
+    return _resolve(
+        base_path,
+        exp_name,
+        location,
+        sweep_id=sweep_id,
+        prefer_final=prefer_final,
+    )
+
+
+def resolve_run_dir(base_path: str, exp_name: str, run_dir: str | None = None) -> str:
+    """Legacy helper: returns a run directory. Prefer :func:`resolve_policy_location`."""
+    from load_ckpt import resolve_policy_location
+
+    if run_dir and (run_dir.endswith(".pt") or is_flat_policy_ckpt(run_dir)):
         return os.path.abspath(run_dir)
-    exp_path = os.path.join(base_path, exp_name)
-    run_dirs = find_run_dirs(exp_path)
-    if not run_dirs:
-        raise FileNotFoundError(f"No run dirs under {exp_path}")
-    return run_dirs[0][1]
+    try:
+        return resolve_policy_location(base_path, exp_name, run_dir, prefer_final=False)
+    except (FileNotFoundError, ValueError):
+        from load_ckpt import find_run_dirs
+
+        if run_dir:
+            return os.path.abspath(run_dir)
+        exp_path = os.path.join(base_path, exp_name)
+        run_dirs = find_run_dirs(exp_path)
+        if not run_dirs:
+            raise FileNotFoundError(f"No run dirs under {exp_path}")
+        return run_dirs[0][1]
 
 
 def pick_checkpoint(
-    run_dir: str,
+    location: str,
     *,
     device: str,
     probe_step: int | None,
 ):
-    from load_ckpt import Checkpoint, iter_checkpoints
+    """Load checkpoint tensors on CPU; ``load_state_dict`` copies them to the policy.
 
-    checkpoints = list(iter_checkpoints(run_dir, device=device, load_state=True))
+    Loading directly onto CUDA temporarily duplicates the model weights and can
+    OOM an otherwise viable rollout.
+    """
+    from load_ckpt import Checkpoint, iter_checkpoints, is_flat_policy_ckpt, load_checkpoint
+
+    if is_flat_policy_ckpt(location) or (
+        location.endswith(".pt") and os.path.isfile(location)
+    ):
+        state_dict = load_checkpoint(location, device="cpu")
+        step = int(probe_step) if probe_step is not None else 0
+        return Checkpoint(step=step, path=location, state_dict=state_dict)
+
+    checkpoints = list(
+        iter_checkpoints(
+            location,
+            device="cpu",
+            map_location="cpu",
+            load_state=True,
+        )
+    )
     if not checkpoints:
-        raise FileNotFoundError(f"No checkpoints in {run_dir}")
+        raise FileNotFoundError(f"No checkpoints in {location}")
     if probe_step is None:
         return checkpoints[-1]
     for ckpt in checkpoints:
@@ -104,7 +156,7 @@ def pick_checkpoint(
             return ckpt
     available = ", ".join(f"{c.step:06d}" for c in checkpoints)
     raise FileNotFoundError(
-        f"No checkpoint step {probe_step:06d} in {run_dir} (have: {available})"
+        f"No checkpoint step {probe_step:06d} in {location} (have: {available})"
     )
 
 

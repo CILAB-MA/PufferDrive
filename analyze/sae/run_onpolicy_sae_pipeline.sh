@@ -7,7 +7,8 @@
 #
 # Usage:
 #   TRAIN_NUM_MAPS=10000 VAL_NUM_MAPS=1500 GPU_ID=0 PROBE_STEP=1908 \
-#     MAX_MIN_DIST_M=10 ./analyze/sae/run_onpolicy_sae_pipeline.sh
+#     ./analyze/sae/run_onpolicy_sae_pipeline.sh
+#   MAX_MIN_DIST_M=25 MIN_OTHER_SPEED_MPS=0.5 ./analyze/sae/run_onpolicy_sae_pipeline.sh
 #   SKIP_VAL_COLLECT=1 TRAIN_NUM_MAPS=1000 ./analyze/sae/run_onpolicy_sae_pipeline.sh
 
 set -euo pipefail
@@ -26,7 +27,9 @@ DEVICE="${DEVICE:-cuda}"
 TRAIN_NUM_MAPS="${TRAIN_NUM_MAPS:-10000}"
 VAL_NUM_MAPS="${VAL_NUM_MAPS:-1500}"
 PROBE_STEP="${PROBE_STEP:-1908}"
-MAX_MIN_DIST_M="${MAX_MIN_DIST_M:-25.0}"
+MAX_MIN_DIST_M="${MAX_MIN_DIST_M:--1}"
+MIN_OTHER_SPEED_MPS="${MIN_OTHER_SPEED_MPS:-0.5}"
+MIN_EGO_SPEED_MPS="${MIN_EGO_SPEED_MPS:-0.0}"
 MAX_TIMESTEPS_PER_PAIR="${MAX_TIMESTEPS_PER_PAIR:-4}"
 MIN_TIMESTEP_GAP="${MIN_TIMESTEP_GAP:-8}"
 MAX_SAMPLES_PER_SCENE="${MAX_SAMPLES_PER_SCENE:-64}"
@@ -56,6 +59,8 @@ collect_one() {
     --device "$DEVICE"
     --data-mode "$data_mode"
     --max-min-dist-m "$MAX_MIN_DIST_M"
+    --min-other-speed-mps "$MIN_OTHER_SPEED_MPS"
+    --min-ego-speed-mps "$MIN_EGO_SPEED_MPS"
     --max-timesteps-per-pair "$MAX_TIMESTEPS_PER_PAIR"
     --min-timestep-gap "$MIN_TIMESTEP_GAP"
     --max-samples-per-scene "$MAX_SAMPLES_PER_SCENE"

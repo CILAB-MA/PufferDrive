@@ -152,8 +152,18 @@ ATTR_METRICS = (
     ("p_strong_brake", "attr_p_strong_brake"),
     ("accel", "attr_accel"),
     ("log_p_brake", "attr_log_p_brake"),
+    ("p_throttle", "attr_p_throttle"),
+    ("brake_minus_throttle", "attr_brake_minus_throttle"),
+    ("steer", "attr_steer"),
     ("entropy", "attr_entropy"),
     ("steer_mag", "attr_steer_mag"),
+)
+# Paper-facing primary set (headline tables + seed aggregation).
+EXTENDED_PRIMARY_METRICS = (
+    "attr_p_brake",
+    "attr_steer",
+    "attr_p_throttle",
+    "attr_brake_minus_throttle",
 )
 
 
@@ -997,7 +1007,7 @@ def main() -> None:
         create_vecenv,
         load_policy_from_checkpoint,
         pick_checkpoint,
-        resolve_run_dir,
+        resolve_policy_location,
         safe_close_vecenv,
     )
 
@@ -1019,8 +1029,8 @@ def main() -> None:
         )
         results["embedding"][alias] = emb
 
-        run = resolve_run_dir(args.base_path, exp)
-        ckpt_pol = pick_checkpoint(run, device=str(device), probe_step=args.probe_step)
+        loc = resolve_policy_location(args.base_path, exp, prefer_final=True)
+        ckpt_pol = pick_checkpoint(loc, device=str(device), probe_step=args.probe_step)
         drive_args = build_human_replay_drive_args(
             None, num_maps=1, device=str(device), data_mode=args.data_mode
         )

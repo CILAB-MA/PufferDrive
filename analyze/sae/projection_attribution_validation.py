@@ -5,7 +5,7 @@ Checks (see user spec):
   1. Observation-level median, bootstrap 95% CI, frac(ReCord>Reactive), Wilcoxon
   2. Raw / cos / σ-scaled attribution
   3. Max-pool vs winning-slot vs slot-only paths
-  4. Extended action metrics (brake, neg-accel, strong-brake, steer, value, entropy)
+  4. Extended action metrics (brake, throttle, steer, net slowing, accel, value, entropy)
   5. Finite-difference dose-response monotonicity (steering causal check)
   6. Blind feature selection (matched triples + enrichment, fixed before attribution)
   7. Negative controls (random dir, lane/non-conflict, permuted pairing)
@@ -34,6 +34,7 @@ from feature_matching import (  # noqa: E402
     resolve_model_name,
 )
 from feature_steering import (  # noqa: E402
+    EXTENDED_PRIMARY_METRICS,
     MODELS,
     PRETTY,
     discover_sae_ckpts,
@@ -243,16 +244,11 @@ def _load_policy(base_path: str, exp: str, probe_step: int, device, run_dir: str
         create_vecenv,
         load_policy_from_checkpoint,
         pick_checkpoint,
-        resolve_run_dir,
+        resolve_policy_location,
     )
 
-    run = run_dir or resolve_run_dir(base_path, exp)
-    try:
-        ckpt = pick_checkpoint(run, device=str(device), probe_step=probe_step)
-    except FileNotFoundError as exc:
-        raise FileNotFoundError(
-            f"skip: missing probe_step={probe_step:06d} in {run} ({exc})"
-        ) from exc
+    loc = resolve_policy_location(base_path, exp, run_dir, prefer_final=True)
+    ckpt = pick_checkpoint(loc, device=str(device), probe_step=probe_step)
     drive_args = build_human_replay_drive_args(
         None, num_maps=1, device=str(device), data_mode="validation"
     )
@@ -260,7 +256,7 @@ def _load_policy(base_path: str, exp: str, probe_step: int, device, run_dir: str
     pol = create_policy(drive_args, vec, env_name="puffer_drive")
     load_policy_from_checkpoint(pol, ckpt.state_dict)
     pol.to(device).eval()
-    return pol, vec, run
+    return pol, vec, loc
 
 
 def run_single_policy_attribution(
@@ -348,6 +344,16 @@ def run_single_policy_attribution(
                 row[f"{variant}_{metric_name}_mean"] = s["mean"]
         feature_rows.append(row)
 
+    obs_level_out = {
+        "row_indices": obs_level["row_indices"].tolist(),
+        "feature_scales": obs_level["feature_scales"],
+    }
+    for metric_name in EXTENDED_PRIMARY_METRICS:
+        for variant in ATTR_VARIANTS:
+            obs_level_out[f"{variant}_{metric_name}"] = obs_level["arrays"][variant][
+                metric_name
+            ].tolist()
+
     return {
         "alias": alias,
         "exp": exp,
@@ -358,12 +364,7 @@ def run_single_policy_attribution(
         "feature_summaries": summaries,
         "feature_rows": feature_rows,
         "obs_level": {
-            "row_indices": obs_level["row_indices"].tolist(),
-            "feature_scales": obs_level["feature_scales"],
-            # store primary metric arrays only (compact)
-            "raw_attr_p_brake": obs_level["arrays"]["raw"][PRIMARY_METRIC].tolist(),
-            "cos_attr_p_brake": obs_level["arrays"]["cos"][PRIMARY_METRIC].tolist(),
-            "scaled_attr_p_brake": obs_level["arrays"]["scaled"][PRIMARY_METRIC].tolist(),
+            **obs_level_out,
         },
         "fd_monotonicity": fd_monotonicity_report(fd),
         "fd": fd,
@@ -384,6 +385,7 @@ def run_negative_controls(
     max_rows: int,
     batch_size: int,
     row_mask: np.ndarray | None,
+    policy_run_dir: str | None = None,
 ) -> dict:
     """Random direction + semantic negative features."""
     primary = run_single_policy_attribution(
@@ -399,6 +401,7 @@ def run_negative_controls(
         max_rows=max_rows,
         batch_size=batch_size,
         row_mask=row_mask,
+        policy_run_dir=policy_run_dir,
     )
     neg: dict = {"primary_conflict": primary}
 
@@ -418,6 +421,7 @@ def run_negative_controls(
             max_rows=max_rows,
             batch_size=batch_size,
             row_mask=row_mask,
+            policy_run_dir=policy_run_dir,
         )
 
     # Shuffled obs–feature pairing: permute attribution rows within feature
@@ -443,11 +447,11 @@ def cross_policy_paired_stats(
         return {}
 
     rec_raw = np.asarray(
-        results_by_alias["record"]["obs_level"][f"{variant}_attr_p_brake"],
+        results_by_alias["record"]["obs_level"][f"{variant}_{metric}"],
         dtype=np.float64,
     )
     rea_raw = np.asarray(
-        results_by_alias["reactive"]["obs_level"][f"{variant}_attr_p_brake"],
+        results_by_alias["reactive"]["obs_level"][f"{variant}_{metric}"],
         dtype=np.float64,
     )
     n_feat = min(rec_raw.shape[1], rea_raw.shape[1], len(matched_features["record"]))
@@ -484,7 +488,7 @@ def cross_policy_paired_stats(
         "mean_median_attr": {
             a: float(
                 np.median(
-                    np.asarray(results_by_alias[a]["obs_level"][f"{variant}_attr_p_brake"])
+                    np.asarray(results_by_alias[a]["obs_level"][f"{variant}_{metric}"])
                 )
             )
             for a in results_by_alias
@@ -492,30 +496,81 @@ def cross_policy_paired_stats(
     }
 
 
-def aggregate_policy_seeds(seed_results: list[dict]) -> dict:
+def cross_metric_sign_consistency(
+    results_by_alias: dict[str, dict],
+    *,
+    variant: str = "raw",
+) -> dict:
+    """Brake vs accel attribution should oppose at feature median (brake↑ ⇒ accel↓)."""
+    rec = results_by_alias.get("record")
+    if not rec:
+        return {}
+    obs = rec.get("obs_level") or {}
+    brake_key = f"{variant}_attr_p_brake"
+    accel_key = f"{variant}_attr_accel"
+    if brake_key not in obs or accel_key not in obs:
+        return {}
+    brake = np.asarray(obs[brake_key], dtype=np.float64)
+    accel = np.asarray(obs[accel_key], dtype=np.float64)
+    if brake.ndim != 2 or accel.shape != brake.shape:
+        return {}
+    per_feature = []
+    consistent = 0
+    for j in range(brake.shape[1]):
+        b_med = float(np.median(brake[:, j]))
+        a_med = float(np.median(accel[:, j]))
+        ok = (b_med == 0.0 and a_med == 0.0) or (np.sign(b_med) != np.sign(a_med))
+        if ok:
+            consistent += 1
+        per_feature.append(
+            {
+                "feature_index": int(j),
+                "median_attr_p_brake": b_med,
+                "median_attr_accel": a_med,
+                "sign_consistent": bool(ok),
+            }
+        )
+    n_feat = brake.shape[1]
+    return {
+        "variant": variant,
+        "n_features": int(n_feat),
+        "frac_sign_consistent": float(consistent / n_feat) if n_feat else None,
+        "per_feature": per_feature,
+        "note": "median(attr_p_brake) and median(attr_accel) should have opposite signs",
+    }
+
+
+def aggregate_policy_seeds(
+    seed_results: list[dict],
+    *,
+    metrics: tuple[str, ...] = EXTENDED_PRIMARY_METRICS,
+) -> dict:
     """Mean ± std across policy training seeds."""
     if not seed_results:
         return {}
     aliases = seed_results[0].get("by_alias", {}).keys()
-    out = {}
-    for alias in aliases:
-        medians = []
-        for run in seed_results:
-            if alias not in run.get("by_alias", {}):
-                continue
-            rows = run["by_alias"][alias]["feature_rows"]
-            if not rows:
-                continue
-            medians.append(
-                float(np.mean([r.get("raw_attr_p_brake_median", np.nan) for r in rows]))
-            )
-        if medians:
-            out[alias] = {
-                "n_seeds": len(medians),
-                "mean_median_attr_p_brake": float(np.mean(medians)),
-                "std_median_attr_p_brake": float(np.std(medians)),
-                "per_seed": medians,
-            }
+    out: dict = {}
+    for metric in metrics:
+        metric_out: dict = {}
+        for alias in aliases:
+            medians = []
+            for run in seed_results:
+                if alias not in run.get("by_alias", {}):
+                    continue
+                rows = run["by_alias"][alias]["feature_rows"]
+                if not rows:
+                    continue
+                key = f"raw_{metric}_median"
+                medians.append(float(np.mean([r.get(key, np.nan) for r in rows])))
+            if medians:
+                metric_out[alias] = {
+                    "n_seeds": len(medians),
+                    f"mean_median_{metric}": float(np.mean(medians)),
+                    f"std_median_{metric}": float(np.std(medians)),
+                    "per_seed": medians,
+                }
+        if metric_out:
+            out[metric] = metric_out
     return out
 
 
@@ -548,7 +603,7 @@ def main() -> None:
         "--policy-run-dirs",
         type=str,
         default=None,
-        help="override policy ckpt dirs: record=path;reactive=path;selfplay=path",
+        help="override policy ckpt paths: record=/path/puffer_drive_id.pt;reactive=path;selfplay=path",
     )
     args = p.parse_args()
 
@@ -653,8 +708,16 @@ def main() -> None:
         run_entry["pool_comparisons"][pool_mode] = {
             "by_alias": {a: by_alias[a] for a in by_alias},
             "paired": {
-                v: cross_policy_paired_stats(by_alias, matched, variant=v)
+                v: {
+                    metric: cross_policy_paired_stats(
+                        by_alias, matched, variant=v, metric=metric
+                    )
+                    for metric in EXTENDED_PRIMARY_METRICS
+                }
                 for v in ATTR_VARIANTS
+            },
+            "cross_metric_consistency": {
+                v: cross_metric_sign_consistency(by_alias, variant=v) for v in ATTR_VARIANTS
             },
         }
         if pool_mode == pool_modes[0]:
@@ -674,13 +737,14 @@ def main() -> None:
             max_rows=args.max_rows,
             batch_size=args.batch_size,
             row_mask=row_mask,
+            policy_run_dir=policy_run_dirs.get("record"),
         )
 
     all_seed_results.append(run_entry)
     full_report["runs"].append(run_entry)
 
     primary = run_entry["pool_comparisons"].get(pool_modes[0], {})
-    paired_raw = primary.get("paired", {}).get("raw", {})
+    paired_raw = (primary.get("paired", {}).get("raw") or {}).get(PRIMARY_METRIC) or {}
     if paired_raw:
         p = paired_raw.get("pooled", {})
         print(
@@ -690,6 +754,24 @@ def main() -> None:
             f"p={p.get('wilcoxon_record_gt_reactive', {}).get('pvalue')}"
         )
         print(f"  Mean median attr by policy: {paired_raw.get('mean_median_attr')}")
+    for metric in EXTENDED_PRIMARY_METRICS:
+        if metric == PRIMARY_METRIC:
+            continue
+        block = (primary.get("paired", {}).get("raw") or {}).get(metric) or {}
+        p = block.get("pooled") or {}
+        if not p:
+            continue
+        print(
+            f"  Paired ReCord>Reactive (raw {metric}): "
+            f"frac={p.get('frac_record_gt_reactive')} "
+            f"medianΔ={p.get('median_delta')}"
+        )
+    cm = (primary.get("cross_metric_consistency") or {}).get("raw") or {}
+    if cm:
+        print(
+            f"  Brake/accel sign consistency (ReCord): "
+            f"frac={cm.get('frac_sign_consistent')}"
+        )
 
     full_report["policy_seed_aggregate"] = aggregate_policy_seeds(all_seed_results)
 
@@ -723,19 +805,41 @@ def main() -> None:
     if seed_info_path.is_file():
         slim["seed_info"] = json.loads(seed_info_path.read_text())
     for pm, block in full_report["runs"][0]["pool_comparisons"].items():
-        slim["headline"][pm] = {
-            v: {
-                "frac_record_gt_reactive": (block["paired"].get(v) or {}).get("pooled", {}).get(
-                    "frac_record_gt_reactive"
+        slim["headline"][pm] = {}
+        for v in ATTR_VARIANTS:
+            paired_v = block.get("paired", {}).get(v) or {}
+            primary_block = paired_v.get(PRIMARY_METRIC) or {}
+            pooled = primary_block.get("pooled") or {}
+            slim["headline"][pm][v] = {
+                "frac_record_gt_reactive": pooled.get("frac_record_gt_reactive"),
+                "median_delta": pooled.get("median_delta"),
+                "wilcoxon_p": (pooled.get("wilcoxon_record_gt_reactive") or {}).get(
+                    "pvalue"
                 ),
-                "median_delta": (block["paired"].get(v) or {}).get("pooled", {}).get("median_delta"),
-                "wilcoxon_p": ((block["paired"].get(v) or {}).get("pooled", {}) or {})
-                .get("wilcoxon_record_gt_reactive", {})
-                .get("pvalue"),
-                "median_attr_by_policy": (block["paired"].get(v) or {}).get("mean_median_attr"),
+                "median_attr_by_policy": primary_block.get("mean_median_attr"),
+                "by_metric": {
+                    metric: {
+                        "frac_record_gt_reactive": (
+                            (paired_v.get(metric) or {}).get("pooled") or {}
+                        ).get("frac_record_gt_reactive"),
+                        "median_delta": (
+                            (paired_v.get(metric) or {}).get("pooled") or {}
+                        ).get("median_delta"),
+                        "wilcoxon_p": (
+                            ((paired_v.get(metric) or {}).get("pooled") or {})
+                            .get("wilcoxon_record_gt_reactive", {})
+                            .get("pvalue")
+                        ),
+                        "median_attr_by_policy": (paired_v.get(metric) or {}).get(
+                            "mean_median_attr"
+                        ),
+                    }
+                    for metric in EXTENDED_PRIMARY_METRICS
+                },
+                "cross_metric_consistency": (
+                    block.get("cross_metric_consistency") or {}
+                ).get(v),
             }
-            for v in ATTR_VARIANTS
-        }
     slim_path = out_dir / "attribution_validation_summary.json"
     slim_path.write_text(json.dumps(slim, indent=2))
     print(f"Wrote {slim_path}")
