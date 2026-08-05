@@ -11,6 +11,7 @@ import os
 import sys
 import glob
 import ast
+import json
 import time
 import random
 import shutil
@@ -1836,6 +1837,181 @@ def sanity(env_name, args=None):
 
     return runs
 
+def _curriculum_rollout_types(types_sorted, num_collect_rollout):
+    """Build a staged curriculum type schedule of length num_collect_rollout.
+
+    Split rollouts into len(types) stages. Stage s only uses types_sorted[:s+1]
+    (easy→hard unlock), round-robin within the unlocked set.
+
+    Example types=[0,1,2], M=9:
+      [0, 0, 0,  0, 1, 0,  0, 1, 2]
+    """
+    types_sorted = list(types_sorted)
+    m = int(num_collect_rollout)
+    n_types = len(types_sorted)
+    if m < 1:
+        raise ValueError(f"num_collect_rollout must be >= 1, got {m}")
+    if n_types < 1:
+        raise ValueError("types_sorted must be non-empty")
+
+    # Even stage sizes; remainder goes to later stages.
+    base, rem = divmod(m, n_types)
+    stage_sizes = [base + (1 if s >= n_types - rem else 0) for s in range(n_types)]
+    rollout_types = []
+    for s, size in enumerate(stage_sizes):
+        allowed = types_sorted[: s + 1]
+        for i in range(size):
+            rollout_types.append(allowed[i % len(allowed)])
+    assert len(rollout_types) == m
+    return rollout_types
+
+
+def _normalize_path_arg(value, name):
+    """CLI paths go through ast.literal_eval; bare `...` becomes Ellipsis."""
+    if value is None or value is Ellipsis:
+        return ""
+    if not isinstance(value, str):
+        value = str(value)
+    value = value.strip()
+    if value in ("", "...", "Ellipsis", "None"):
+        return ""
+    return value
+
+
+def _load_collect_order(collect_order_path, num_collect_rollout, num_checkpoints=0):
+    """Load curriculum collect order JSON.
+
+    Schema:
+      {
+        "type_to_population": {"0": "/path/to/pop0", "1": "/path/to/pop1"},
+        "rollout_types": [0, 0, 1, ...]  # optional; auto curriculum schedule if omitted
+      }
+
+    When rollout_types is omitted, builds a staged schedule of length
+    num_collect_rollout (early = easy only, later = mix including harder types).
+    collect_num_checkpoints only limits how many *.pt are mixed per type.
+    Returns (type_to_population, rollout_types, num_collect_rollout).
+    """
+    path = _normalize_path_arg(collect_order_path, "collect_order_path")
+    if not path:
+        raise ValueError(
+            "collect_order_path is empty or invalid (did you pass ORDER_PATH=... from the docs? "
+            "Use a real file, e.g. analyze/curriculum_collect_order.example.json)"
+        )
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"collect_order_path not found: {path}")
+    with open(path, "r") as f:
+        order = json.load(f)
+
+    type_to_population = order.get("type_to_population")
+    if not isinstance(type_to_population, dict) or not type_to_population:
+        raise ValueError("collect_order JSON must include non-empty type_to_population")
+
+    type_to_population = {int(k): str(v) for k, v in type_to_population.items()}
+    for t, pop in type_to_population.items():
+        if not os.path.isdir(pop):
+            raise FileNotFoundError(f"type_to_population[{t}] is not a directory: {pop}")
+
+    types_sorted = sorted(type_to_population)
+    rollout_types = order.get("rollout_types")
+    if rollout_types is None or rollout_types == [] or rollout_types == "":
+        rollout_types = _curriculum_rollout_types(types_sorted, num_collect_rollout)
+    else:
+        if not isinstance(rollout_types, list):
+            raise ValueError("rollout_types must be a list when provided")
+        if len(rollout_types) != int(num_collect_rollout):
+            raise ValueError(
+                f"len(rollout_types)={len(rollout_types)} != num_collect_rollout={num_collect_rollout}"
+            )
+        rollout_types = [int(t) for t in rollout_types]
+        missing = sorted(set(rollout_types) - set(type_to_population))
+        if missing:
+            raise ValueError(
+                f"rollout_types reference unknown types (not in type_to_population): {missing}"
+            )
+
+    # num_checkpoints is validated later when loading; keep total = requested M.
+    _ = num_checkpoints
+    return type_to_population, rollout_types, int(num_collect_rollout)
+
+
+def _load_policies_from_population(population_path, args, vecenv, env_name, num_checkpoints=0):
+    """Load *.pt checkpoints under population_path as eval policies.
+
+    Checkpoints are sorted by filename. If num_checkpoints > 0, only the first N
+    are loaded; 0 means load all. All loaded policies are mixed in each rollout.
+
+    Returns (policies, checkpoint_filenames).
+    """
+    ckpts = sorted(f for f in os.listdir(population_path) if f.endswith(".pt"))
+    if not ckpts:
+        raise FileNotFoundError(f"No .pt checkpoints under {population_path}")
+    n = int(num_checkpoints)
+    if n > 0:
+        if n > len(ckpts):
+            raise ValueError(
+                f"collect_num_checkpoints={n} > available checkpoints ({len(ckpts)}) "
+                f"under {population_path}: {ckpts}"
+            )
+        ckpts = ckpts[:n]
+    print(f"  using {len(ckpts)} checkpoint(s) from {population_path}: {ckpts}")
+    policies = []
+    for op in ckpts:
+        args2 = args.copy()
+        args2["load_model_path"] = os.path.join(population_path, op)
+        policy2 = load_policy(args2, vecenv, env_name)
+        policies.append(policy2.eval())
+    return policies, ckpts
+
+
+def _build_population_key_table(type_to_ckpts):
+    """Flatten (type -> checkpoint list) into global population keys.
+
+    Returns:
+      keys: list of {key, type, population, checkpoint}
+      type_to_local_to_global: {type: np.ndarray[int32] local_idx -> global_key}
+    """
+    keys = []
+    type_to_local_to_global = {}
+    for t in sorted(type_to_ckpts):
+        pop_path, ckpts = type_to_ckpts[t]
+        lut = []
+        for ckpt in ckpts:
+            gid = len(keys)
+            lut.append(gid)
+            keys.append(
+                {
+                    "key": gid,
+                    "type": int(t),
+                    "population": str(pop_path),
+                    "checkpoint": str(ckpt),
+                }
+            )
+        type_to_local_to_global[int(t)] = np.asarray(lut, dtype=np.int32)
+    return keys, type_to_local_to_global
+
+
+def _write_population_manifest(population_path, keys, type_to_ckpts):
+    """Write lookup table for saved/population_keys.npy (and shard copies)."""
+    manifest = {
+        "keys": keys,
+        "type_to_checkpoints": {
+            str(t): {"population": pop, "checkpoints": list(ckpts)}
+            for t, (pop, ckpts) in sorted(type_to_ckpts.items())
+        },
+        "note": (
+            "saved/population_keys.npy has shape (num_rollouts, num_agents). "
+            "Entry [r, a] is an index into keys[]; keys[i] identifies which "
+            "population checkpoint acted for that agent in that rollout."
+        ),
+    }
+    out = os.path.join(population_path, "population_manifest.json")
+    with open(out, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+    print(f"Wrote {out} ({len(keys)} population keys)")
+    return out
+
+
 def zero_shot(env_name, args=None, vecenv=None, policies=None):
     args = args or load_config(env_name)
     args["env"]["map_dir"] = args["eval"]["map_dir"]
@@ -1849,32 +2025,104 @@ def zero_shot(env_name, args=None, vecenv=None, policies=None):
     args["vec"] = dict(backend=backend, num_envs=1)
     # args["env"]["control_mode"] = args["eval"]["human_replay_control_mode"]
     args["env"]["episode_length"] = 91  # WOMD scenario length
-    args["env"]["num_maps"] = 10000 
-    vecenv = vecenv or load_env(env_name, args)
     args2 = args.copy()
-    if args["pbt"]["pbt_mode"] == "save-population":
-        policies = []
+
+    if (
+        args["pbt"]["pbt_mode"] == "save-population"
+        and not args.get("load_multiple_model_path")
+    ):
+        # Population trajectory collect. Pairwise zero-shot eval always passes
+        # --load-multiple-model-path and must not enter this branch even though
+        # drive.ini defaults pbt_mode=save-population.
         num_collect_rollout = int(args["pbt"].get("num_collect_rollout", 50))
         start_idx = int(args["pbt"].get("collect_start_idx", 0))
         end_idx = int(args["pbt"].get("collect_end_idx", num_collect_rollout))
+        collect_order_path = _normalize_path_arg(
+            args["pbt"].get("collect_order_path"), "collect_order_path"
+        )
+        collect_num_checkpoints = int(args["pbt"].get("collect_num_checkpoints", 0) or 0)
+        skip_smoke = bool(args["pbt"].get("skip_collect_smoke_test", True))
+
+        # Validate order / paths before the expensive 10k-map env load.
+        policies_by_type = None
+        rollout_types = None
+        type_to_population = None
+        if collect_order_path:
+            type_to_population, rollout_types, num_collect_rollout = _load_collect_order(
+                collect_order_path,
+                num_collect_rollout,
+                num_checkpoints=collect_num_checkpoints,
+            )
+            if end_idx > num_collect_rollout:
+                raise ValueError(
+                    f"collect_end_idx={end_idx} > num_collect_rollout={num_collect_rollout}"
+                )
+
         if not (0 <= start_idx < end_idx <= num_collect_rollout):
             raise ValueError(
                 "Need 0 <= collect_start_idx < collect_end_idx <= num_collect_rollout; "
                 f"got start_idx={start_idx}, end_idx={end_idx}, num_collect_rollout={num_collect_rollout}"
             )
-        shard_len = end_idx - start_idx
-        args["env"]["num_maps"] = 10000  # tmp
+
+        # Keep 910-step collect horizon, but disable Drive.step mid-episode map rebuild
+        # (which switches to sequential_map_sampling=False and breaks env reuse).
+        # store collect_horizon outside env kwargs — Drive.__init__ does not accept it.
+        collect_horizon = int(args["env"].get("resample_frequency", 910) or 910)
+        args["env"]["resample_frequency"] = 0
+        args["env"]["num_maps"] = 10000
+        args["env"]["sequential_map_sampling"] = True
+        # Used by OtherReplayEvaluator.collect_rollouts (not passed into Drive).
+        args["collect_horizon"] = collect_horizon
+
+        print(
+            f"Collect setup: maps={args['env']['num_maps']}, "
+            f"collect_horizon={collect_horizon}, resample_frequency=0 (env reuse), "
+            f"skip_smoke={skip_smoke}, shard=[{start_idx},{end_idx})/{num_collect_rollout}"
+        )
         vecenv = load_env(env_name, args)
         evaluator = OtherReplayEvaluator(args)
-        populations = [
-            f for f in os.listdir(args["pbt"]["population_path"])
-            if f.endswith(".pt")
-        ]
-        for op in populations:
-            args2 = args.copy()
-            args2["load_model_path"] = os.path.join(args["pbt"]["population_path"], op)
-            policy2 = load_policy(args2, vecenv, env_name)
-            policies.append(policy2.eval())
+
+        if collect_order_path:
+            policies_by_type = {}
+            ckpts_by_type = {}
+            for t, pop_path in type_to_population.items():
+                print(f"Loading policies for type={t} from {pop_path}")
+                policies_by_type[t], ckpts_by_type[t] = _load_policies_from_population(
+                    pop_path,
+                    args,
+                    vecenv,
+                    env_name,
+                    num_checkpoints=collect_num_checkpoints,
+                )
+            type_to_ckpts = {
+                t: (type_to_population[t], ckpts_by_type[t]) for t in type_to_population
+            }
+            from collections import Counter
+            counts = Counter(rollout_types)
+            print(
+                f"Curriculum collect order: {collect_order_path} "
+                f"(out={args['pbt']['population_path']}, "
+                f"collect_num_checkpoints={collect_num_checkpoints or 'all'}, "
+                f"num_collect_rollout={num_collect_rollout}, "
+                f"type_counts={dict(sorted(counts.items()))})"
+            )
+            print(f"  rollout_types={rollout_types}")
+        else:
+            policies, ckpts = _load_policies_from_population(
+                args["pbt"]["population_path"],
+                args,
+                vecenv,
+                env_name,
+                num_checkpoints=collect_num_checkpoints,
+            )
+            type_to_ckpts = {
+                -1: (args["pbt"]["population_path"], ckpts),
+            }
+
+        pop_keys_table, type_to_local_to_global = _build_population_key_table(type_to_ckpts)
+        _write_population_manifest(args["pbt"]["population_path"], pop_keys_table, type_to_ckpts)
+
+        shard_len = end_idx - start_idx
         split_dir = os.path.join(args["pbt"]["population_path"], "splits")
         os.makedirs(split_dir, exist_ok=True)
         tag = f"{start_idx:06d}_{end_idx:06d}"
@@ -1882,14 +2130,29 @@ def zero_shot(env_name, args=None, vecenv=None, policies=None):
         fp_ao = os.path.join(split_dir, f"agent_offsets_{tag}.npy")
         fp_m = os.path.join(split_dir, f"map_ids_{tag}.npy")
         fp_gid = os.path.join(split_dir, f"global_ids_{tag}.npy")
-        mm_a = mm_ao = mm_m = mm_gid = None
+        fp_types = os.path.join(split_dir, f"types_{tag}.npy")
+        fp_pop = os.path.join(split_dir, f"population_keys_{tag}.npy")
+        mm_a = mm_ao = mm_m = mm_gid = mm_types = mm_pop = None
         for local_i, global_i in enumerate(range(start_idx, end_idx)):
-            other_action_buf, agent_offsets, map_ids, global_ids = evaluator.collect_rollouts(
-                args, vecenv, policies
+            if policies_by_type is not None:
+                rollout_type = int(rollout_types[global_i])
+                policies = policies_by_type[rollout_type]
+            else:
+                rollout_type = -1
+            other_action_buf, agent_offsets, map_ids, global_ids, local_policy_ids = (
+                evaluator.collect_rollouts(args, vecenv, policies)
             )
+            lut = type_to_local_to_global[rollout_type]
+            if int(local_policy_ids.max()) >= int(lut.shape[0]):
+                raise ValueError(
+                    f"Rollout {global_i}: local policy id {int(local_policy_ids.max())} "
+                    f">= num policies {int(lut.shape[0])} for type={rollout_type}"
+                )
+            population_keys = lut[local_policy_ids]
             agent_offsets = np.asarray(agent_offsets, dtype=np.int32, order="C")
             map_ids = np.asarray(map_ids, dtype=np.int32, order="C")
             global_ids = np.asarray(global_ids, dtype=np.int32, order="C")
+            population_keys = np.asarray(population_keys, dtype=np.int32, order="C")
             if local_i == 0:
                 na, T, c = other_action_buf.shape
                 jo = int(agent_offsets.size)
@@ -1910,31 +2173,56 @@ def zero_shot(env_name, args=None, vecenv=None, policies=None):
                 mm_gid = np.lib.format.open_memmap(
                     fp_gid, mode="w+", dtype=np.int32, shape=(shard_len, nm, me)
                 )
+                mm_types = np.lib.format.open_memmap(
+                    fp_types, mode="w+", dtype=np.int32, shape=(shard_len,)
+                )
+                mm_pop = np.lib.format.open_memmap(
+                    fp_pop, mode="w+", dtype=np.int32, shape=(shard_len, na)
+                )
+            if other_action_buf.shape != (na, T, c):
+                raise ValueError(
+                    f"Rollout {global_i} action shape {other_action_buf.shape} != "
+                    f"first-rollout shape {(na, T, c)}; env layout changed unexpectedly"
+                )
+            if population_keys.shape != (na,):
+                raise ValueError(
+                    f"Rollout {global_i} population_keys shape {population_keys.shape} != ({na},)"
+                )
             mm_a[local_i] = np.ascontiguousarray(other_action_buf)
             mm_ao[local_i] = agent_offsets.reshape(mm_ao.shape[1:])
             mm_m[local_i] = map_ids.reshape(mm_m.shape[1:])
             mm_gid[local_i] = global_ids
-            # to initialize
-            vecenv.close()
-            vecenv = load_env(env_name, args)
+            mm_types[local_i] = rollout_type
+            mm_pop[local_i] = population_keys
+            # Env stays alive: collect_rollouts() calls reset(); resample_frequency=0
+            # prevents Drive.step from rebuilding maps mid-horizon.
+            type_msg = f", type={rollout_type}" if policies_by_type is not None else ""
             print(
                 f"Collected shard {local_i + 1}/{shard_len} "
-                f"(global rollout {global_i + 1}/{num_collect_rollout}), shape: {other_action_buf.shape}"
+                f"(global rollout {global_i + 1}/{num_collect_rollout}{type_msg}), "
+                f"shape: {other_action_buf.shape}, "
+                f"pop_keys={np.unique(population_keys).tolist()}"
             )
-        del mm_a, mm_ao, mm_m, mm_gid
+        del mm_a, mm_ao, mm_m, mm_gid, mm_types, mm_pop
+        print(f"Wrote {fp_types}")
+        print(f"Wrote {fp_pop}")
         print(
             f"Wrote split memmaps under {split_dir} tag={tag} "
             f"(shard_len={shard_len}, agents={na}, T={T}). "
-            f"Merge with: python data_concat.py --population-path {args['pbt']['population_path']} "
+            f"Merge with: python analyze/data_concat.py --population-path {args['pbt']['population_path']} "
             f"--total-rollouts {num_collect_rollout}"
         )
-        if start_idx == 0 and end_idx == num_collect_rollout:
+        if skip_smoke:
+            try:
+                vecenv.close()
+            except Exception:
+                pass
+            print("Skipped replay smoke-test (--pbt.skip-collect-smoke-test True).")
+        elif start_idx == 0 and end_idx == num_collect_rollout:
             actions_rd = np.load(fp_a, mmap_mode="r")
             for i in range(shard_len):
                 evaluator.replay_rollouts(args, vecenv, np.asarray(actions_rd[i], dtype=actions_rd.dtype))
-                if i != shard_len - 1:
-                    vecenv.close()
-                    vecenv = load_env(env_name, args)
+                # replay may advance tick; reset between smoke iters
             vecenv.close()
             print("Finished replay smoke-test (full single-shard run).")
         else:
@@ -1946,7 +2234,10 @@ def zero_shot(env_name, args=None, vecenv=None, policies=None):
                 "Skipped replay smoke-test for partial shard; run data_concat.py then replay training/eval."
             )
         return None
-    
+
+    args["env"]["num_maps"] = 10000
+    vecenv = vecenv or load_env(env_name, args)
+
     args["load_model_path"] = args["load_multiple_model_path"][0]
     policy1 = load_policy(args, vecenv, env_name)
 

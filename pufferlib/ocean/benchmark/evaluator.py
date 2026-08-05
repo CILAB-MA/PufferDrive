@@ -989,25 +989,39 @@ class OtherReplayEvaluator:
         base, rem = divmod(obs.shape[0], len(policies))
         counts = [base + (i < rem) for i in range(len(policies))]
         other_indices = []
+        # Per-agent local index into ``policies`` (which ckpt acted for that agent).
+        policy_ids = np.full(obs.shape[0], -1, dtype=np.int32)
         p = 0
         states = []
         for i, count in enumerate(counts):
             indices = pool[p:p+count]
             p += count
             other_indices.append(indices)
+            policy_ids[indices] = i
             states.append(dict(
                 lstm_h=torch.zeros(count, policies[i].hidden_size, device=device),
                 lstm_c=torch.zeros(count, policies[i].hidden_size, device=device),
             ))
-        other_action_buf = np.zeros((obs.shape[0], args["env"]["resample_frequency"], 1))
+        if int((policy_ids < 0).sum()) != 0:
+            raise RuntimeError("collect_rollouts: some agents were not assigned a policy")
         os.makedirs(f"{args['pbt']['population_path']}/replay", exist_ok=True)
         total_results = []
         ar = np.arange(num_agents, dtype=np.int64)
         other_masks = [np.isin(ar, other_indices[policy_idx]) for policy_idx in range(len(policies))]
         total_actions = np.zeros((obs.shape[0], 1), dtype=np.int64)
+        collect_horizon = int(
+            args.get("collect_horizon")
+            or args["env"].get("collect_horizon")
+            or args["env"]["resample_frequency"]
+        )
+        if collect_horizon < 1:
+            raise ValueError(f"collect_horizon must be >= 1, got {collect_horizon}")
+        # Action buffer length follows collect horizon (not env.resample_frequency, which
+        # may be 0 during collect to disable mid-episode map rebuild).
+        other_action_buf = np.zeros((obs.shape[0], collect_horizon, 1))
         with torch.inference_mode():
             for time_idx in tqdm(
-                range(args["env"]["resample_frequency"]),
+                range(collect_horizon),
                 desc="collect_rollouts",
                 leave=False,
             ):
@@ -1034,7 +1048,7 @@ class OtherReplayEvaluator:
         df = pd.DataFrame(total_results)
         mean_per_key = df.mean(numeric_only=True).to_dict()
         print(mean_per_key)
-        return other_action_buf, agent_offsets, map_ids, global_ids
+        return other_action_buf, agent_offsets, map_ids, global_ids, policy_ids
 
     def replay_rollouts(self, args, puffer_env, loaded_actions):
         import numpy as np

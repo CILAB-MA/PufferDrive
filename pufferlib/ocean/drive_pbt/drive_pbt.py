@@ -18,6 +18,10 @@ _PARTNER_REL_SCALE = 0.02  # drive.h: rel_xy stored as meters * 0.02
 from tqdm import tqdm
 from pufferlib.pufferl import load_policy
 from pufferlib.ocean.drive_pbt.agent_sampler import AgentSampler
+from pufferlib.ocean.drive_pbt.curriculum_sampler import (
+    CurriculumSampler,
+    load_difficulty_types,
+)
 
 class Drive_PBT(pufferlib.PufferEnv):
     def __init__(
@@ -62,6 +66,9 @@ class Drive_PBT(pufferlib.PufferEnv):
         ego_ratio=0.0, # for replay
         agent_sampling=False,
         strategy="prioritized",
+        curriculum_types=None,
+        curriculum_types_path=None,
+        curriculum_steps=10000,
         scenario_log_path=None,
     ):
         # env
@@ -272,11 +279,13 @@ class Drive_PBT(pufferlib.PufferEnv):
             self.rollout_flatten = np.full(n_other, -1, dtype=np.int64)
             self._init_minimum_map_idx(self.map_ids)
 
-            self.agent_sampler = AgentSampler(
+            self.agent_sampler = self._make_agent_sampler(
                 num_population=int(self.other_actions.shape[0]),
                 strategy=strategy,
-                pbt_mode=self.pbt_mode,
                 num_assignments=self.num_maps,
+                curriculum_types=curriculum_types,
+                curriculum_types_path=curriculum_types_path,
+                curriculum_steps=curriculum_steps,
             )
             self._last_sampling_metrics = {}
         else:
@@ -298,13 +307,42 @@ class Drive_PBT(pufferlib.PufferEnv):
                 self.minimum_other_local_idx = np.full(n_other, -1, dtype=np.int64)
                 self.minimum_other_global_idx = np.full(n_other, -1, dtype=np.int64)
                 self.score_metric = np.zeros(n_other, dtype=np.float32)
-                self.agent_sampler = AgentSampler(
+                self.agent_sampler = self._make_agent_sampler(
                     num_population=self.num_other_policies,
                     strategy=strategy,
-                    pbt_mode=self.pbt_mode,
                     num_assignments=self.total_agents,
+                    curriculum_types=curriculum_types,
+                    curriculum_types_path=curriculum_types_path,
+                    curriculum_steps=curriculum_steps,
                 )
                 self._last_sampling_metrics = {}
+
+    def _make_agent_sampler(
+        self,
+        num_population,
+        strategy,
+        num_assignments,
+        curriculum_types=None,
+        curriculum_types_path=None,
+        curriculum_steps=10000,
+    ):
+        if strategy == "curriculum":
+            types = load_difficulty_types(
+                curriculum_types, curriculum_types_path, num_population
+            )
+            return CurriculumSampler(
+                num_population=num_population,
+                difficulty_types=types,
+                curriculum_steps=curriculum_steps,
+                pbt_mode=self.pbt_mode,
+                num_assignments=num_assignments,
+            )
+        return AgentSampler(
+            num_population=num_population,
+            strategy=strategy,
+            pbt_mode=self.pbt_mode,
+            num_assignments=num_assignments,
+        )
 
     def _init_minimum_map_idx(self, map_ids):
         map_ids = np.asarray(map_ids, dtype=np.int64).reshape(-1)
