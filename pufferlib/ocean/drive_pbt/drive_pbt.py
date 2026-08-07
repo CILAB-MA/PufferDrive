@@ -84,6 +84,7 @@ class Drive_PBT(pufferlib.PufferEnv):
         ego_ratio=0.0, # for replay
         agent_sampling=False,
         strategy="prioritized",
+        score_transform="power",
         num_policy_assignments=50,
         policy_assignment_seed=1,
         scenario_log_path=None,
@@ -303,6 +304,7 @@ class Drive_PBT(pufferlib.PufferEnv):
             self.agent_sampler = AgentSampler(
                 num_population=int(self.other_actions.shape[0]),
                 strategy=strategy,
+                score_transform=score_transform,
                 num_assignments=self.num_maps,
             )
             self._last_sampling_metrics = {}
@@ -337,6 +339,7 @@ class Drive_PBT(pufferlib.PufferEnv):
                 self.agent_sampler = AgentSampler(
                     num_population=self.num_policy_assignments,
                     strategy=strategy,
+                    score_transform=score_transform,
                     num_assignments=self.num_maps,
                 )
                 self._last_sampling_metrics = {}

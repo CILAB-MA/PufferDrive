@@ -267,6 +267,11 @@ class AgentSampler:
             ranks = np.empty_like(temp)
             ranks[temp] = np.arange(len(temp)) + 1
             weights = 1 / ranks ** (1.0 / temperature)
+        elif transform == "rank_low":
+            temp = scores.argsort()
+            ranks = np.empty_like(temp)
+            ranks[temp] = np.arange(len(temp)) + 1
+            weights = 1 / ranks ** (1.0 / temperature)
         elif transform == "power":
             eps = 0 if self.staleness_coef > 0 else 1e-3
             weights = (scores + eps) ** (1.0 / temperature)
