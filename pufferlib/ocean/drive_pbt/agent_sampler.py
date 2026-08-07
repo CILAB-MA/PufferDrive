@@ -6,7 +6,6 @@ class AgentSampler:
         self,
         num_population, # when pbt_mode is replay, this is num_rollout. when pbt_mode is reactive, this is num_policies.
         strategy="prioritized", # options: ["prioritized", "uniform"]
-        pbt_mode="replay", # options: ["replay", "reactive"]
         score_transform="power",
         temperature=1.0,
         eps=0.05,
@@ -20,7 +19,6 @@ class AgentSampler:
         self.num_population = int(num_population)
         self.num_assignments = int(num_assignments)
         self.strategy = strategy
-        self.pbt_mode = pbt_mode
 
         self.score_transform = score_transform
         self.temperature = temperature
@@ -44,50 +42,30 @@ class AgentSampler:
         corpus_idx = np.asarray(agent_idx, dtype=np.int64).reshape(-1)
         assignment_idx = np.asarray(assignment_idx, dtype=np.int64).reshape(-1)
 
-        if self.pbt_mode == "reactive":
-            policy_per_slot = assignment_idx
-            if not (score.shape == dist.shape == corpus_idx.shape == policy_per_slot.shape):
-                raise ValueError(
-                    "score, minimum_distance, minimum_other_global_idx, policy_per_slot must match, "
-                    f"got {score.shape}, {dist.shape}, {corpus_idx.shape}, {policy_per_slot.shape}"
-                )
-        elif self.pbt_mode == "replay":
-            map_idx = np.asarray(map_idx, dtype=np.int64).reshape(-1)
-            rollout_idx = assignment_idx
-            if not (score.shape == dist.shape == corpus_idx.shape == map_idx.shape == rollout_idx.shape):
-                raise ValueError(
-                    "score, minimum_distance, agent_idx, map_idx, rollout_idx must match, "
-                    f"got {score.shape}, {dist.shape}, {corpus_idx.shape}, {map_idx.shape}, {rollout_idx.shape}"
-                )
-        else:
-            raise ValueError(f"Invalid pbt mode: {self.pbt_mode}")
+        map_idx = np.asarray(map_idx, dtype=np.int64).reshape(-1)
+        rollout_idx = assignment_idx
+        if not (score.shape == dist.shape == corpus_idx.shape == map_idx.shape == rollout_idx.shape):
+            raise ValueError(
+                "score, minimum_distance, agent_idx, map_idx, rollout_idx must match, "
+                f"got {score.shape}, {dist.shape}, {corpus_idx.shape}, {map_idx.shape}, {rollout_idx.shape}"
+            )
 
         tracked = (corpus_idx >= 0) & np.isfinite(dist)
         keep = tracked & (dist >= self.distance_threshold)
 
         self.new_score.fill(np.nan)
-        if self.pbt_mode == "reactive":
-            for slot in np.flatnonzero(keep):
-                p = int(policy_per_slot[slot])
-                if not (0 <= p < self.num_population):
-                    continue
-                g = int(corpus_idx[slot])
-                if 0 <= g < self.num_assignments:
-                    self.new_score[g, p] = score[slot]
-        elif self.pbt_mode == "replay":
-            map_ids, map_scores, map_rollouts = self._aggregate_mean_by_map(
-                score, keep, map_idx, rollout_idx
-            )
-            for i in range(map_ids.size):
-                m = int(map_ids[i])
-                r = int(map_rollouts[i])
-                if not (0 <= m < self.num_assignments):
-                    continue
-                if not (0 <= r < self.num_population):
-                    continue
-                self.new_score[m, r] = map_scores[i]
-        else:
-            raise ValueError(f"Invalid pbt mode: {self.pbt_mode}")
+
+        map_ids, map_scores, map_rollouts = self._aggregate_mean_by_map(
+            score, keep, map_idx, rollout_idx
+        )
+        for i in range(map_ids.size):
+            m = int(map_ids[i])
+            r = int(map_rollouts[i])
+            if not (0 <= m < self.num_assignments):
+                continue
+            if not (0 <= r < self.num_population):
+                continue
+            self.new_score[m, r] = map_scores[i]
 
     def _aggregate_mean_by_map(self, score, keep, map_idx, rollout_idx):
         """Aggregate kept slot scores to unique maps; returns parallel (map_ids, scores, rollouts)."""
@@ -129,10 +107,7 @@ class AgentSampler:
             self.new_score[active] = (vals - lo) / (hi - lo)
 
     def update_policy_score(self, score, agent_idx, policy_idx, minimum_distance,
-                            map_idx=None, rollout_idx=None):
-
-        if self.pbt_mode == "replay" and rollout_idx is None:
-            rollout_idx = policy_idx
+                            map_idx=None):
         self._distance_filtering(score, minimum_distance, policy_idx, agent_idx, map_idx=map_idx)
         raw_return_metrics = self._raw_return_summary_metrics()
         self._normalize_scores()
@@ -142,20 +117,11 @@ class AgentSampler:
         self.population_scores[active] = (1 - self.alpha) * self.population_scores[active] + self.alpha * self.new_score[active]
 
         # Mark as seen for all valid corpus entities that played this episode (distance와 무관)
-        if self.pbt_mode == "reactive":
-            a = np.asarray(agent_idx, dtype=np.int64).reshape(-1)
-            p = np.asarray(policy_idx, dtype=np.int64).reshape(-1)
-            valid = (a >= 0) & (a < self.num_assignments) & (p >= 0) & (p < self.num_population)
-            self.unseen_population_weights[a[valid], p[valid]] = 0.0
-            self.encountered[a[valid]] = True
-        elif self.pbt_mode == "replay":
-            m = np.asarray(map_idx, dtype=np.int64).reshape(-1)
-            r = np.asarray(rollout_idx, dtype=np.int64).reshape(-1)
-            valid = (m >= 0) & (m < self.num_assignments) & (r >= 0) & (r < self.num_population)
-            self.unseen_population_weights[m[valid], r[valid]] = 0.0
-            self.encountered[m[valid]] = True
-        else:
-            raise ValueError(f"Invalid pbt mode: {self.pbt_mode}")
+        m = np.asarray(map_idx, dtype=np.int64).reshape(-1)
+        r = np.asarray(policy_idx, dtype=np.int64).reshape(-1)
+        valid = (m >= 0) & (m < self.num_assignments) & (r >= 0) & (r < self.num_population)
+        self.unseen_population_weights[m[valid], r[valid]] = 0.0
+        self.encountered[m[valid]] = True
 
         return raw_return_metrics
 
@@ -168,11 +134,10 @@ class AgentSampler:
         touched = np.flatnonzero(active.any(axis=1))
         if touched.size == 0:
             return {}
-        default_prefix = "map" if self.pbt_mode == "replay" else "agent"
         metrics = {}
         for g in touched:
             vals = self.new_score[g][active[g]]
-            label = f"{default_prefix}_{int(g)}"
+            label = f"map_{int(g)}"
             metrics[f"{label}_raw_return_mean"] = float(vals.mean())
             metrics[f"{label}_raw_return_min"] = float(vals.min())
             metrics[f"{label}_raw_return_max"] = float(vals.max())
@@ -245,11 +210,10 @@ class AgentSampler:
         touched = np.flatnonzero(assignment_per_corpus >= 0)
         if touched.size == 0:
             return {}
-        default_prefix = "map" if self.pbt_mode == "replay" else "agent"
         metrics = {}
         for g in touched:
             weights = self.sample_weights(int(g))
-            label = f"{default_prefix}_{int(g)}"
+            label = f"map_{int(g)}"
             metrics[f"{label}_weight_mean"] = float(weights.mean())
             metrics[f"{label}_weight_max"] = float(weights.max())
         return metrics
