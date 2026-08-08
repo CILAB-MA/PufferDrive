@@ -409,7 +409,7 @@ class Drive_PBT(pufferlib.PufferEnv):
         self.rollout_flatten.fill(-1)
         if self.pbt_mode == "replay":
             self.replay_actions.fill(-1)
-        else:
+        elif self.pbt_mode == "reactive":
             self.policy_per_slot_flatten.fill(-1)
 
         # assign other indices
@@ -442,6 +442,8 @@ class Drive_PBT(pufferlib.PufferEnv):
             & (entities < max_entity)
         )
         self._env_entity_to_other_slot[envs[in_bounds], entities[in_bounds]] = slots[in_bounds]
+        # TODO sample argument for reactive
+        # corpus_idx_per_slot = self.minimum_other_global_idx if self.pbt_mode == "reactive" else self.minimum_map_idx
         flat, wandb_metrics = self.agent_sampler.sample(self.minimum_map_idx)
         flat = np.asarray(flat, dtype=np.int64).reshape(-1)
         self._last_sampling_metrics = {k: float(v) for k, v in wandb_metrics.items()}
@@ -608,14 +610,23 @@ class Drive_PBT(pufferlib.PufferEnv):
             self.score_metric[other_slot] = self._episode_return[ego_idx]
         self._episode_return.fill(0.0)
         # Update Score
-        map_per_other = self._map_per_agent()[self.other_indices_arr]
-        raw_return_metrics = self.agent_sampler.update_policy_score(
-            self.score_metric,
-            self.minimum_other_global_idx,
-            self.rollout_flatten,
-            self.minimum_distance,
-            map_idx=map_per_other,
-        )
+        if self.pbt_mode == "reactive":
+            # TODO need to fixed
+            raw_return_metrics = self.agent_sampler.update_policy_score(
+                self.score_metric,
+                self.minimum_other_global_idx,
+                self.policy_per_slot_flatten,
+                self.minimum_distance,
+            ) 
+        elif self.pbt_mode == "replay":
+            map_per_other = self._map_per_agent()[self.other_indices_arr]
+            raw_return_metrics = self.agent_sampler.update_policy_score(
+                self.score_metric,
+                self.minimum_other_global_idx,
+                self.rollout_flatten,
+                self.minimum_distance,
+                map_idx=map_per_other,
+            )
         self._last_raw_return_metrics = raw_return_metrics
 
     def reset(self, seed=0):
@@ -631,7 +642,6 @@ class Drive_PBT(pufferlib.PufferEnv):
         info = [{"agent_offsets": self.agent_offsets, "map_ids": self.map_ids, "num_envs": self.num_envs, "ego_indices": self.ego_indices}]
         if self.pbt_mode == "reactive":
             info[0]["other_indices"] = self.policy_per_slot
-        if self.pbt_mode == "reactive":
             info[0]["map_policy_assignment_ids"] = self.map_policy_assignment_ids.copy()
         info[0]["partner_resampled"] = partner_resampled
         if self.agent_sampling and self._last_sampling_metrics:
@@ -770,7 +780,6 @@ class Drive_PBT(pufferlib.PufferEnv):
             info[0]["ego_indices"] = self.ego_indices
         if self.pbt_mode == "reactive":
             info[0]["other_indices"] = self.policy_per_slot
-        if self.pbt_mode == "reactive":
             info[0]["map_policy_assignment_ids"] = self.map_policy_assignment_ids.copy()
         info[0]["partner_resampled"] = partner_resampled
         if self.agent_sampling and self._last_sampling_metrics:
