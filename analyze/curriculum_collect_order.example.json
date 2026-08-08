@@ -1,0 +1,6 @@
+{
+  "type_to_population": {
+    "0": "/data/puffer/popul_nominal",
+    "1": "/data/puffer/popul_lane_nominal"
+  }
+}
