@@ -480,7 +480,7 @@ class Drive_PBT(pufferlib.PufferEnv):
                 self.policy_per_slot_flatten == policy_idx
             ]
             for policy_idx in range(self.num_other_policies)
-        ]
+        ] # make slot for policy [policy0, policy1, ,,,,policy8]
 
     def _set_replay_per_slot(self, flat):
         """Copy the selected replay record trajectories into the action buffer."""
@@ -608,24 +608,15 @@ class Drive_PBT(pufferlib.PufferEnv):
             self.score_metric[other_slot] = self._episode_return[ego_idx]
         self._episode_return.fill(0.0)
         # Update Score
-        if self.pbt_mode == "reactive":
-            map_per_other = self._map_per_agent()[self.other_indices_arr]
-            raw_return_metrics = self.agent_sampler.update_policy_score(
-                self.score_metric,
-                self.minimum_other_global_idx,
-                self.rollout_flatten,
-                self.minimum_distance,
-                map_idx=map_per_other,
-            )
-        elif self.pbt_mode == "replay":
-            map_per_other = self._map_per_agent()[self.other_indices_arr]
-            raw_return_metrics = self.agent_sampler.update_policy_score(
-                self.score_metric,
-                self.minimum_other_global_idx,
-                self.rollout_flatten,
-                self.minimum_distance,
-                map_idx=map_per_other,
-            )
+        map_per_other = self._map_per_agent()[self.other_indices_arr]
+        raw_return_metrics = self.agent_sampler.update_policy_score(
+            self.score_metric,
+            self.minimum_other_global_idx,
+            self.rollout_flatten,
+            self.minimum_distance,
+            map_idx=map_per_other,
+        )
+
         self._last_raw_return_metrics = raw_return_metrics
 
     def reset(self, seed=0):

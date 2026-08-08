@@ -46,9 +46,6 @@ class AgentSampler:
         controlled_entity_idx = np.asarray(controlled_entity_idx, dtype=np.int64).reshape(-1)
         population_idx = np.asarray(population_idx, dtype=np.int64).reshape(-1)
 
-
-
-
         map_idx = np.asarray(map_idx, dtype=np.int64).reshape(-1)
         population_per_slot = population_idx
 
@@ -56,30 +53,17 @@ class AgentSampler:
         keep = tracked & (dist >= self.distance_threshold)
 
         self.new_map_population_scores.fill(np.nan)
-        if self.pbt_mode == "reactive":
-            map_ids, map_scores, map_population = self._aggregate_mean_by_map(
-                score, keep, map_idx, population_per_slot
-            )
-            for i in range(map_ids.size):
-                map_id = int(map_ids[i])
-                population_id = int(map_population[i])
-                if not (0 <= map_id < self.num_maps):
-                    continue
-                if not (0 <= population_id < self.num_population):
-                    continue
-                self.new_map_population_scores[map_id, population_id] = map_scores[i]
-        elif self.pbt_mode == "replay":
-            map_ids, map_scores, map_population = self._aggregate_mean_by_map(
-                score, keep, map_idx, population_per_slot
-            )
-            for i in range(map_ids.size):
-                map_id = int(map_ids[i])
-                population_id = int(map_population[i])
-                if not (0 <= map_id < self.num_maps):
-                    continue
-                if not (0 <= population_id < self.num_population):
-                    continue
-                self.new_map_population_scores[map_id, population_id] = map_scores[i]
+        map_ids, map_scores, map_population = self._aggregate_mean_by_map(
+            score, keep, map_idx, population_per_slot
+        )
+        for i in range(map_ids.size):
+            map_id = int(map_ids[i])
+            population_id = int(map_population[i])
+            if not (0 <= map_id < self.num_maps):
+                continue
+            if not (0 <= population_id < self.num_population):
+                continue
+            self.new_map_population_scores[map_id, population_id] = map_scores[i]
 
     def _aggregate_mean_by_map(self, score, keep, map_idx, population_idx):
         """Aggregate slot scores into parallel map, score, and population arrays."""
@@ -137,28 +121,16 @@ class AgentSampler:
         )
 
         # Mark valid (map, population) pairs as seen regardless of distance.
-        if self.pbt_mode == "reactive":
-            map_ids = np.asarray(map_idx, dtype=np.int64).reshape(-1)
-            population_ids = np.asarray(population_idx, dtype=np.int64).reshape(-1)
-            valid = (
-                (map_ids >= 0)
-                & (map_ids < self.num_maps)
-                & (population_ids >= 0)
-                & (population_ids < self.num_population)
-            )
-            self.unseen_map_population_weights[map_ids[valid], population_ids[valid]] = 0.0
-            self.encountered_maps[map_ids[valid]] = True
-        elif self.pbt_mode == "replay":
-            map_ids = np.asarray(map_idx, dtype=np.int64).reshape(-1)
-            population_ids = np.asarray(population_idx, dtype=np.int64).reshape(-1)
-            valid = (
-                (map_ids >= 0)
-                & (map_ids < self.num_maps)
-                & (population_ids >= 0)
-                & (population_ids < self.num_population)
-            )
-            self.unseen_map_population_weights[map_ids[valid], population_ids[valid]] = 0.0
-            self.encountered_maps[map_ids[valid]] = True
+        map_ids = np.asarray(map_idx, dtype=np.int64).reshape(-1)
+        population_ids = np.asarray(population_idx, dtype=np.int64).reshape(-1)
+        valid = (
+            (map_ids >= 0)
+            & (map_ids < self.num_maps)
+            & (population_ids >= 0)
+            & (population_ids < self.num_population)
+        )
+        self.unseen_map_population_weights[map_ids[valid], population_ids[valid]] = 0.0
+        self.encountered_maps[map_ids[valid]] = True
 
         return raw_return_metrics
 
@@ -194,7 +166,7 @@ class AgentSampler:
     def _sample_replay_policy(self, map_idx):
         weights = self.sample_weights(map_idx)
 
-        if np.isclose(np.sum(weights), 0):
+        if np.isclose(np.sum(weights), 0): # 모든 확률이 0인 경우
             weights = np.ones(self.num_population, dtype=np.float64) / self.num_population
 
         weights = weights / weights.sum()  # float 오차로 합이 1이 아닐 경우 재정규화
@@ -206,10 +178,10 @@ class AgentSampler:
         weights = self.unseen_map_population_weights[map_idx].astype(np.float64)
         s = weights.sum()
 
-        if s == 0:
+        if s == 0: # all seen,
             population_idx = np.random.randint(self.num_population)
         else:
-            population_idx = np.random.choice(self.num_population, p=weights / s)
+            population_idx = np.random.choice(self.num_population, p=weights / s) 
 
         return int(population_idx)
 
@@ -219,37 +191,31 @@ class AgentSampler:
         sampled_population = np.full(num_sampled_maps, -1, dtype=np.int64)
 
         if self.strategy == "uniform":
-            sampled_population = np.tile(
-                np.arange(self.num_population),
-                -(-num_sampled_maps // self.num_population),
-            )[:num_sampled_maps]
-            np.random.shuffle(sampled_population)
+            sampled_population = np.random.randint(0, self.num_population, num_sampled_maps)
             return sampled_population, {}
 
         # "prioritized": select one population member for each unique map.
-        valid = (map_indices >= 0) & (map_indices < self.num_maps)
-        sampled_population[~valid] = np.random.randint(
-            self.num_population,
-            size=int((~valid).sum()),
-        )
-
         if self.encountered_maps.any():
             global_proportion_seen = (
                 self.unseen_map_population_weights[self.encountered_maps] == 0
             ).mean()
         else:
             global_proportion_seen = 0.0
+
         population_per_map = np.full(self.num_maps, -1, dtype=np.int64)
-        for map_idx in np.unique(map_indices[valid]):
+
+        for map_idx in np.unique(map_indices):
             if global_proportion_seen >= self.rho and np.random.rand() < global_proportion_seen:
                 population_per_map[map_idx] = self._sample_replay_policy(int(map_idx))
             else:
                 population_per_map[map_idx] = self._sample_unseen_policy(int(map_idx))
-        sampled_population[valid] = population_per_map[map_indices[valid]]
+        sampled_population[:] = population_per_map[map_indices]
+
         wandb_metrics = {
             "global_proportion_seen": global_proportion_seen,
         }
         wandb_metrics.update(self._sampling_weight_summary_metrics(population_per_map))
+
         self._update_staleness(population_per_map)
         return sampled_population, wandb_metrics
 
