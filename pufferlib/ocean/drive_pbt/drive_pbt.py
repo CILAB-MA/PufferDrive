@@ -23,6 +23,28 @@ from pufferlib.ocean.drive_pbt.curriculum_sampler import (
     load_difficulty_types,
 )
 
+
+def generate_map_policy_assignments(global_ids, num_policies, num_assignments, seed=1):
+    """Generate entity-to-policy assignment candidates for each map.
+    """
+    global_ids = np.asarray(global_ids)
+    num_policies = int(num_policies)
+    num_assignments = int(num_assignments)
+
+    rng = np.random.default_rng(seed)
+    result = []
+    for map_id in range(global_ids.shape[0]):
+        entity_ids = np.flatnonzero(global_ids[map_id] >= 0).astype(np.int64)
+        num_entities = int(entity_ids.size)
+        assignments = np.empty((num_assignments, num_entities), dtype=np.int32)
+        for assignment_id in range(num_assignments):
+            assignments[assignment_id] = rng.choice(
+                num_policies, size=num_entities, replace=True
+            )
+        result.append((entity_ids, assignments))
+    return result
+
+
 class Drive_PBT(pufferlib.PufferEnv):
     def __init__(
         self,
@@ -61,7 +83,7 @@ class Drive_PBT(pufferlib.PufferEnv):
         control_mode="control_vehicles",
         map_dir="resources/drive/binaries/training",
         sequential_map_sampling=False,
-        pbt_mode="reactive", # for pbt
+        pbt_mode="reactive", # reactive or replay
         population_path=None, # for replay
         ego_ratio=0.0, # for replay
         agent_sampling=False,
@@ -69,6 +91,10 @@ class Drive_PBT(pufferlib.PufferEnv):
         curriculum_types=None,
         curriculum_types_path=None,
         curriculum_steps=10000,
+        score_transform="power",
+        num_policy_assignments=50,
+        policy_assignment_seed=1,
+
         scenario_log_path=None,
     ):
         # env
@@ -251,16 +277,20 @@ class Drive_PBT(pufferlib.PufferEnv):
         self.population_path = population_path
         self.pbt_mode = pbt_mode
         self.agent_sampling = agent_sampling
+        if self.pbt_mode == "reactive" and not self.agent_sampling:
+            raise ValueError("reactive map-policy-assignment PLR requires agent_sampling=True")
         saved_dir = os.path.join(self.population_path, "saved")
-        fp_ao = os.path.join(saved_dir, "other_actions_agent_offsets.npy")
-        fp_m = os.path.join(saved_dir, "other_actions_map_ids.npy")
         fp_gid = os.path.join(saved_dir, "global_ids.npy")
-        self.actions_agent_offsets = np.load(fp_ao, mmap_mode="r")[0] # TOOD: (10, 10001)으로 하는데, 그럴 필요 없음. 데이터 (10001,)으로 줄이기
-        self.actions_map_id = np.load(fp_m, mmap_mode="r")[0] # TOOD: (10, 10000)으로 하는데, 그럴 필요 없음. 데이터 (10000,)으로 줄이기
         if self.agent_sampling:
             self.global_ids = np.load(fp_gid, mmap_mode="r")
-            self.total_agents = int(self.actions_agent_offsets[-1])
+            valid_global_ids = np.asarray(self.global_ids)[np.asarray(self.global_ids) >= 0]
+            self.total_agents = int(valid_global_ids.max()) + 1 if valid_global_ids.size else 0
         if pbt_mode == "replay":
+            fp_ao = os.path.join(saved_dir, "other_actions_agent_offsets.npy")
+            fp_m = os.path.join(saved_dir, "other_actions_map_ids.npy")
+            self.actions_agent_offsets = np.load(fp_ao, mmap_mode="r")[0] # TOOD: (10, 10001)으로 하는데, 그럴 필요 없음. 데이터 (10001,)으로 줄이기
+            self.actions_map_id = np.load(fp_m, mmap_mode="r")[0] # TOOD: (10, 10000)으로 하는데, 그럴 필요 없음. 데이터 (10000,)으로 줄이기
+            self.total_agents = int(self.actions_agent_offsets[-1])
             fp_actions = os.path.join(saved_dir, "other_actions_actions.npy")
             self.other_actions = np.load(fp_actions, mmap_mode="r")
             if not agent_sampling:
@@ -282,21 +312,31 @@ class Drive_PBT(pufferlib.PufferEnv):
             self.agent_sampler = self._make_agent_sampler(
                 num_population=int(self.other_actions.shape[0]),
                 strategy=strategy,
+                score_transform=score_transform,
                 num_assignments=self.num_maps,
                 curriculum_types=curriculum_types,
                 curriculum_types_path=curriculum_types_path,
                 curriculum_steps=curriculum_steps,
             )
             self._last_sampling_metrics = {}
-        else:
-            populations = [
+            self._last_raw_return_metrics = {}
+        elif pbt_mode == "reactive":
+            populations = sorted(
                 f for f in os.listdir(population_path)
                 if f.endswith(".pt")
-            ]
+            )
             self.num_other_policies = len(populations)
             n_other = int(self.other_indices_arr.size)
             self.policy_per_slot_flatten = np.full(n_other, -1, dtype=np.int64)
             self.policy_per_slot = [np.array([], dtype=np.int64) for _ in range(self.num_other_policies)]
+            self.num_policy_assignments = int(num_policy_assignments)
+            self.map_policy_assignments = generate_map_policy_assignments(
+                self.global_ids,
+                self.num_other_policies,
+                self.num_policy_assignments,
+                seed=policy_assignment_seed,
+            )
+            self.rollout_flatten = np.full(n_other, -1, dtype=np.int64)
             if self.agent_sampling:
                 if self.total_agents < 1:
                     raise ValueError(f"total_agents must be >= 1, got {self.total_agents}")
@@ -307,15 +347,17 @@ class Drive_PBT(pufferlib.PufferEnv):
                 self.minimum_other_local_idx = np.full(n_other, -1, dtype=np.int64)
                 self.minimum_other_global_idx = np.full(n_other, -1, dtype=np.int64)
                 self.score_metric = np.zeros(n_other, dtype=np.float32)
-                self.agent_sampler = self._make_agent_sampler(
-                    num_population=self.num_other_policies,
+                self.agent_sampler = AgentSampler(
+                    num_population=self.num_policy_assignments,
                     strategy=strategy,
                     num_assignments=self.total_agents,
                     curriculum_types=curriculum_types,
                     curriculum_types_path=curriculum_types_path,
-                    curriculum_steps=curriculum_steps,
+                    score_transform=score_transform,
+                    num_assignments=self.num_maps,
                 )
                 self._last_sampling_metrics = {}
+                self._last_raw_return_metrics = {}
 
     def _make_agent_sampler(
         self,
@@ -361,11 +403,11 @@ class Drive_PBT(pufferlib.PufferEnv):
         self.minimum_other_local_idx.fill(-1)
         self.minimum_other_global_idx.fill(-1)
 
+        self._init_minimum_map_idx(self.map_ids)
+        self.rollout_flatten.fill(-1)
         if self.pbt_mode == "replay":
-            self._init_minimum_map_idx(self.map_ids)
-            self.rollout_flatten.fill(-1)
             self.replay_actions.fill(-1)
-        elif self.pbt_mode == "reactive":
+        else:
             self.policy_per_slot_flatten.fill(-1)
 
         # assign other indices
@@ -398,14 +440,11 @@ class Drive_PBT(pufferlib.PufferEnv):
             & (entities < max_entity)
         )
         self._env_entity_to_other_slot[envs[in_bounds], entities[in_bounds]] = slots[in_bounds]
-        corpus_idx_per_slot = self.minimum_other_global_idx if self.pbt_mode == "reactive" else self.minimum_map_idx
-        flat, wandb_metrics = self.agent_sampler.sample(corpus_idx_per_slot)
+        flat, wandb_metrics = self.agent_sampler.sample(self.minimum_map_idx)
         flat = np.asarray(flat, dtype=np.int64).reshape(-1)
         self._last_sampling_metrics = {k: float(v) for k, v in wandb_metrics.items()}
-        if self.pbt_mode == "reactive":
-            self._set_policy_per_slot(flat)
-        elif self.pbt_mode == "replay":
-            self._set_replay_per_slot(flat)
+        self._last_sampling_metrics.update(self._last_raw_return_metrics)
+        self._set_per_slot(flat)
 
     def _set_policy_per_slot(self, flat):
         flat = np.asarray(flat, dtype=np.int64).reshape(-1)
@@ -415,14 +454,37 @@ class Drive_PBT(pufferlib.PufferEnv):
             for policy_idx in range(self.num_other_policies)
         ]
 
-    def _set_replay_per_slot(self, flat):
+    def _set_per_slot(self, flat):
+        """Expand one sampled record id per map environment to its agent slots."""
         flat = np.asarray(flat, dtype=np.int64).reshape(-1)
-        if flat.shape[0] != self.minimum_map_idx.shape[0]:
-            raise ValueError(
-                f"rollout flat length {flat.shape[0]} != num env maps {self.minimum_map_idx.shape[0]}"
-            )
         env_per_other = self._env_per_agent()[self.other_indices_arr]
         self.rollout_flatten[:] = flat[env_per_other]
+
+        if self.pbt_mode == "reactive":
+            self.map_policy_assignment_ids = flat.copy()
+            self._set_reactive_per_slot(env_per_other)
+        elif self.pbt_mode == "replay":
+            self._set_replay_per_slot(flat)
+
+    def _set_reactive_per_slot(self, env_per_other):
+        """Resolve the selected map policy assignment for each live non-ego agent."""
+        map_per_other = np.asarray(self.map_ids, dtype=np.int64)[env_per_other]
+        entity_per_other = self.minimum_other_local_idx
+        self.policy_per_slot_flatten.fill(-1)
+
+        for slot in range(self.other_indices_arr.size):
+            map_id = int(map_per_other[slot])
+            entity_id = int(entity_per_other[slot])
+            assignment_id = int(self.rollout_flatten[slot])
+            entities, assignments = self.map_policy_assignments[map_id]
+            pos = int(np.searchsorted(entities, entity_id))
+            if pos >= entities.size or int(entities[pos]) != entity_id:
+                continue
+            self.policy_per_slot_flatten[slot] = int(assignments[assignment_id, pos])
+        self._set_policy_per_slot(self.policy_per_slot_flatten)
+
+    def _set_replay_per_slot(self, flat):
+        """Copy the selected replay record trajectories into the action buffer."""
         agent_ind = 0
         for map_id, rollout_idx in zip(self.minimum_map_idx, flat):
             map_id = int(map_id)
@@ -547,24 +609,15 @@ class Drive_PBT(pufferlib.PufferEnv):
             self.score_metric[other_slot] = self._episode_return[ego_idx]
         self._episode_return.fill(0.0)
         # Update Score
-        if self.pbt_mode == "reactive":
-            self.agent_sampler.update_policy_score(
-                self.score_metric,
-                self.minimum_other_global_idx,
-                self.policy_per_slot_flatten,
-                self.minimum_distance,
-            )
-        elif self.pbt_mode == "replay":
-            map_per_other = self._map_per_agent()[self.other_indices_arr]
-            self.agent_sampler.update_policy_score(
-                self.score_metric,
-                self.minimum_other_global_idx,
-                self.rollout_flatten,
-                self.minimum_distance,
-                map_idx=map_per_other,
-            )
-        else:
-            raise ValueError(f"Invalid pbt mode: {self.pbt_mode}")
+        map_per_other = self._map_per_agent()[self.other_indices_arr]
+        raw_return_metrics = self.agent_sampler.update_policy_score(
+            self.score_metric,
+            self.minimum_other_global_idx,
+            self.rollout_flatten,
+            self.minimum_distance,
+            map_idx=map_per_other,
+        )
+        self._last_raw_return_metrics = raw_return_metrics
 
     def reset(self, seed=0):
         binding.vec_reset(self.c_envs, seed)
@@ -578,6 +631,8 @@ class Drive_PBT(pufferlib.PufferEnv):
         info = [{"agent_offsets": self.agent_offsets, "map_ids": self.map_ids, "num_envs": self.num_envs, "ego_indices": self.ego_indices}]
         if self.pbt_mode == "reactive":
             info[0]["other_indices"] = self.policy_per_slot
+        if self.pbt_mode == "reactive":
+            info[0]["map_policy_assignment_ids"] = self.map_policy_assignment_ids.copy()
         info[0]["partner_resampled"] = partner_resampled
         if self.agent_sampling and self._last_sampling_metrics:
             info[0]["sampling"] = {k: float(v) for k, v in self._last_sampling_metrics.items()}
@@ -714,6 +769,8 @@ class Drive_PBT(pufferlib.PufferEnv):
             info[0]["ego_indices"] = self.ego_indices
         if self.pbt_mode == "reactive":
             info[0]["other_indices"] = self.policy_per_slot
+        if self.pbt_mode == "reactive":
+            info[0]["map_policy_assignment_ids"] = self.map_policy_assignment_ids.copy()
         info[0]["partner_resampled"] = partner_resampled
         if self.agent_sampling and self._last_sampling_metrics:
             info[0]["sampling"] = {k: float(v) for k, v in self._last_sampling_metrics.items()}
