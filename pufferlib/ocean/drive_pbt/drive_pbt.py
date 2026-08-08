@@ -313,7 +313,7 @@ class Drive_PBT(pufferlib.PufferEnv):
                 num_population=int(self.other_actions.shape[0]),
                 strategy=strategy,
                 score_transform=score_transform,
-                num_assignments=self.num_maps,
+                num_maps=self.num_maps,
                 curriculum_types=curriculum_types,
                 curriculum_types_path=curriculum_types_path,
                 curriculum_steps=curriculum_steps,
@@ -351,7 +351,7 @@ class Drive_PBT(pufferlib.PufferEnv):
                     num_population=self.num_policy_assignments,
                     strategy=strategy,
                     score_transform=score_transform,
-                    num_assignments=self.num_maps,
+                    num_maps=self.num_maps,
                     curriculum_types=curriculum_types,
                     curriculum_types_path=curriculum_types_path,
                     curriculum_steps=curriculum_steps,
@@ -363,7 +363,7 @@ class Drive_PBT(pufferlib.PufferEnv):
         self,
         num_population,
         strategy,
-        num_assignments,
+        num_maps,
         score_transform,
         curriculum_types=None,
         curriculum_types_path=None,
@@ -378,14 +378,14 @@ class Drive_PBT(pufferlib.PufferEnv):
                 difficulty_types=types,
                 curriculum_steps=curriculum_steps,
                 pbt_mode=self.pbt_mode,
-                num_assignments=num_assignments,
+                num_maps=num_maps,
             )
         return AgentSampler(
             num_population=num_population,
             strategy=strategy,
             pbt_mode=self.pbt_mode,
             score_transform=score_transform,
-            num_assignments=num_assignments,
+            num_maps=num_maps,
         )
 
     def _init_minimum_map_idx(self, map_ids):
@@ -442,8 +442,6 @@ class Drive_PBT(pufferlib.PufferEnv):
             & (entities < max_entity)
         )
         self._env_entity_to_other_slot[envs[in_bounds], entities[in_bounds]] = slots[in_bounds]
-        # TODO sample argument for reactive
-        # corpus_idx_per_slot = self.minimum_other_global_idx if self.pbt_mode == "reactive" else self.minimum_map_idx
         flat, wandb_metrics = self.agent_sampler.sample(self.minimum_map_idx)
         flat = np.asarray(flat, dtype=np.int64).reshape(-1)
         self._last_sampling_metrics = {k: float(v) for k, v in wandb_metrics.items()}
@@ -611,13 +609,14 @@ class Drive_PBT(pufferlib.PufferEnv):
         self._episode_return.fill(0.0)
         # Update Score
         if self.pbt_mode == "reactive":
-            # TODO need to fixed
+            map_per_other = self._map_per_agent()[self.other_indices_arr]
             raw_return_metrics = self.agent_sampler.update_policy_score(
                 self.score_metric,
                 self.minimum_other_global_idx,
-                self.policy_per_slot_flatten,
+                self.rollout_flatten,
                 self.minimum_distance,
-            ) 
+                map_idx=map_per_other,
+            )
         elif self.pbt_mode == "replay":
             map_per_other = self._map_per_agent()[self.other_indices_arr]
             raw_return_metrics = self.agent_sampler.update_policy_score(
