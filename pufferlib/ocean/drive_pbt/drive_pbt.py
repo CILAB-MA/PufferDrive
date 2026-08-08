@@ -1,9 +1,6 @@
 import os
-import time
 import numpy as np
 import gymnasium
-import json
-import struct
 import pufferlib
 from pufferlib.ocean.drive import binding
 from pufferlib.ocean.drive.scenario_log import (
@@ -11,12 +8,9 @@ from pufferlib.ocean.drive.scenario_log import (
     resolve_scenario_log_path,
     split_aggregate_and_scenario,
 )
-from multiprocessing import Pool, cpu_count
 
 _DRIVE_INI = "pufferlib/config/ocean/drive.ini"
 _PARTNER_REL_SCALE = 0.02  # drive.h: rel_xy stored as meters * 0.02
-from tqdm import tqdm
-from pufferlib.pufferl import load_policy
 from pufferlib.ocean.drive_pbt.agent_sampler import AgentSampler
 from pufferlib.ocean.drive_pbt.curriculum_sampler import (
     CurriculumSampler,
