@@ -1054,6 +1054,10 @@ class PuffeRL:
             "other_policy_n",
             "policy_ego_n",
             "ego_metric_legacy_warning",
+            "agent_offsets",
+            "map_ids",
+            "num_envs",
+            "other_indices",
         }
 
         if self.stats:
@@ -1062,14 +1066,16 @@ class PuffeRL:
         for metric, value in (self.stats or self.last_stats).items():
             if metric in dashboard_ignore_stats:
                 continue
+            # Per-map sampling weights: wandb only (via environment/sampling/...).
+            if metric.startswith("sampling/"):
+                continue
             try:  # Discard non-numeric values
                 int(value)
             except:
                 continue
 
             u = left if i % 2 == 0 else right
-            display_metric = metric[len("sampling/") :] if metric.startswith("sampling/") else metric
-            u.add_row(f"{c2}{display_metric}", f"{b2}{value:.3f}")
+            u.add_row(f"{c2}{metric}", f"{b2}{value:.3f}")
             i += 1
             if i == 30:
                 break
@@ -1318,6 +1324,7 @@ class WandbLogger:
 
         wandb.init(
             id=load_id or wandb.util.generate_id(),
+            entity=args.get("wandb_entity") or None,
             project=args["wandb_project"],
             group=args["wandb_group"],
             allow_val_change=True,
@@ -2488,6 +2495,7 @@ def load_config(env_name, config_dir=None):
     parser.add_argument("--fps", type=float, default=15)
     parser.add_argument("--max-runs", type=int, default=200, help="Max number of sweep runs")
     parser.add_argument("--wandb", action="store_true", help="Use wandb for logging")
+    parser.add_argument("--wandb-entity", type=str, default=None, help="W&B entity (team/user)")
     parser.add_argument("--wandb-project", type=str, default="pufferlib")
     parser.add_argument("--wandb-group", type=str, default="debug")
     parser.add_argument("--neptune", action="store_true", help="Use neptune for logging")
