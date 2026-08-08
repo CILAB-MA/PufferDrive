@@ -113,4 +113,4 @@ class CurriculumSampler:
     def update_policy_score(self, score, agent_idx, policy_idx, minimum_distance,
                             map_idx=None, rollout_idx=None):
         """No-op: difficulty is fixed by the provided type list."""
-        return
+        return {}

@@ -347,14 +347,14 @@ class Drive_PBT(pufferlib.PufferEnv):
                 self.minimum_other_local_idx = np.full(n_other, -1, dtype=np.int64)
                 self.minimum_other_global_idx = np.full(n_other, -1, dtype=np.int64)
                 self.score_metric = np.zeros(n_other, dtype=np.float32)
-                self.agent_sampler = AgentSampler(
+                self.agent_sampler = self._make_agent_sampler(
                     num_population=self.num_policy_assignments,
                     strategy=strategy,
-                    num_assignments=self.total_agents,
-                    curriculum_types=curriculum_types,
-                    curriculum_types_path=curriculum_types_path,
                     score_transform=score_transform,
                     num_assignments=self.num_maps,
+                    curriculum_types=curriculum_types,
+                    curriculum_types_path=curriculum_types_path,
+                    curriculum_steps=curriculum_steps,
                 )
                 self._last_sampling_metrics = {}
                 self._last_raw_return_metrics = {}
@@ -364,6 +364,7 @@ class Drive_PBT(pufferlib.PufferEnv):
         num_population,
         strategy,
         num_assignments,
+        score_transform,
         curriculum_types=None,
         curriculum_types_path=None,
         curriculum_steps=10000,
@@ -382,7 +383,7 @@ class Drive_PBT(pufferlib.PufferEnv):
         return AgentSampler(
             num_population=num_population,
             strategy=strategy,
-            pbt_mode=self.pbt_mode,
+            score_transform=score_transform,
             num_assignments=num_assignments,
         )
 

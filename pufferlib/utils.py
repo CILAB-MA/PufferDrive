@@ -37,6 +37,8 @@ def run_human_replay_eval_in_subprocess(config, logger, global_step):
             "False",
             "--eval.human-replay-eval",
             "True",
+            "--eval.wosac-num-maps",
+            str(eval_config.get("wosac_num_maps", 300)),
             "--eval.human-replay-control-mode",
             str(eval_config["human_replay_control_mode"]),
             "--env.termination-mode",
