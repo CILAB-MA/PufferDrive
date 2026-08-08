@@ -48,13 +48,16 @@ def rollout_per_ego(
     bias_onset: np.ndarray | None = None,
     bias_tau_lo: int = -15,
     bias_tau_hi: int = -6,
+    map_start: int = 0,
 ) -> dict[str, np.ndarray]:
     import pufferlib
     from common import N_ACTIONS, N_STEER
 
     if data_mode not in ("training", "validation"):
         raise ValueError(f"data_mode must be training|validation, got {data_mode!r}")
-    args = build_human_replay_drive_args(num_maps=num_maps, device=device, data_mode=data_mode)
+    args = build_human_replay_drive_args(
+        num_maps=num_maps, device=device, data_mode=data_mode, map_start=map_start
+    )
     vecenv = create_vecenv(args, env_name="puffer_drive")
     policy = create_policy(args, vecenv, env_name="puffer_drive")
     ck = pick_checkpoint(str(ckpt), device="cpu", probe_step=None)
