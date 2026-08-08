@@ -1047,6 +1047,7 @@ class PuffeRL:
         i = 0
         dashboard_ignore_stats = {
             "partner_resampled",
+            "map_policy_assignment_ids",
             "metric_ego_n",
             "legacy_ego_n",
             "other_policy_n",
@@ -1301,6 +1302,7 @@ WANDB_IGNORE_ENV_KEYS = {
     "environment/other_indices",
     "environment/ego_n",
     "environment/partner_resampled",
+    "environment/map_policy_assignment_ids",
     "environment/policy_ego_n",
     "environment/metric_ego_n",
     "environment/legacy_ego_n",
@@ -1441,10 +1443,10 @@ def train_pbt(env_name, args=None, vecenv=None, policy=None, logger=None, config
     policy = policy or load_policy(args, vecenv, env_name)
 
     # if the pbt train mode is reactive, load other policy
-    populations = [
+    populations = sorted(
         f for f in os.listdir(args["pbt"]["population_path"])
         if f.endswith(".pt")
-    ]
+    )
     policies = None
     if args["pbt"]["pbt_mode"] == "reactive":
         policies = []
