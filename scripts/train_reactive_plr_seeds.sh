@@ -43,6 +43,7 @@ for SEED in "${SEED_LIST[@]}"; do
     --pbt.population-path "${POPULATION_PATH}" \
     --pbt.strategy prioritized \
     --pbt.agent-sampling True \
+    --pbt.score-transform rank_low \
     --train.data-dir "${DATA_DIR}" \
     --train.seed "${SEED}" \
     --vec.seed "${SEED}" \
