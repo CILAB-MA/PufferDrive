@@ -144,12 +144,14 @@ class AgentSampler:
         if touched_maps.size == 0:
             return {}
         metrics = {}
+        map_means = []
         for map_idx in touched_maps:
             vals = self.new_map_population_scores[map_idx][active[map_idx]]
             label = f"map_{int(map_idx)}"
-            metrics[f"{label}_raw_return_mean"] = float(vals.mean())
-            metrics[f"{label}_raw_return_min"] = float(vals.min())
-            metrics[f"{label}_raw_return_max"] = float(vals.max())
+            mean_val = float(vals.mean())
+            metrics[f"sampling/{label}_raw_return_mean"] = mean_val
+            map_means.append(mean_val)
+        metrics["sampling_summary/raw_return_mean"] = float(np.mean(map_means))
         return metrics
 
     def _update_staleness(self, population_per_map):
@@ -212,7 +214,7 @@ class AgentSampler:
         sampled_population[:] = population_per_map[map_indices]
 
         wandb_metrics = {
-            "global_proportion_seen": global_proportion_seen,
+            "sampling_summary/global_proportion_seen": global_proportion_seen,
         }
         wandb_metrics.update(self._sampling_weight_summary_metrics(population_per_map))
 
@@ -228,8 +230,8 @@ class AgentSampler:
         for map_idx in touched_maps:
             weights = self.sample_weights(int(map_idx))
             label = f"map_{int(map_idx)}"
-            metrics[f"{label}_weight_mean"] = float(weights.mean())
-            metrics[f"{label}_weight_max"] = float(weights.max())
+            metrics[f"sampling_weight_mean/{label}_weight_mean"] = float(weights.mean())
+            metrics[f"sampling_weight_max/{label}_weight_max"] = float(weights.max())
         return metrics
 
     def sample_weights(self, map_idx):

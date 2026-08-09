@@ -1066,8 +1066,8 @@ class PuffeRL:
         for metric, value in (self.stats or self.last_stats).items():
             if metric in dashboard_ignore_stats:
                 continue
-            # Per-map sampling weights: wandb only (via environment/sampling/...).
-            if metric.startswith("sampling/"):
+            # Per-map sampling weights: wandb only (via environment/sampling*).
+            if metric.startswith(("sampling/", "sampling_summary/", "sampling_weight_mean/", "sampling_weight_max/")):
                 continue
             try:  # Discard non-numeric values
                 int(value)
@@ -1338,14 +1338,15 @@ class WandbLogger:
         self.run_id = wandb.run.id
 
     def log(self, logs, step):
-        ego_prefix = "environment/ego_"
-        sampling_prefix = "environment/sampling/"
+        env_prefix = "environment/"
+        ego_prefix = f"{env_prefix}ego_"
+        sampling_root = f"{env_prefix}sampling"
         logs_filtered = {}
         for k, v in logs.items():
             if k in WANDB_IGNORE_ENV_KEYS:
                 continue
-            if k.startswith(sampling_prefix):
-                logs_filtered[f"sampling/{k[len(sampling_prefix):]}"] = v
+            if k.startswith(sampling_root):
+                logs_filtered[k[len(env_prefix):]] = v
             elif k.startswith(ego_prefix):
                 logs_filtered[f"ego/{k[len(ego_prefix):]}"] = v
             else:

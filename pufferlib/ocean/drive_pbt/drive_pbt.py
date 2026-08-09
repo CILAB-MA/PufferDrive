@@ -388,6 +388,17 @@ class Drive_PBT(pufferlib.PufferEnv):
             num_maps=num_maps,
         )
 
+    _SAMPLING_METRIC_GROUPS = ("sampling", "sampling_summary", "sampling_weight_mean", "sampling_weight_max")
+
+    def _sampling_info_groups(self):
+        groups = {}
+        for k, v in self._last_sampling_metrics.items():
+            for prefix in self._SAMPLING_METRIC_GROUPS:
+                if k.startswith(prefix + "/"):
+                    groups.setdefault(prefix, {})[k[len(prefix) + 1:]] = float(v)
+                    break
+        return {name: vals for name, vals in groups.items() if vals}
+
     def _init_minimum_map_idx(self, map_ids):
         map_ids = np.asarray(map_ids, dtype=np.int64).reshape(-1)
         n = int(map_ids.size)
@@ -635,7 +646,7 @@ class Drive_PBT(pufferlib.PufferEnv):
             info[0]["map_policy_assignment_ids"] = self.map_policy_assignment_ids.copy()
         info[0]["partner_resampled"] = partner_resampled
         if self.agent_sampling and self._last_sampling_metrics:
-            info[0]["sampling"] = {k: float(v) for k, v in self._last_sampling_metrics.items()}
+            info[0].update(self._sampling_info_groups())
         return self.observations, info
 
     def _allocate_replay(self, num_agents, map_ids):
@@ -773,7 +784,7 @@ class Drive_PBT(pufferlib.PufferEnv):
             info[0]["map_policy_assignment_ids"] = self.map_policy_assignment_ids.copy()
         info[0]["partner_resampled"] = partner_resampled
         if self.agent_sampling and self._last_sampling_metrics:
-            info[0]["sampling"] = {k: float(v) for k, v in self._last_sampling_metrics.items()}
+            info[0].update(self._sampling_info_groups())
 
         return (self.observations, self.rewards, self.terminals, self.truncations, info)
 
