@@ -43,11 +43,11 @@ class CurriculumSampler:
         difficulty_types,
         curriculum_steps=10000,
         pbt_mode="replay",
-        num_assignments=0,
+        num_maps=0,
         strategy="curriculum",
     ):
         self.num_population = int(num_population)
-        self.num_assignments = int(num_assignments)
+        self.num_maps = int(num_maps)
         self.pbt_mode = pbt_mode
         self.strategy = strategy
         self.curriculum_steps = max(1, int(curriculum_steps))
@@ -93,12 +93,16 @@ class CurriculumSampler:
         unlocked_types = self.unique_types[:n_unlocked]
         return pool, progress, n_unlocked, unlocked_types
 
-    def sample(self, corpus_idx_per_slot):
-        corpus_idx_per_slot = np.asarray(corpus_idx_per_slot, dtype=np.int64).reshape(-1)
-        n_other = corpus_idx_per_slot.size
+    def sample(self, map_indices):
+        map_indices = np.asarray(map_indices, dtype=np.int64).reshape(-1)
+        num_sampled_maps = map_indices.size
 
         pool, progress, n_unlocked, unlocked_types = self._current_pool()
-        flat = np.random.choice(pool, size=n_other, replace=True).astype(np.int64)
+        sampled_population = np.random.choice(
+            pool,
+            size=num_sampled_maps,
+            replace=True,
+        ).astype(np.int64)
 
         self._sample_count += 1
         wandb_metrics = {
@@ -108,9 +112,9 @@ class CurriculumSampler:
             "pool_size": float(pool.size),
             "curriculum_sample_count": float(self._sample_count),
         }
-        return flat, wandb_metrics
+        return sampled_population, wandb_metrics
 
-    def update_policy_score(self, score, agent_idx, policy_idx, minimum_distance,
-                            map_idx=None, rollout_idx=None):
+    def update_policy_score(self, score, controlled_entity_idx, population_idx,
+                            minimum_distance, map_idx=None):
         """No-op: difficulty is fixed by the provided type list."""
         return {}

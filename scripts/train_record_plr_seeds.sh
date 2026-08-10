@@ -25,6 +25,7 @@ for SEED in "${SEEDS[@]}"; do
     --pbt.pbt-mode replay \
     --pbt.strategy prioritized \
     --pbt.agent-sampling True \
+    --pbt.score-transform rank_low \
     --train.data-dir "${DATA_DIR}" \
     --train.seed "${SEED}" \
     --vec.seed "${SEED}" \
