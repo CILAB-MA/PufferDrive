@@ -4,8 +4,8 @@ import os
 import numpy as np
 
 
-def load_difficulty_types(curriculum_types, curriculum_types_path, num_population):
-    """Load a length-num_population difficulty type array (lower = easier)."""
+def load_difficulty_types(curriculum_types, curriculum_types_path, num_combination):
+    """Load a length-num_combination difficulty type array (lower = easier)."""
     if curriculum_types is not None and curriculum_types != "" and curriculum_types != []:
         types = np.asarray(curriculum_types, dtype=np.int64).reshape(-1)
     elif curriculum_types_path:
@@ -27,9 +27,9 @@ def load_difficulty_types(curriculum_types, curriculum_types_path, num_populatio
             "strategy=curriculum requires curriculum_types (list) or curriculum_types_path"
         )
 
-    if types.shape[0] != int(num_population):
+    if types.shape[0] != int(num_combination):
         raise ValueError(
-            f"difficulty_types length {types.shape[0]} != num_population {num_population}"
+            f"difficulty_types length {types.shape[0]} != num_combination {num_combination}"
         )
     return types
 
@@ -39,24 +39,24 @@ class CurriculumSampler:
 
     def __init__(
         self,
-        num_population,
+        num_combination,
         difficulty_types,
         curriculum_steps=10000,
         pbt_mode="replay",
         num_maps=0,
         strategy="curriculum",
     ):
-        self.num_population = int(num_population)
+        self.num_combination = int(num_combination)
         self.num_maps = int(num_maps)
         self.pbt_mode = pbt_mode
         self.strategy = strategy
         self.curriculum_steps = max(1, int(curriculum_steps))
 
         self.difficulty_types = np.asarray(difficulty_types, dtype=np.int64).reshape(-1)
-        if self.difficulty_types.shape[0] != self.num_population:
+        if self.difficulty_types.shape[0] != self.num_combination:
             raise ValueError(
                 f"difficulty_types length {self.difficulty_types.shape[0]} "
-                f"!= num_population {self.num_population}"
+                f"!= num_combination {self.num_combination}"
             )
 
         self.unique_types = np.unique(self.difficulty_types)  # ascending

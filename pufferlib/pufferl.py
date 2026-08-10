@@ -1048,7 +1048,7 @@ class PuffeRL:
         i = 0
         dashboard_ignore_stats = {
             "partner_resampled",
-            "map_policy_assignment_ids",
+            "combination_ids",
             "metric_ego_n",
             "legacy_ego_n",
             "other_policy_n",
@@ -1309,7 +1309,7 @@ WANDB_IGNORE_ENV_KEYS = {
     "environment/other_indices",
     "environment/ego_n",
     "environment/partner_resampled",
-    "environment/map_policy_assignment_ids",
+    "environment/combination_ids",
     "environment/policy_ego_n",
     "environment/metric_ego_n",
     "environment/legacy_ego_n",
@@ -1889,19 +1889,6 @@ def _normalize_path_arg(value, name):
 
 
 def _load_collect_order(collect_order_path, num_collect_rollout, num_checkpoints=0):
-    """Load curriculum collect order JSON.
-
-    Schema:
-      {
-        "type_to_population": {"0": "/path/to/pop0", "1": "/path/to/pop1"},
-        "rollout_types": [0, 0, 1, ...]  # optional; auto curriculum schedule if omitted
-      }
-
-    When rollout_types is omitted, builds a staged schedule of length
-    num_collect_rollout (early = easy only, later = mix including harder types).
-    collect_num_checkpoints only limits how many *.pt are mixed per type.
-    Returns (type_to_population, rollout_types, num_collect_rollout).
-    """
     path = _normalize_path_arg(collect_order_path, "collect_order_path")
     if not path:
         raise ValueError(
@@ -2010,9 +1997,9 @@ def _write_population_manifest(population_path, keys, type_to_ckpts):
             for t, (pop, ckpts) in sorted(type_to_ckpts.items())
         },
         "note": (
-            "saved/population_keys.npy has shape (num_rollouts, num_agents). "
+            "saved/population_keys.npy has shape (num_combination, num_agents). "
             "Entry [r, a] is an index into keys[]; keys[i] identifies which "
-            "population checkpoint acted for that agent in that rollout."
+            "population checkpoint acted for that agent in that combination."
         ),
     }
     out = os.path.join(population_path, "population_manifest.json")
@@ -2159,8 +2146,8 @@ def zero_shot(env_name, args=None, vecenv=None, policies=None):
                     f">= num policies {int(lut.shape[0])} for type={rollout_type}"
                 )
             population_keys = lut[local_policy_ids]
-            agent_offsets = np.asarray(agent_offsets, dtype=np.int32, order="C")
-            map_ids = np.asarray(map_ids, dtype=np.int32, order="C")
+            agent_offsets = np.asarray(agent_offsets, dtype=np.int32, order="C").reshape(-1)
+            map_ids = np.asarray(map_ids, dtype=np.int32, order="C").reshape(-1)
             global_ids = np.asarray(global_ids, dtype=np.int32, order="C")
             population_keys = np.asarray(population_keys, dtype=np.int32, order="C")
             if local_i == 0:
@@ -2174,12 +2161,9 @@ def zero_shot(env_name, args=None, vecenv=None, policies=None):
                     dtype=other_action_buf.dtype,
                     shape=(shard_len, na, T, c),
                 )
-                mm_ao = np.lib.format.open_memmap(
-                    fp_ao, mode="w+", dtype=np.int32, shape=(shard_len, jo)
-                )
-                mm_m = np.lib.format.open_memmap(
-                    fp_m, mode="w+", dtype=np.int32, shape=(shard_len, km)
-                )
+                # Layout is identical across rollouts — store once (1D), not per-rollout copies.
+                mm_ao = np.lib.format.open_memmap(fp_ao, mode="w+", dtype=np.int32, shape=(jo,))
+                mm_m = np.lib.format.open_memmap(fp_m, mode="w+", dtype=np.int32, shape=(km,))
                 mm_gid = np.lib.format.open_memmap(
                     fp_gid, mode="w+", dtype=np.int32, shape=(shard_len, nm, me)
                 )
@@ -2189,18 +2173,10 @@ def zero_shot(env_name, args=None, vecenv=None, policies=None):
                 mm_pop = np.lib.format.open_memmap(
                     fp_pop, mode="w+", dtype=np.int32, shape=(shard_len, na)
                 )
-            if other_action_buf.shape != (na, T, c):
-                raise ValueError(
-                    f"Rollout {global_i} action shape {other_action_buf.shape} != "
-                    f"first-rollout shape {(na, T, c)}; env layout changed unexpectedly"
-                )
-            if population_keys.shape != (na,):
-                raise ValueError(
-                    f"Rollout {global_i} population_keys shape {population_keys.shape} != ({na},)"
-                )
+                mm_ao[:] = agent_offsets
+                mm_m[:] = map_ids
+
             mm_a[local_i] = np.ascontiguousarray(other_action_buf)
-            mm_ao[local_i] = agent_offsets.reshape(mm_ao.shape[1:])
-            mm_m[local_i] = map_ids.reshape(mm_m.shape[1:])
             mm_gid[local_i] = global_ids
             mm_types[local_i] = rollout_type
             mm_pop[local_i] = population_keys
