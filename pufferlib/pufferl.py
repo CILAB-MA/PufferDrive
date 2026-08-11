@@ -2315,53 +2315,6 @@ def zero_shot(env_name, args=None, vecenv=None, policies=None):
 
     return results
 
-def linear_probe(env_name, args=None, vecenv=None, policy=None):
-    from pufferlib.ocean.benchmark.linear_probe import LinearProbe
-    args = args or load_config(env_name)
-    args["env"]["map_dir"] = args["eval"]["map_dir"]
-    # args["env"]["num_maps"] = args["eval"]["wosac_num_maps"]
-    args["env"]["num_maps"] = 300
-    args["env"]["sequential_map_sampling"] = True
-    dataset_name = args["env"]["map_dir"].split("/")[-1]
-    print(f"Running linear_probing with {dataset_name} dataset.\n")
-    from pufferlib.ocean.benchmark.evaluator import OtherReplayEvaluator
-
-    backend = args["eval"].get("backend", "PufferEnv")
-    args["vec"] = dict(backend=backend, num_envs=1)
-    # args["env"]["control_mode"] = args["eval"]["human_replay_control_mode"]
-    args["env"]["episode_length"] = 91  # WOMD scenario length
-
-    vecenv = vecenv or load_env(env_name, args)
-    args2 = args.copy()
-    args["load_model_path"] = args["load_multiple_model_path"][0]
-    policy1 = load_policy(args, vecenv, env_name)
-    if "generate_" in args["lp_mode"]:
-        args2["load_model_path"] = args["load_multiple_model_path"][1]
-        policy2 = load_policy(args2, vecenv, env_name)
-    else:
-        policy2 = None
-    vecenv = vecenv or load_env(env_name, args)
-    policy = policy or load_policy(args, vecenv, env_name)
-    lp_module = LinearProbe(args)
-    if "generate" in args["lp_mode"]:
-        lp_module.make_dataset(args, vecenv, policy1, policy2)
-    elif args["lp_mode"] == "train":
-        lp_module.train(args, policy1, 10)
-        lp_module.train(args, policy1, 20)
-        lp_module.train(args, policy1, 30)
-        lp_module.train(args, policy1, 40)
-    elif args["lp_mode"] == "evaluate":
-        other_model_id = args["load_multiple_model_path"][1][-11:-3]
-        lp_module.evaluate(args, policy1, other_model_id, 10)
-        lp_module.evaluate(args, policy1, other_model_id, 20)
-        lp_module.evaluate(args, policy1, other_model_id, 30)
-        lp_module.evaluate(args, policy1, other_model_id, 40)
-
-        lp_module.evaluate(args, policy1, other_model_id, 10, mode="replay")
-        lp_module.evaluate(args, policy1, other_model_id, 20, mode="replay")
-        lp_module.evaluate(args, policy1, other_model_id, 30, mode="replay")
-        lp_module.evaluate(args, policy1, other_model_id, 40, mode="replay")
-
 def profile(args=None, env_name=None, vecenv=None, policy=None):
     args = load_config()
     vecenv = vecenv or load_env(env_name, args)
@@ -2621,8 +2574,6 @@ def main():
         sweep(env_name=env_name)
     elif mode == "zeroshot":
         zero_shot(env_name=env_name)
-    elif mode == "linear_probe":
-        linear_probe(env_name=env_name)
     elif mode == "controlled_exp":
         controlled_exp(env_name=env_name)
     elif mode == "autotune":

@@ -29,6 +29,7 @@ for SEED in "${SEEDS[@]}"; do
     --train.data-dir "${DATA_DIR}" \
     --train.seed "${SEED}" \
     --vec.seed "${SEED}" \
+    --eval.human-replay-eval True \
     --wandb \
     --wandb-entity "cilab-ma" \
     --wandb-group "record-plr-seed-${SEED}" \
