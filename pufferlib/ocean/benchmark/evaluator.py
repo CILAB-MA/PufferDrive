@@ -968,7 +968,7 @@ class OtherReplayEvaluator:
                 global_ids[map_id, eid] = g
         return global_ids
 
-    def collect_rollouts(self, args, puffer_env, policies):
+    def collect_rollouts(self, args, puffer_env, policies, policy_weights=None):
         import numpy as np
         import torch
         import pufferlib
@@ -986,8 +986,28 @@ class OtherReplayEvaluator:
         print(len(agent_offsets), len(map_ids), global_ids.shape)
         pool = np.arange(obs.shape[0], dtype=np.int64)
         pool = np.random.permutation(pool)
-        base, rem = divmod(obs.shape[0], len(policies))
-        counts = [base + (i < rem) for i in range(len(policies))]
+        n_pol = len(policies)
+        if n_pol < 1:
+            raise ValueError("collect_rollouts requires at least one policy")
+        if policy_weights is None:
+            base, rem = divmod(obs.shape[0], n_pol)
+            counts = [base + (i < rem) for i in range(n_pol)]
+        else:
+            w = np.asarray(policy_weights, dtype=np.float64).reshape(-1)
+            if w.shape[0] != n_pol:
+                raise ValueError(
+                    f"policy_weights length {w.shape[0]} != num policies {n_pol}"
+                )
+            w = np.clip(w, 0.0, None)
+            if float(w.sum()) <= 0.0:
+                raise ValueError("policy_weights must sum to a positive value")
+            raw = w / w.sum() * float(obs.shape[0])
+            counts = np.floor(raw).astype(np.int64)
+            leftover = int(obs.shape[0] - int(counts.sum()))
+            frac_order = np.argsort(-(raw - counts), kind="stable")
+            for k in range(leftover):
+                counts[frac_order[k]] += 1
+            counts = counts.tolist()
         other_indices = []
         # Per-agent local index into ``policies`` (which ckpt acted for that agent).
         policy_ids = np.full(obs.shape[0], -1, dtype=np.int32)
@@ -1030,6 +1050,8 @@ class OtherReplayEvaluator:
 
                 for policy_idx, policy in enumerate(policies):
                     other_mask = other_masks[policy_idx]
+                    if not np.any(other_mask):
+                        continue
                     ob_other = ob_tensor[other_mask]
                     logits_other, value_other = policy.forward_eval(ob_other, states[policy_idx])
                     action_other, logprob_other, _ = pufferlib.pytorch.sample_logits(logits_other)

@@ -271,9 +271,10 @@ class Drive_PBT(pufferlib.PufferEnv):
         if pbt_mode == "replay":
             fp_actions = os.path.join(saved_dir, "other_actions_actions.npy")
             self.other_actions = np.load(fp_actions, mmap_mode="r")
-            self.num_combination = self._resolve_num_combination(
+            self.combination_index = self._resolve_combination_index(
                 num_combination, int(self.other_actions.shape[0]), source=fp_actions
             )
+            self.num_combination = int(self.combination_index.size)
             if not agent_sampling:
                 self._allocate_replay(self.num_agents, self.map_ids)
             else:
@@ -302,9 +303,10 @@ class Drive_PBT(pufferlib.PufferEnv):
                     f"{fp_pk}: agent dim {self.population_keys.shape[1]} != "
                     f"offsets[-1] {int(self.actions_agent_offsets[-1])}"
                 )
-            self.num_combination = self._resolve_num_combination(
+            self.combination_index = self._resolve_combination_index(
                 num_combination, int(self.population_keys.shape[0]), source=fp_pk
             )
+            self.num_combination = int(self.combination_index.size)
             self.population_key_to_policy_idx = self._build_population_key_to_policy_idx(
                 saved_dir, populations
             )
@@ -317,21 +319,54 @@ class Drive_PBT(pufferlib.PufferEnv):
                                        curriculum_types_path, curriculum_steps)
 
     @staticmethod
-    def _resolve_num_combination(requested, corpus_size, source=""):
-        """Use requested num_combination, or full corpus; clamp if larger than shape[0]."""
+    def _resolve_combination_index(requested, corpus_size, source=""):
+        """Pick ``num_combination`` corpus rows spaced over [0, shape[0]).
+
+        0 / omit → all rows. If requested > corpus size, clamp.
+        Otherwise use inclusive linspace so curriculum easy→hard is preserved
+        (first and last rows always included when n>=2).
+        """
         corpus_size = int(corpus_size)
         if corpus_size < 1:
             raise ValueError(f"Corpus leading dim must be >= 1 ({source or 'corpus'})")
         if requested is None or requested == "" or int(requested) <= 0:
-            return corpus_size
-        n = int(requested)
-        if n > corpus_size:
-            print(
-                f"num_combination={n} > corpus shape[0]={corpus_size} "
-                f"({source or 'corpus'}); clamping to {corpus_size}"
+            idx = np.arange(corpus_size, dtype=np.int64)
+        else:
+            n = int(requested)
+            if n > corpus_size:
+                print(
+                    f"num_combination={n} > corpus shape[0]={corpus_size} "
+                    f"({source or 'corpus'}); clamping to {corpus_size}"
+                )
+                n = corpus_size
+            if n == corpus_size:
+                idx = np.arange(corpus_size, dtype=np.int64)
+            else:
+                idx = np.unique(
+                    np.rint(np.linspace(0, corpus_size - 1, n)).astype(np.int64)
+                )
+                if int(idx.size) < n:
+                    unused = np.setdiff1d(
+                        np.arange(corpus_size, dtype=np.int64), idx, assume_unique=False
+                    )
+                    need = n - int(idx.size)
+                    extra = unused[np.linspace(0, unused.size - 1, need).astype(np.int64)]
+                    idx = np.unique(np.concatenate([idx, extra]))
+        print(
+            f"num_combination={int(idx.size)}/{corpus_size} "
+            f"corpus rows={idx.tolist()} ({source or 'corpus'})"
+        )
+        return idx
+
+    def _corpus_row(self, combination_idx):
+        """Map sampler id in [0, num_combination) to a raw corpus row."""
+        combination_idx = int(combination_idx)
+        if not (0 <= combination_idx < int(self.combination_index.size)):
+            raise ValueError(
+                f"combination_idx={combination_idx} out of range "
+                f"[0, {int(self.combination_index.size)})"
             )
-            return corpus_size
-        return n
+        return int(self.combination_index[combination_idx])
 
     def _load_corpus_layout(self, saved_dir):
         fp_ao = os.path.join(saved_dir, "other_actions_agent_offsets.npy")
@@ -406,7 +441,10 @@ class Drive_PBT(pufferlib.PufferEnv):
     ):
         if strategy == "curriculum":
             types = load_difficulty_types(
-                curriculum_types, curriculum_types_path, num_combination
+                curriculum_types,
+                curriculum_types_path,
+                num_combination,
+                combination_index=getattr(self, "combination_index", None),
             )
             return CurriculumSampler(
                 num_combination=num_combination,
@@ -520,7 +558,10 @@ class Drive_PBT(pufferlib.PufferEnv):
             n = hi - lo
             if agent_ind + n > self.num_agents:
                 n = self.num_agents - agent_ind
-            keys = np.asarray(self.population_keys[combination_idx, lo : lo + n], dtype=np.int64)
+            keys = np.asarray(
+                self.population_keys[self._corpus_row(combination_idx), lo : lo + n],
+                dtype=np.int64,
+            )
             if np.any((keys < 0) | (keys >= lut.shape[0]) | (lut[keys] < 0)):
                 bad = keys[(keys < 0) | (keys >= lut.shape[0]) | (lut[keys] < 0)]
                 raise ValueError(
@@ -548,7 +589,7 @@ class Drive_PBT(pufferlib.PufferEnv):
             if agent_ind + n > self.num_agents:
                 n = self.num_agents - agent_ind
             self.replay_actions[agent_ind : agent_ind + n] = self.other_actions[
-                combination_idx, lo : lo + n
+                self._corpus_row(combination_idx), lo : lo + n
             ].copy()
             agent_ind += n
 
@@ -705,7 +746,7 @@ class Drive_PBT(pufferlib.PufferEnv):
             if agent_ind + n > num_agents:
                 n = num_agents - agent_ind
             self.replay_actions[agent_ind : agent_ind + n] = self.other_actions[
-                sample_ind, lo : lo + n
+                self._corpus_row(sample_ind), lo : lo + n
             ].copy()
             agent_ind += n
 

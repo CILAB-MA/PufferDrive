@@ -1847,33 +1847,47 @@ def sanity(env_name, args=None):
 
     return runs
 
-def _curriculum_rollout_types(types_sorted, num_collect_rollout):
-    """Build a staged curriculum type schedule of length num_collect_rollout.
+def _curriculum_mix_weights(types_sorted, rollout_i, num_collect_rollout):
+    """Linear blend from easiest to hardest type across rollouts.
 
-    Split rollouts into len(types) stages. Stage s only uses types_sorted[:s+1]
-    (easy→hard unlock), round-robin within the unlocked set.
+    t = i / (M-1): rollout 0 is 100% types_sorted[0], last rollout is 100%
+    types_sorted[-1]. In between, only the two neighboring types have mass.
 
-    Example types=[0,1,2], M=9:
-      [0, 0, 0,  0, 1, 0,  0, 1, 2]
+    Returns (weights_by_type, t, primary_type).
     """
-    types_sorted = list(types_sorted)
-    m = int(num_collect_rollout)
+    types_sorted = [int(t) for t in types_sorted]
     n_types = len(types_sorted)
+    m = int(num_collect_rollout)
     if m < 1:
         raise ValueError(f"num_collect_rollout must be >= 1, got {m}")
     if n_types < 1:
         raise ValueError("types_sorted must be non-empty")
+    t = 0.0 if m <= 1 else float(rollout_i) / float(m - 1)
+    weights = {typ: 0.0 for typ in types_sorted}
+    if n_types == 1:
+        weights[types_sorted[0]] = 1.0
+        return weights, t, types_sorted[0]
+    pos = t * (n_types - 1)
+    lo = int(np.floor(pos + 1e-12))
+    hi = int(np.ceil(pos - 1e-12))
+    lo = min(max(lo, 0), n_types - 1)
+    hi = min(max(hi, 0), n_types - 1)
+    if lo == hi:
+        weights[types_sorted[lo]] = 1.0
+        return weights, t, types_sorted[lo]
+    w_hi = float(pos - lo)
+    weights[types_sorted[hi]] = w_hi
+    weights[types_sorted[lo]] = 1.0 - w_hi
+    primary = types_sorted[hi if w_hi >= 0.5 else lo]
+    return weights, t, primary
 
-    # Even stage sizes; remainder goes to later stages.
-    base, rem = divmod(m, n_types)
-    stage_sizes = [base + (1 if s >= n_types - rem else 0) for s in range(n_types)]
-    rollout_types = []
-    for s, size in enumerate(stage_sizes):
-        allowed = types_sorted[: s + 1]
-        for i in range(size):
-            rollout_types.append(allowed[i % len(allowed)])
-    assert len(rollout_types) == m
-    return rollout_types
+
+def _curriculum_rollout_types(types_sorted, num_collect_rollout):
+    """Primary type label per rollout for the linear easy→hard mix."""
+    m = int(num_collect_rollout)
+    return [
+        _curriculum_mix_weights(types_sorted, i, m)[2] for i in range(m)
+    ]
 
 
 def _normalize_path_arg(value, name):
@@ -1910,17 +1924,20 @@ def _load_collect_order(collect_order_path, num_collect_rollout, num_checkpoints
             raise FileNotFoundError(f"type_to_population[{t}] is not a directory: {pop}")
 
     types_sorted = sorted(type_to_population)
-    rollout_types = order.get("rollout_types")
-    if rollout_types is None or rollout_types == [] or rollout_types == "":
+    raw_rollout_types = order.get("rollout_types")
+    explicit_rollout_types = not (
+        raw_rollout_types is None or raw_rollout_types == [] or raw_rollout_types == ""
+    )
+    if not explicit_rollout_types:
         rollout_types = _curriculum_rollout_types(types_sorted, num_collect_rollout)
     else:
-        if not isinstance(rollout_types, list):
+        if not isinstance(raw_rollout_types, list):
             raise ValueError("rollout_types must be a list when provided")
-        if len(rollout_types) != int(num_collect_rollout):
+        if len(raw_rollout_types) != int(num_collect_rollout):
             raise ValueError(
-                f"len(rollout_types)={len(rollout_types)} != num_collect_rollout={num_collect_rollout}"
+                f"len(rollout_types)={len(raw_rollout_types)} != num_collect_rollout={num_collect_rollout}"
             )
-        rollout_types = [int(t) for t in rollout_types]
+        rollout_types = [int(t) for t in raw_rollout_types]
         missing = sorted(set(rollout_types) - set(type_to_population))
         if missing:
             raise ValueError(
@@ -1929,7 +1946,7 @@ def _load_collect_order(collect_order_path, num_collect_rollout, num_checkpoints
 
     # num_checkpoints is validated later when loading; keep total = requested M.
     _ = num_checkpoints
-    return type_to_population, rollout_types, int(num_collect_rollout)
+    return type_to_population, rollout_types, int(num_collect_rollout), explicit_rollout_types
 
 
 def _load_policies_from_population(population_path, args, vecenv, env_name, num_checkpoints=0):
@@ -2044,8 +2061,14 @@ def zero_shot(env_name, args=None, vecenv=None, policies=None):
         policies_by_type = None
         rollout_types = None
         type_to_population = None
+        explicit_rollout_types = False
         if collect_order_path:
-            type_to_population, rollout_types, num_collect_rollout = _load_collect_order(
+            (
+                type_to_population,
+                rollout_types,
+                num_collect_rollout,
+                explicit_rollout_types,
+            ) = _load_collect_order(
                 collect_order_path,
                 num_collect_rollout,
                 num_checkpoints=collect_num_checkpoints,
@@ -2096,14 +2119,23 @@ def zero_shot(env_name, args=None, vecenv=None, policies=None):
             }
             from collections import Counter
             counts = Counter(rollout_types)
+            mix_mode = "explicit rollout_types" if explicit_rollout_types else "linear easy→hard mix"
             print(
                 f"Curriculum collect order: {collect_order_path} "
                 f"(out={args['pbt']['population_path']}, "
                 f"collect_num_checkpoints={collect_num_checkpoints or 'all'}, "
                 f"num_collect_rollout={num_collect_rollout}, "
-                f"type_counts={dict(sorted(counts.items()))})"
+                f"mode={mix_mode}, "
+                f"primary_type_counts={dict(sorted(counts.items()))})"
             )
-            print(f"  rollout_types={rollout_types}")
+            if explicit_rollout_types:
+                print(f"  rollout_types={rollout_types}")
+            else:
+                print(
+                    "  mix: rollout 0 = 100% easiest type, "
+                    f"rollout {num_collect_rollout - 1} = 100% hardest type; "
+                    "agents are split by interpolated type weights"
+                )
         else:
             policies, ckpts = _load_policies_from_population(
                 args["pbt"]["population_path"],
@@ -2131,15 +2163,52 @@ def zero_shot(env_name, args=None, vecenv=None, policies=None):
         fp_pop = os.path.join(split_dir, f"population_keys_{tag}.npy")
         mm_a = mm_ao = mm_m = mm_gid = mm_types = mm_pop = None
         for local_i, global_i in enumerate(range(start_idx, end_idx)):
+            policy_weights = None
+            mix_global_keys = None
+            mix_msg = ""
             if policies_by_type is not None:
-                rollout_type = int(rollout_types[global_i])
-                policies = policies_by_type[rollout_type]
+                types_sorted = sorted(policies_by_type)
+                if explicit_rollout_types:
+                    rollout_type = int(rollout_types[global_i])
+                    policies = policies_by_type[rollout_type]
+                    mix_global_keys = type_to_local_to_global[rollout_type]
+                    mix_msg = f", type={rollout_type}"
+                else:
+                    mix_w, mix_t, rollout_type = _curriculum_mix_weights(
+                        types_sorted, global_i, num_collect_rollout
+                    )
+                    policies = []
+                    mix_key_list = []
+                    weight_list = []
+                    for typ in types_sorted:
+                        w = float(mix_w[int(typ)])
+                        if w <= 0.0:
+                            continue
+                        plist = policies_by_type[typ]
+                        lut = type_to_local_to_global[typ]
+                        w_each = w / max(len(plist), 1)
+                        for j, pol in enumerate(plist):
+                            policies.append(pol)
+                            mix_key_list.append(int(lut[j]))
+                            weight_list.append(w_each)
+                    mix_global_keys = np.asarray(mix_key_list, dtype=np.int32)
+                    policy_weights = np.asarray(weight_list, dtype=np.float64)
+                    mix_msg = (
+                        f", t={mix_t:.3f} primary={rollout_type} "
+                        f"mix={{{', '.join(f'{k}:{mix_w[k]:.3f}' for k in types_sorted if mix_w[k] > 0)}}}"
+                    )
             else:
                 rollout_type = -1
             other_action_buf, agent_offsets, map_ids, global_ids, local_policy_ids = (
-                evaluator.collect_rollouts(args, vecenv, policies)
+                evaluator.collect_rollouts(
+                    args, vecenv, policies, policy_weights=policy_weights
+                )
             )
-            lut = type_to_local_to_global[rollout_type]
+            lut = (
+                mix_global_keys
+                if mix_global_keys is not None
+                else type_to_local_to_global[rollout_type]
+            )
             if int(local_policy_ids.max()) >= int(lut.shape[0]):
                 raise ValueError(
                     f"Rollout {global_i}: local policy id {int(local_policy_ids.max())} "
@@ -2182,10 +2251,9 @@ def zero_shot(env_name, args=None, vecenv=None, policies=None):
             mm_pop[local_i] = population_keys
             # Env stays alive: collect_rollouts() calls reset(); resample_frequency=0
             # prevents Drive.step from rebuilding maps mid-horizon.
-            type_msg = f", type={rollout_type}" if policies_by_type is not None else ""
             print(
                 f"Collected shard {local_i + 1}/{shard_len} "
-                f"(global rollout {global_i + 1}/{num_collect_rollout}{type_msg}), "
+                f"(global rollout {global_i + 1}/{num_collect_rollout}{mix_msg}), "
                 f"shape: {other_action_buf.shape}, "
                 f"pop_keys={np.unique(population_keys).tolist()}"
             )

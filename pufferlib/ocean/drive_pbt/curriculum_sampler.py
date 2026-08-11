@@ -4,8 +4,9 @@ import os
 import numpy as np
 
 
-def load_difficulty_types(curriculum_types, curriculum_types_path, num_combination):
-    """Load a length-num_combination difficulty type array (lower = easier)."""
+def load_difficulty_types(
+    curriculum_types, curriculum_types_path, num_combination, combination_index=None
+):
     if curriculum_types is not None and curriculum_types != "" and curriculum_types != []:
         types = np.asarray(curriculum_types, dtype=np.int64).reshape(-1)
     elif curriculum_types_path:
@@ -27,11 +28,21 @@ def load_difficulty_types(curriculum_types, curriculum_types_path, num_combinati
             "strategy=curriculum requires curriculum_types (list) or curriculum_types_path"
         )
 
-    if types.shape[0] != int(num_combination):
-        raise ValueError(
-            f"difficulty_types length {types.shape[0]} != num_combination {num_combination}"
+    n = int(num_combination)
+    if types.shape[0] == n:
+        return types
+    if combination_index is not None:
+        idx = np.asarray(combination_index, dtype=np.int64).reshape(-1)
+        if idx.size == n and int(idx.min()) >= 0 and int(idx.max()) < int(types.shape[0]):
+            return np.asarray(types[idx], dtype=np.int64)
+    raise ValueError(
+        f"difficulty_types length {types.shape[0]} != num_combination {n}"
+        + (
+            f" (and cannot index with combination_index max={int(np.max(combination_index))})"
+            if combination_index is not None
+            else ""
         )
-    return types
+    )
 
 
 class CurriculumSampler:
