@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage A/B debugger for Drive_PBT agent_sampling.
+"""Stage A/B debugger for Drive_PBT partner sampling.
 
 Stage A (default): small env, index/LUT identity + minimum_distance correctness.
 Stage B: shorter episode_length and/or injected reset() within a rollout.
@@ -89,9 +89,6 @@ def _info_dict(env, info):
 def audit_slot_identity(env, label: str = "slot identity", max_failures: int = 8) -> AuditReport:
     """Stage A #2: local_idx, global_idx, LUT round-trip for each other slot."""
     rep = AuditReport(label)
-    if not env.agent_sampling:
-        rep.check(False, "", "agent_sampling is disabled")
-        return rep
 
     gid = env.global_ids
     lut = env._env_entity_to_other_slot
@@ -187,7 +184,7 @@ def audit_slot_identity(env, label: str = "slot identity", max_failures: int = 8
 
 def audit_policy_assignment(env, label: str = "policy assignment") -> AuditReport:
     rep = AuditReport(label)
-    if not (env.agent_sampling or env.pbt_mode == "reactive"):
+    if env.pbt_mode != "reactive":
         return rep
 
     flat = getattr(env, "policy_per_slot_flatten", None)
@@ -261,7 +258,7 @@ def _bruteforce_minimum_distance(env):
 def audit_minimum_distance(env, label: str = "minimum_distance", tol: float = 1e-4) -> AuditReport:
     """Stage A #3: env.minimum_distance / minimum_ego_idx vs brute-force partner obs."""
     rep = AuditReport(label)
-    if not env.agent_sampling:
+    if not env._score_tracking_enabled:
         return rep
 
     expected_dist, expected_ego = _bruteforce_minimum_distance(env)
@@ -328,11 +325,11 @@ def audit_metric_reset(
             f"_episode_return sum={float(env._episode_return.sum()):.3f} (expected 0)",
         )
 
-    # reset()/resample: _reset_other_indices() then _update_minimum_distance() at tick 0.
-    if env.agent_sampling:
+    # reset()/resample: _reset_other_indices() then optional _update_minimum_distance() at tick 0.
+    if env._score_tracking_enabled:
         rep.merge(audit_minimum_distance(env, f"{label}/distance_tick0"))
 
-    if expect_identity_refresh and env.agent_sampling:
+    if expect_identity_refresh:
         rep.merge(audit_slot_identity(env, f"{label}/identity"))
         rep.merge(audit_policy_assignment(env, f"{label}/policy"))
 
@@ -604,7 +601,6 @@ def main() -> int:
         ego_ratio=args.ego_ratio,
         population_path=args.population_path,
         pbt_mode=args.pbt_mode,
-        agent_sampling=True,
         render_mode=None,
         episode_length=args.episode_length,
         resample_frequency=args.resample_frequency,

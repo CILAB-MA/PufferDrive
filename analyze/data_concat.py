@@ -92,6 +92,23 @@ def _require_optional_consistency(
     return np.load(shard_path, mmap_mode="r")
 
 
+def _as_layout_1d(arr: np.ndarray, *, label: str, path: str) -> np.ndarray:
+    """Collapse repeated per-rollout layout rows to a single 1D vector."""
+    a = np.asarray(arr)
+    if a.ndim == 1:
+        return np.ascontiguousarray(a)
+    if a.ndim == 2:
+        ref = np.ascontiguousarray(a[0])
+        for i in range(1, a.shape[0]):
+            if not np.array_equal(a[i], ref):
+                raise ValueError(
+                    f"{path}: {label} row {i} differs from row 0; "
+                    "expected identical map layout across rollouts"
+                )
+        return ref
+    raise ValueError(f"{path}: {label} expected 1D or 2D, got shape {a.shape}")
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument(
@@ -119,16 +136,24 @@ def main() -> int:
     paths0 = _matching_paths(splits_dir, start0, end0)
 
     first_a = np.load(actions_path, mmap_mode="r")
-    first_ao = np.load(paths0["agent_offsets"], mmap_mode="r")
-    first_m = np.load(paths0["map_ids"], mmap_mode="r")
+    first_ao = _as_layout_1d(
+        np.load(paths0["agent_offsets"], mmap_mode="r"),
+        label="agent_offsets",
+        path=paths0["agent_offsets"],
+    )
+    first_m = _as_layout_1d(
+        np.load(paths0["map_ids"], mmap_mode="r"),
+        label="map_ids",
+        path=paths0["map_ids"],
+    )
     has_global_ids = os.path.isfile(paths0["global_ids"])
     has_types = os.path.isfile(paths0["types"])
     has_pop = os.path.isfile(paths0["population_keys"])
     if first_a.shape[0] != end0 - start0:
         raise ValueError(f"{actions_path}: leading dim {first_a.shape[0]} != {end0 - start0}")
     na, T, c = int(first_a.shape[1]), int(first_a.shape[2]), int(first_a.shape[3])
-    jo = int(first_ao.shape[1])
-    km = int(first_m.shape[1])
+    jo = int(first_ao.shape[0])
+    km = int(first_m.shape[0])
     dtype_a = first_a.dtype
     if has_global_ids:
         first_gid = np.load(paths0["global_ids"], mmap_mode="r")
@@ -162,12 +187,22 @@ def main() -> int:
     for start, end, ap in shards[1:]:
         paths = _matching_paths(splits_dir, start, end)
         aa = np.load(ap, mmap_mode="r")
-        aao = np.load(paths["agent_offsets"], mmap_mode="r")
-        am = np.load(paths["map_ids"], mmap_mode="r")
+        aao = _as_layout_1d(
+            np.load(paths["agent_offsets"], mmap_mode="r"),
+            label="agent_offsets",
+            path=paths["agent_offsets"],
+        )
+        am = _as_layout_1d(
+            np.load(paths["map_ids"], mmap_mode="r"),
+            label="map_ids",
+            path=paths["map_ids"],
+        )
         if aa.dtype != dtype_a or tuple(aa.shape[1:]) != (na, T, c):
             raise ValueError(f"Shape/dtype mismatch: {ap} vs {actions_path}")
-        if aao.shape[1:] != (jo,) or am.shape[1:] != (km,):
-            raise ValueError(f"offsets/map_ids shape mismatch: shard [{start},{end})")
+        if aao.shape != (jo,) or not np.array_equal(aao, first_ao):
+            raise ValueError(f"agent_offsets mismatch vs first shard: {paths['agent_offsets']}")
+        if am.shape != (km,) or not np.array_equal(am, first_m):
+            raise ValueError(f"map_ids mismatch vs first shard: {paths['map_ids']}")
         if has_global_ids:
             if not os.path.isfile(paths["global_ids"]):
                 raise ValueError(f"Missing global_ids shard: {paths['global_ids']}")
@@ -209,8 +244,6 @@ def main() -> int:
     mm_a = np.lib.format.open_memmap(
         out_a, mode="w+", dtype=dtype_a, shape=(args.total_rollouts, na, T, c)
     )
-    mm_ao = np.lib.format.open_memmap(out_ao, mode="w+", dtype=np.int32, shape=(args.total_rollouts, jo))
-    mm_m = np.lib.format.open_memmap(out_m, mode="w+", dtype=np.int32, shape=(args.total_rollouts, km))
     mm_types = None
     if has_types:
         mm_types = np.lib.format.open_memmap(
@@ -227,11 +260,7 @@ def main() -> int:
         paths = _matching_paths(splits_dir, start, end)
         sl = end - start
         aa = np.load(ap, mmap_mode="r")
-        aao = np.load(paths["agent_offsets"], mmap_mode="r")
-        am = np.load(paths["map_ids"], mmap_mode="r")
         mm_a[offset : offset + sl] = np.ascontiguousarray(aa)
-        mm_ao[offset : offset + sl] = np.ascontiguousarray(aao)
-        mm_m[offset : offset + sl] = np.ascontiguousarray(am)
         if mm_types is not None:
             tt = np.load(paths["types"], mmap_mode="r")
             mm_types[offset : offset + sl] = np.ascontiguousarray(tt)
@@ -239,15 +268,19 @@ def main() -> int:
             pp = np.load(paths["population_keys"], mmap_mode="r")
             mm_pop[offset : offset + sl] = np.ascontiguousarray(pp)
         offset += sl
-    del mm_a, mm_ao, mm_m
+    del mm_a
     if mm_types is not None:
         del mm_types
     if mm_pop is not None:
         del mm_pop
 
+    # Shared map layout — one copy, not repeated per rollout.
+    np.save(out_ao, first_ao.astype(np.int32, copy=False))
+    np.save(out_m, first_m.astype(np.int32, copy=False))
+
     print(f"Wrote {out_a}")
-    print(f"Wrote {out_ao}")
-    print(f"Wrote {out_m}")
+    print(f"Wrote {out_ao} shape={first_ao.shape}")
+    print(f"Wrote {out_m} shape={first_m.shape}")
     if has_global_ids:
         corpus_global_ids = _load_corpus_global_ids(paths0["global_ids"])
         np.save(out_gid, corpus_global_ids)

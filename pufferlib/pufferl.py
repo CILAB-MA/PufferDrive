@@ -1048,7 +1048,7 @@ class PuffeRL:
         i = 0
         dashboard_ignore_stats = {
             "partner_resampled",
-            "map_policy_assignment_ids",
+            "combination_ids",
             "metric_ego_n",
             "legacy_ego_n",
             "other_policy_n",
@@ -1309,7 +1309,7 @@ WANDB_IGNORE_ENV_KEYS = {
     "environment/other_indices",
     "environment/ego_n",
     "environment/partner_resampled",
-    "environment/map_policy_assignment_ids",
+    "environment/combination_ids",
     "environment/policy_ego_n",
     "environment/metric_ego_n",
     "environment/legacy_ego_n",
@@ -1451,19 +1451,21 @@ def train_pbt(env_name, args=None, vecenv=None, policy=None, logger=None, config
     vecenv = vecenv or load_env(env_name, args)
     policy = policy or load_policy(args, vecenv, env_name)
 
-    # if the pbt train mode is reactive, load other policy
-    populations = sorted(
-        f for f in os.listdir(args["pbt"]["population_path"])
-        if f.endswith(".pt")
-    )
+    # if the pbt train mode is reactive, load other policies (manifest-aware)
     policies = None
     if args["pbt"]["pbt_mode"] == "reactive":
+        from pufferlib.ocean.drive_pbt.drive_pbt import resolve_reactive_policy_files
+
+        policy_files = resolve_reactive_policy_files(args["pbt"]["population_path"])
         policies = []
-        for op in populations:
+        for path, _name in policy_files:
             args2 = args.copy()
-            args2["load_model_path"] = os.path.join(args["pbt"]["population_path"], op)
-            policy2 = load_policy(args2, vecenv, env_name)
-            policies.append(policy2)
+            args2["load_model_path"] = path
+            policies.append(load_policy(args2, vecenv, env_name))
+        print(
+            f"Loaded {len(policies)} reactive partner policies "
+            f"from manifest/population under {args['pbt']['population_path']}"
+        )
 
     if "LOCAL_RANK" in os.environ:
         args["train"]["device"] = torch.cuda.current_device()
@@ -1847,33 +1849,40 @@ def sanity(env_name, args=None):
 
     return runs
 
-def _curriculum_rollout_types(types_sorted, num_collect_rollout):
-    """Build a staged curriculum type schedule of length num_collect_rollout.
-
-    Split rollouts into len(types) stages. Stage s only uses types_sorted[:s+1]
-    (easy→hard unlock), round-robin within the unlocked set.
-
-    Example types=[0,1,2], M=9:
-      [0, 0, 0,  0, 1, 0,  0, 1, 2]
-    """
-    types_sorted = list(types_sorted)
-    m = int(num_collect_rollout)
+def _curriculum_mix_weights(types_sorted, rollout_i, num_collect_rollout):
+    types_sorted = [int(t) for t in types_sorted]
     n_types = len(types_sorted)
+    m = int(num_collect_rollout)
     if m < 1:
         raise ValueError(f"num_collect_rollout must be >= 1, got {m}")
     if n_types < 1:
         raise ValueError("types_sorted must be non-empty")
+    t = 0.0 if m <= 1 else float(rollout_i) / float(m - 1)
+    weights = {typ: 0.0 for typ in types_sorted}
+    if n_types == 1:
+        weights[types_sorted[0]] = 1.0
+        return weights, t, types_sorted[0]
+    pos = t * (n_types - 1)
+    lo = int(np.floor(pos + 1e-12))
+    hi = int(np.ceil(pos - 1e-12))
+    lo = min(max(lo, 0), n_types - 1)
+    hi = min(max(hi, 0), n_types - 1)
+    if lo == hi:
+        weights[types_sorted[lo]] = 1.0
+        return weights, t, types_sorted[lo]
+    w_hi = float(pos - lo)
+    weights[types_sorted[hi]] = w_hi
+    weights[types_sorted[lo]] = 1.0 - w_hi
+    primary = types_sorted[hi if w_hi >= 0.5 else lo]
+    return weights, t, primary
 
-    # Even stage sizes; remainder goes to later stages.
-    base, rem = divmod(m, n_types)
-    stage_sizes = [base + (1 if s >= n_types - rem else 0) for s in range(n_types)]
-    rollout_types = []
-    for s, size in enumerate(stage_sizes):
-        allowed = types_sorted[: s + 1]
-        for i in range(size):
-            rollout_types.append(allowed[i % len(allowed)])
-    assert len(rollout_types) == m
-    return rollout_types
+
+def _curriculum_rollout_types(types_sorted, num_collect_rollout):
+    """Primary type label per rollout for the linear easy→hard mix."""
+    m = int(num_collect_rollout)
+    return [
+        _curriculum_mix_weights(types_sorted, i, m)[2] for i in range(m)
+    ]
 
 
 def _normalize_path_arg(value, name):
@@ -1889,19 +1898,6 @@ def _normalize_path_arg(value, name):
 
 
 def _load_collect_order(collect_order_path, num_collect_rollout, num_checkpoints=0):
-    """Load curriculum collect order JSON.
-
-    Schema:
-      {
-        "type_to_population": {"0": "/path/to/pop0", "1": "/path/to/pop1"},
-        "rollout_types": [0, 0, 1, ...]  # optional; auto curriculum schedule if omitted
-      }
-
-    When rollout_types is omitted, builds a staged schedule of length
-    num_collect_rollout (early = easy only, later = mix including harder types).
-    collect_num_checkpoints only limits how many *.pt are mixed per type.
-    Returns (type_to_population, rollout_types, num_collect_rollout).
-    """
     path = _normalize_path_arg(collect_order_path, "collect_order_path")
     if not path:
         raise ValueError(
@@ -1923,17 +1919,20 @@ def _load_collect_order(collect_order_path, num_collect_rollout, num_checkpoints
             raise FileNotFoundError(f"type_to_population[{t}] is not a directory: {pop}")
 
     types_sorted = sorted(type_to_population)
-    rollout_types = order.get("rollout_types")
-    if rollout_types is None or rollout_types == [] or rollout_types == "":
+    raw_rollout_types = order.get("rollout_types")
+    explicit_rollout_types = not (
+        raw_rollout_types is None or raw_rollout_types == [] or raw_rollout_types == ""
+    )
+    if not explicit_rollout_types:
         rollout_types = _curriculum_rollout_types(types_sorted, num_collect_rollout)
     else:
-        if not isinstance(rollout_types, list):
+        if not isinstance(raw_rollout_types, list):
             raise ValueError("rollout_types must be a list when provided")
-        if len(rollout_types) != int(num_collect_rollout):
+        if len(raw_rollout_types) != int(num_collect_rollout):
             raise ValueError(
-                f"len(rollout_types)={len(rollout_types)} != num_collect_rollout={num_collect_rollout}"
+                f"len(rollout_types)={len(raw_rollout_types)} != num_collect_rollout={num_collect_rollout}"
             )
-        rollout_types = [int(t) for t in rollout_types]
+        rollout_types = [int(t) for t in raw_rollout_types]
         missing = sorted(set(rollout_types) - set(type_to_population))
         if missing:
             raise ValueError(
@@ -1942,7 +1941,7 @@ def _load_collect_order(collect_order_path, num_collect_rollout, num_checkpoints
 
     # num_checkpoints is validated later when loading; keep total = requested M.
     _ = num_checkpoints
-    return type_to_population, rollout_types, int(num_collect_rollout)
+    return type_to_population, rollout_types, int(num_collect_rollout), explicit_rollout_types
 
 
 def _load_policies_from_population(population_path, args, vecenv, env_name, num_checkpoints=0):
@@ -2010,9 +2009,9 @@ def _write_population_manifest(population_path, keys, type_to_ckpts):
             for t, (pop, ckpts) in sorted(type_to_ckpts.items())
         },
         "note": (
-            "saved/population_keys.npy has shape (num_rollouts, num_agents). "
+            "saved/population_keys.npy has shape (num_combination, num_agents). "
             "Entry [r, a] is an index into keys[]; keys[i] identifies which "
-            "population checkpoint acted for that agent in that rollout."
+            "population checkpoint acted for that agent in that combination."
         ),
     }
     out = os.path.join(population_path, "population_manifest.json")
@@ -2057,8 +2056,14 @@ def zero_shot(env_name, args=None, vecenv=None, policies=None):
         policies_by_type = None
         rollout_types = None
         type_to_population = None
+        explicit_rollout_types = False
         if collect_order_path:
-            type_to_population, rollout_types, num_collect_rollout = _load_collect_order(
+            (
+                type_to_population,
+                rollout_types,
+                num_collect_rollout,
+                explicit_rollout_types,
+            ) = _load_collect_order(
                 collect_order_path,
                 num_collect_rollout,
                 num_checkpoints=collect_num_checkpoints,
@@ -2109,14 +2114,23 @@ def zero_shot(env_name, args=None, vecenv=None, policies=None):
             }
             from collections import Counter
             counts = Counter(rollout_types)
+            mix_mode = "explicit rollout_types" if explicit_rollout_types else "linear easy→hard mix"
             print(
                 f"Curriculum collect order: {collect_order_path} "
                 f"(out={args['pbt']['population_path']}, "
                 f"collect_num_checkpoints={collect_num_checkpoints or 'all'}, "
                 f"num_collect_rollout={num_collect_rollout}, "
-                f"type_counts={dict(sorted(counts.items()))})"
+                f"mode={mix_mode}, "
+                f"primary_type_counts={dict(sorted(counts.items()))})"
             )
-            print(f"  rollout_types={rollout_types}")
+            if explicit_rollout_types:
+                print(f"  rollout_types={rollout_types}")
+            else:
+                print(
+                    "  mix: rollout 0 = 100% easiest type, "
+                    f"rollout {num_collect_rollout - 1} = 100% hardest type; "
+                    "agents are split by interpolated type weights"
+                )
         else:
             policies, ckpts = _load_policies_from_population(
                 args["pbt"]["population_path"],
@@ -2144,23 +2158,60 @@ def zero_shot(env_name, args=None, vecenv=None, policies=None):
         fp_pop = os.path.join(split_dir, f"population_keys_{tag}.npy")
         mm_a = mm_ao = mm_m = mm_gid = mm_types = mm_pop = None
         for local_i, global_i in enumerate(range(start_idx, end_idx)):
+            policy_weights = None
+            mix_global_keys = None
+            mix_msg = ""
             if policies_by_type is not None:
-                rollout_type = int(rollout_types[global_i])
-                policies = policies_by_type[rollout_type]
+                types_sorted = sorted(policies_by_type)
+                if explicit_rollout_types:
+                    rollout_type = int(rollout_types[global_i])
+                    policies = policies_by_type[rollout_type]
+                    mix_global_keys = type_to_local_to_global[rollout_type]
+                    mix_msg = f", type={rollout_type}"
+                else:
+                    mix_w, mix_t, rollout_type = _curriculum_mix_weights(
+                        types_sorted, global_i, num_collect_rollout
+                    )
+                    policies = []
+                    mix_key_list = []
+                    weight_list = []
+                    for typ in types_sorted:
+                        w = float(mix_w[int(typ)])
+                        if w <= 0.0:
+                            continue
+                        plist = policies_by_type[typ]
+                        lut = type_to_local_to_global[typ]
+                        w_each = w / max(len(plist), 1)
+                        for j, pol in enumerate(plist):
+                            policies.append(pol)
+                            mix_key_list.append(int(lut[j]))
+                            weight_list.append(w_each)
+                    mix_global_keys = np.asarray(mix_key_list, dtype=np.int32)
+                    policy_weights = np.asarray(weight_list, dtype=np.float64)
+                    mix_msg = (
+                        f", t={mix_t:.3f} primary={rollout_type} "
+                        f"mix={{{', '.join(f'{k}:{mix_w[k]:.3f}' for k in types_sorted if mix_w[k] > 0)}}}"
+                    )
             else:
                 rollout_type = -1
             other_action_buf, agent_offsets, map_ids, global_ids, local_policy_ids = (
-                evaluator.collect_rollouts(args, vecenv, policies)
+                evaluator.collect_rollouts(
+                    args, vecenv, policies, policy_weights=policy_weights
+                )
             )
-            lut = type_to_local_to_global[rollout_type]
+            lut = (
+                mix_global_keys
+                if mix_global_keys is not None
+                else type_to_local_to_global[rollout_type]
+            )
             if int(local_policy_ids.max()) >= int(lut.shape[0]):
                 raise ValueError(
                     f"Rollout {global_i}: local policy id {int(local_policy_ids.max())} "
                     f">= num policies {int(lut.shape[0])} for type={rollout_type}"
                 )
             population_keys = lut[local_policy_ids]
-            agent_offsets = np.asarray(agent_offsets, dtype=np.int32, order="C")
-            map_ids = np.asarray(map_ids, dtype=np.int32, order="C")
+            agent_offsets = np.asarray(agent_offsets, dtype=np.int32, order="C").reshape(-1)
+            map_ids = np.asarray(map_ids, dtype=np.int32, order="C").reshape(-1)
             global_ids = np.asarray(global_ids, dtype=np.int32, order="C")
             population_keys = np.asarray(population_keys, dtype=np.int32, order="C")
             if local_i == 0:
@@ -2174,12 +2225,9 @@ def zero_shot(env_name, args=None, vecenv=None, policies=None):
                     dtype=other_action_buf.dtype,
                     shape=(shard_len, na, T, c),
                 )
-                mm_ao = np.lib.format.open_memmap(
-                    fp_ao, mode="w+", dtype=np.int32, shape=(shard_len, jo)
-                )
-                mm_m = np.lib.format.open_memmap(
-                    fp_m, mode="w+", dtype=np.int32, shape=(shard_len, km)
-                )
+                # Layout is identical across rollouts — store once (1D), not per-rollout copies.
+                mm_ao = np.lib.format.open_memmap(fp_ao, mode="w+", dtype=np.int32, shape=(jo,))
+                mm_m = np.lib.format.open_memmap(fp_m, mode="w+", dtype=np.int32, shape=(km,))
                 mm_gid = np.lib.format.open_memmap(
                     fp_gid, mode="w+", dtype=np.int32, shape=(shard_len, nm, me)
                 )
@@ -2189,27 +2237,18 @@ def zero_shot(env_name, args=None, vecenv=None, policies=None):
                 mm_pop = np.lib.format.open_memmap(
                     fp_pop, mode="w+", dtype=np.int32, shape=(shard_len, na)
                 )
-            if other_action_buf.shape != (na, T, c):
-                raise ValueError(
-                    f"Rollout {global_i} action shape {other_action_buf.shape} != "
-                    f"first-rollout shape {(na, T, c)}; env layout changed unexpectedly"
-                )
-            if population_keys.shape != (na,):
-                raise ValueError(
-                    f"Rollout {global_i} population_keys shape {population_keys.shape} != ({na},)"
-                )
+                mm_ao[:] = agent_offsets
+                mm_m[:] = map_ids
+
             mm_a[local_i] = np.ascontiguousarray(other_action_buf)
-            mm_ao[local_i] = agent_offsets.reshape(mm_ao.shape[1:])
-            mm_m[local_i] = map_ids.reshape(mm_m.shape[1:])
             mm_gid[local_i] = global_ids
             mm_types[local_i] = rollout_type
             mm_pop[local_i] = population_keys
             # Env stays alive: collect_rollouts() calls reset(); resample_frequency=0
             # prevents Drive.step from rebuilding maps mid-horizon.
-            type_msg = f", type={rollout_type}" if policies_by_type is not None else ""
             print(
                 f"Collected shard {local_i + 1}/{shard_len} "
-                f"(global rollout {global_i + 1}/{num_collect_rollout}{type_msg}), "
+                f"(global rollout {global_i + 1}/{num_collect_rollout}{mix_msg}), "
                 f"shape: {other_action_buf.shape}, "
                 f"pop_keys={np.unique(population_keys).tolist()}"
             )
@@ -2270,53 +2309,6 @@ def zero_shot(env_name, args=None, vecenv=None, policies=None):
         results = evaluator.play_reactive(args, vecenv, policy1, policy2)
 
     return results
-
-def linear_probe(env_name, args=None, vecenv=None, policy=None):
-    from pufferlib.ocean.benchmark.linear_probe import LinearProbe
-    args = args or load_config(env_name)
-    args["env"]["map_dir"] = args["eval"]["map_dir"]
-    # args["env"]["num_maps"] = args["eval"]["wosac_num_maps"]
-    args["env"]["num_maps"] = 300
-    args["env"]["sequential_map_sampling"] = True
-    dataset_name = args["env"]["map_dir"].split("/")[-1]
-    print(f"Running linear_probing with {dataset_name} dataset.\n")
-    from pufferlib.ocean.benchmark.evaluator import OtherReplayEvaluator
-
-    backend = args["eval"].get("backend", "PufferEnv")
-    args["vec"] = dict(backend=backend, num_envs=1)
-    # args["env"]["control_mode"] = args["eval"]["human_replay_control_mode"]
-    args["env"]["episode_length"] = 91  # WOMD scenario length
-
-    vecenv = vecenv or load_env(env_name, args)
-    args2 = args.copy()
-    args["load_model_path"] = args["load_multiple_model_path"][0]
-    policy1 = load_policy(args, vecenv, env_name)
-    if "generate_" in args["lp_mode"]:
-        args2["load_model_path"] = args["load_multiple_model_path"][1]
-        policy2 = load_policy(args2, vecenv, env_name)
-    else:
-        policy2 = None
-    vecenv = vecenv or load_env(env_name, args)
-    policy = policy or load_policy(args, vecenv, env_name)
-    lp_module = LinearProbe(args)
-    if "generate" in args["lp_mode"]:
-        lp_module.make_dataset(args, vecenv, policy1, policy2)
-    elif args["lp_mode"] == "train":
-        lp_module.train(args, policy1, 10)
-        lp_module.train(args, policy1, 20)
-        lp_module.train(args, policy1, 30)
-        lp_module.train(args, policy1, 40)
-    elif args["lp_mode"] == "evaluate":
-        other_model_id = args["load_multiple_model_path"][1][-11:-3]
-        lp_module.evaluate(args, policy1, other_model_id, 10)
-        lp_module.evaluate(args, policy1, other_model_id, 20)
-        lp_module.evaluate(args, policy1, other_model_id, 30)
-        lp_module.evaluate(args, policy1, other_model_id, 40)
-
-        lp_module.evaluate(args, policy1, other_model_id, 10, mode="replay")
-        lp_module.evaluate(args, policy1, other_model_id, 20, mode="replay")
-        lp_module.evaluate(args, policy1, other_model_id, 30, mode="replay")
-        lp_module.evaluate(args, policy1, other_model_id, 40, mode="replay")
 
 def profile(args=None, env_name=None, vecenv=None, policy=None):
     args = load_config()
@@ -2577,8 +2569,6 @@ def main():
         sweep(env_name=env_name)
     elif mode == "zeroshot":
         zero_shot(env_name=env_name)
-    elif mode == "linear_probe":
-        linear_probe(env_name=env_name)
     elif mode == "controlled_exp":
         controlled_exp(env_name=env_name)
     elif mode == "autotune":

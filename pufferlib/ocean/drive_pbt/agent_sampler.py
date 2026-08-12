@@ -6,7 +6,7 @@ class AgentSampler:
 
     def __init__(
         self,
-        num_population, # replay: num_rollouts; reactive: num_policy_assignments
+        num_combination,  # shared sampling axis: corpus rows (replay actions / reactive pop_keys)
         strategy="prioritized", # options: ["prioritized", "uniform"]
         pbt_mode="replay", # options: ["replay", "reactive"]
         score_transform="power",
@@ -19,7 +19,12 @@ class AgentSampler:
         staleness_temperature=1.0,
         num_maps=0, # number of maps
     ):
-        self.num_population = int(num_population)
+        if strategy not in ("prioritized", "uniform"):
+            raise ValueError(
+                f"AgentSampler strategy must be 'prioritized' or 'uniform', got {strategy!r} "
+                "(use CurriculumSampler for strategy='curriculum')"
+            )
+        self.num_combination = int(num_combination)
         self.num_maps = int(num_maps)
         self.strategy = strategy
         self.pbt_mode = pbt_mode
@@ -33,11 +38,11 @@ class AgentSampler:
         self.staleness_transform = staleness_transform
         self.staleness_temperature = staleness_temperature
 
-        self.unseen_map_population_weights = np.ones((self.num_maps, self.num_population), dtype=np.float64)
-        self.map_population_scores = np.zeros((self.num_maps, self.num_population), dtype=np.float64)
-        self.map_population_staleness = np.zeros((self.num_maps, self.num_population), dtype=np.float64)
+        self.unseen_map_population_weights = np.ones((self.num_maps, self.num_combination), dtype=np.float64)
+        self.map_population_scores = np.zeros((self.num_maps, self.num_combination), dtype=np.float64)
+        self.map_population_staleness = np.zeros((self.num_maps, self.num_combination), dtype=np.float64)
         self.distance_threshold = 0.02 # TODO: args로 만들기
-        self.new_map_population_scores = np.zeros((self.num_maps, self.num_population), dtype=np.float64)
+        self.new_map_population_scores = np.zeros((self.num_maps, self.num_combination), dtype=np.float64)
         self.encountered_maps = np.zeros(self.num_maps, dtype=bool)
 
     def _distance_filtering(self, score, minimum_distance, population_idx, controlled_entity_idx, map_idx=None):
@@ -61,7 +66,7 @@ class AgentSampler:
             population_id = int(map_population[i])
             if not (0 <= map_id < self.num_maps):
                 continue
-            if not (0 <= population_id < self.num_population):
+            if not (0 <= population_id < self.num_combination):
                 continue
             self.new_map_population_scores[map_id, population_id] = map_scores[i]
 
@@ -127,7 +132,7 @@ class AgentSampler:
             (map_ids >= 0)
             & (map_ids < self.num_maps)
             & (population_ids >= 0)
-            & (population_ids < self.num_population)
+            & (population_ids < self.num_combination)
         )
         self.unseen_map_population_weights[map_ids[valid], population_ids[valid]] = 0.0
         self.encountered_maps[map_ids[valid]] = True
@@ -169,10 +174,10 @@ class AgentSampler:
         weights = self.sample_weights(map_idx)
 
         if np.isclose(np.sum(weights), 0): # 모든 확률이 0인 경우
-            weights = np.ones(self.num_population, dtype=np.float64) / self.num_population
+            weights = np.ones(self.num_combination, dtype=np.float64) / self.num_combination
 
         weights = weights / weights.sum()  # float 오차로 합이 1이 아닐 경우 재정규화
-        population_idx = np.random.choice(self.num_population, p=weights)
+        population_idx = np.random.choice(self.num_combination, p=weights)
 
         return int(population_idx)
 
@@ -181,9 +186,9 @@ class AgentSampler:
         s = weights.sum()
 
         if s == 0: # all seen,
-            population_idx = np.random.randint(self.num_population)
+            population_idx = np.random.randint(self.num_combination)
         else:
-            population_idx = np.random.choice(self.num_population, p=weights / s) 
+            population_idx = np.random.choice(self.num_combination, p=weights / s) 
 
         return int(population_idx)
 
@@ -193,7 +198,7 @@ class AgentSampler:
         sampled_population = np.full(num_sampled_maps, -1, dtype=np.int64)
 
         if self.strategy == "uniform":
-            sampled_population = np.random.randint(0, self.num_population, num_sampled_maps)
+            sampled_population = np.random.randint(0, self.num_combination, num_sampled_maps)
             return sampled_population, {}
 
         # "prioritized": select one population member for each unique map.
@@ -235,8 +240,8 @@ class AgentSampler:
         return metrics
 
     def sample_weights(self, map_idx):
-        scores = self.map_population_scores[map_idx]  # (num_population,)
-        unseen = self.unseen_map_population_weights[map_idx]  # (num_population,)
+        scores = self.map_population_scores[map_idx]  # (num_combination,)
+        unseen = self.unseen_map_population_weights[map_idx]  # (num_combination,)
 
         weights = self._score_transform(self.score_transform, self.temperature, scores, unseen)
         weights = weights * (1 - unseen)
@@ -277,7 +282,7 @@ class AgentSampler:
         elif transform == "eps_greedy":
             weights = np.zeros_like(scores)
             weights[scores.argmax()] = 1.0 - self.eps
-            weights += self.eps / self.num_population
+            weights += self.eps / self.num_combination
         elif transform == "rank":
             temp = np.flip(scores.argsort())
             ranks = np.empty_like(temp)

@@ -4,8 +4,9 @@ import os
 import numpy as np
 
 
-def load_difficulty_types(curriculum_types, curriculum_types_path, num_population):
-    """Load a length-num_population difficulty type array (lower = easier)."""
+def load_difficulty_types(
+    curriculum_types, curriculum_types_path, num_combination, combination_index=None
+):
     if curriculum_types is not None and curriculum_types != "" and curriculum_types != []:
         types = np.asarray(curriculum_types, dtype=np.int64).reshape(-1)
     elif curriculum_types_path:
@@ -27,11 +28,21 @@ def load_difficulty_types(curriculum_types, curriculum_types_path, num_populatio
             "strategy=curriculum requires curriculum_types (list) or curriculum_types_path"
         )
 
-    if types.shape[0] != int(num_population):
-        raise ValueError(
-            f"difficulty_types length {types.shape[0]} != num_population {num_population}"
+    n = int(num_combination)
+    if types.shape[0] == n:
+        return types
+    if combination_index is not None:
+        idx = np.asarray(combination_index, dtype=np.int64).reshape(-1)
+        if idx.size == n and int(idx.min()) >= 0 and int(idx.max()) < int(types.shape[0]):
+            return np.asarray(types[idx], dtype=np.int64)
+    raise ValueError(
+        f"difficulty_types length {types.shape[0]} != num_combination {n}"
+        + (
+            f" (and cannot index with combination_index max={int(np.max(combination_index))})"
+            if combination_index is not None
+            else ""
         )
-    return types
+    )
 
 
 class CurriculumSampler:
@@ -39,24 +50,24 @@ class CurriculumSampler:
 
     def __init__(
         self,
-        num_population,
+        num_combination,
         difficulty_types,
         curriculum_steps=10000,
         pbt_mode="replay",
         num_maps=0,
         strategy="curriculum",
     ):
-        self.num_population = int(num_population)
+        self.num_combination = int(num_combination)
         self.num_maps = int(num_maps)
         self.pbt_mode = pbt_mode
         self.strategy = strategy
         self.curriculum_steps = max(1, int(curriculum_steps))
 
         self.difficulty_types = np.asarray(difficulty_types, dtype=np.int64).reshape(-1)
-        if self.difficulty_types.shape[0] != self.num_population:
+        if self.difficulty_types.shape[0] != self.num_combination:
             raise ValueError(
                 f"difficulty_types length {self.difficulty_types.shape[0]} "
-                f"!= num_population {self.num_population}"
+                f"!= num_combination {self.num_combination}"
             )
 
         self.unique_types = np.unique(self.difficulty_types)  # ascending
@@ -68,7 +79,6 @@ class CurriculumSampler:
         self._pool_by_unlock = self._build_pools()
 
     def _build_pools(self):
-        """pools[k] = indices with type in unique_types[:k+1] (k=0..num_types-1)."""
         pools = []
         for k in range(self.num_types):
             allowed = set(self.unique_types[: k + 1].tolist())
@@ -106,15 +116,14 @@ class CurriculumSampler:
 
         self._sample_count += 1
         wandb_metrics = {
-            "curriculum_progress": float(progress),
-            "unlocked_type_max": float(unlocked_types[-1]),
-            "num_unlocked_types": float(n_unlocked),
-            "pool_size": float(pool.size),
-            "curriculum_sample_count": float(self._sample_count),
+            "curriculum/curriculum_progress": float(progress),
+            "curriculum/unlocked_type_max": float(unlocked_types[-1]),
+            "curriculum/num_unlocked_types": float(n_unlocked),
+            "curriculum/pool_size": float(pool.size),
+            "curriculum/curriculum_sample_count": float(self._sample_count),
         }
         return sampled_population, wandb_metrics
 
     def update_policy_score(self, score, controlled_entity_idx, population_idx,
                             minimum_distance, map_idx=None):
-        """No-op: difficulty is fixed by the provided type list."""
         return {}
