@@ -19,6 +19,11 @@ class AgentSampler:
         staleness_temperature=1.0,
         num_maps=0, # number of maps
     ):
+        if strategy not in ("prioritized", "uniform"):
+            raise ValueError(
+                f"AgentSampler strategy must be 'prioritized' or 'uniform', got {strategy!r} "
+                "(use CurriculumSampler for strategy='curriculum')"
+            )
         self.num_combination = int(num_combination)
         self.num_maps = int(num_maps)
         self.strategy = strategy

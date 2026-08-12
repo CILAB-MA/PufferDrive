@@ -1451,19 +1451,21 @@ def train_pbt(env_name, args=None, vecenv=None, policy=None, logger=None, config
     vecenv = vecenv or load_env(env_name, args)
     policy = policy or load_policy(args, vecenv, env_name)
 
-    # if the pbt train mode is reactive, load other policy
-    populations = sorted(
-        f for f in os.listdir(args["pbt"]["population_path"])
-        if f.endswith(".pt")
-    )
+    # if the pbt train mode is reactive, load other policies (manifest-aware)
     policies = None
     if args["pbt"]["pbt_mode"] == "reactive":
+        from pufferlib.ocean.drive_pbt.drive_pbt import resolve_reactive_policy_files
+
+        policy_files = resolve_reactive_policy_files(args["pbt"]["population_path"])
         policies = []
-        for op in populations:
+        for path, _name in policy_files:
             args2 = args.copy()
-            args2["load_model_path"] = os.path.join(args["pbt"]["population_path"], op)
-            policy2 = load_policy(args2, vecenv, env_name)
-            policies.append(policy2)
+            args2["load_model_path"] = path
+            policies.append(load_policy(args2, vecenv, env_name))
+        print(
+            f"Loaded {len(policies)} reactive partner policies "
+            f"from manifest/population under {args['pbt']['population_path']}"
+        )
 
     if "LOCAL_RANK" in os.environ:
         args["train"]["device"] = torch.cuda.current_device()
@@ -1848,13 +1850,6 @@ def sanity(env_name, args=None):
     return runs
 
 def _curriculum_mix_weights(types_sorted, rollout_i, num_collect_rollout):
-    """Linear blend from easiest to hardest type across rollouts.
-
-    t = i / (M-1): rollout 0 is 100% types_sorted[0], last rollout is 100%
-    types_sorted[-1]. In between, only the two neighboring types have mass.
-
-    Returns (weights_by_type, t, primary_type).
-    """
     types_sorted = [int(t) for t in types_sorted]
     n_types = len(types_sorted)
     m = int(num_collect_rollout)

@@ -1,28 +1,4 @@
 #!/usr/bin/env bash
-# Collect curriculum replay rollouts (save-population + order JSON).
-#
-# Always uses ORDER_PATH (type_to_population). Staged type schedule over
-# NUM_ROLLOUTS: early = easy only, later = mix including harder types.
-# Each type folder mixes the first NUM_CKPTS sorted *.pt.
-#
-# Writes:
-#   splits/actions_*.npy, types_*.npy, population_keys_*.npy
-#   population_manifest.json
-# Merge after collect:
-#   python analyze/data_concat.py --population-path "$OUT_PATH" --total-rollouts "$NUM_ROLLOUTS"
-#
-# Usage:
-#   ./analyze/collect_curriculum_rollout.sh 0
-#   ./analyze/collect_curriculum_rollout.sh 0 0 25
-#
-#   # 2-GPU parallel:
-#   PARALLEL=1 GPUS=0,1 ./analyze/collect_curriculum_rollout.sh
-#
-#   # Override defaults:
-#   ORDER_PATH=analyze/curriculum_collect_order.example.json \
-#   OUT_PATH=/data/puffer/popul_curriculum \
-#   NUM_CKPTS=3 NUM_ROLLOUTS=50 \
-#     ./analyze/collect_curriculum_rollout.sh 0
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

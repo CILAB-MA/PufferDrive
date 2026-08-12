@@ -79,7 +79,6 @@ class CurriculumSampler:
         self._pool_by_unlock = self._build_pools()
 
     def _build_pools(self):
-        """pools[k] = indices with type in unique_types[:k+1] (k=0..num_types-1)."""
         pools = []
         for k in range(self.num_types):
             allowed = set(self.unique_types[: k + 1].tolist())
@@ -117,15 +116,14 @@ class CurriculumSampler:
 
         self._sample_count += 1
         wandb_metrics = {
-            "curriculum_progress": float(progress),
-            "unlocked_type_max": float(unlocked_types[-1]),
-            "num_unlocked_types": float(n_unlocked),
-            "pool_size": float(pool.size),
-            "curriculum_sample_count": float(self._sample_count),
+            "curriculum/curriculum_progress": float(progress),
+            "curriculum/unlocked_type_max": float(unlocked_types[-1]),
+            "curriculum/num_unlocked_types": float(n_unlocked),
+            "curriculum/pool_size": float(pool.size),
+            "curriculum/curriculum_sample_count": float(self._sample_count),
         }
         return sampled_population, wandb_metrics
 
     def update_policy_score(self, score, controlled_entity_idx, population_idx,
                             minimum_distance, map_idx=None):
-        """No-op: difficulty is fixed by the provided type list."""
         return {}

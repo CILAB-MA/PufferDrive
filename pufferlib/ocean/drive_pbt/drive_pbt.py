@@ -25,6 +25,58 @@ def _as_layout_1d(arr):
     return np.asarray(a[0] if a.ndim == 2 else a)
 
 
+def resolve_reactive_policy_files(population_path):
+    """Ordered ``(abs_path, checkpoint_name)`` for reactive partner policies.
+
+    Prefers ``saved/population_manifest.json`` (or root manifest) so curriculum
+    collect outputs can resolve checkpoints from their source population dirs.
+    Falls back to ``sorted(population_path/*.pt)``.
+    """
+    population_path = os.path.abspath(population_path)
+    for man_path in (
+        os.path.join(population_path, "saved", "population_manifest.json"),
+        os.path.join(population_path, "population_manifest.json"),
+    ):
+        if not os.path.isfile(man_path):
+            continue
+        with open(man_path, encoding="utf-8") as f:
+            man = json.load(f)
+        keys = man.get("keys") or []
+        if not keys:
+            continue
+        out = []
+        seen = set()
+        for entry in sorted(keys, key=lambda e: int(e["key"])):
+            ckpt = str(entry["checkpoint"])
+            if ckpt in seen:
+                raise ValueError(
+                    f"{man_path}: duplicate checkpoint name {ckpt!r} across keys"
+                )
+            seen.add(ckpt)
+            src_pop = str(entry.get("population") or population_path)
+            path = os.path.join(src_pop, ckpt)
+            if not os.path.isfile(path):
+                alt = os.path.join(population_path, ckpt)
+                if os.path.isfile(alt):
+                    path = alt
+                else:
+                    raise FileNotFoundError(
+                        f"Reactive checkpoint not found for manifest key "
+                        f"{entry.get('key')}: tried {path} and {alt}"
+                    )
+            out.append((os.path.abspath(path), ckpt))
+        if out:
+            return out
+
+    names = sorted(f for f in os.listdir(population_path) if f.endswith(".pt"))
+    if not names:
+        raise FileNotFoundError(
+            f"No .pt checkpoints under {population_path} "
+            "(and no usable population_manifest.json)"
+        )
+    return [(os.path.join(population_path, n), n) for n in names]
+
+
 class Drive_PBT(pufferlib.PufferEnv):
     def __init__(
         self,
@@ -66,8 +118,7 @@ class Drive_PBT(pufferlib.PufferEnv):
         pbt_mode="reactive", # reactive or replay
         population_path=None, # for replay
         ego_ratio=0.0, # for replay
-        agent_sampling=False,
-        strategy="prioritized",
+        strategy="prioritized",  # prioritized, uniform, curriculum
         curriculum_types=None,
         curriculum_types_path=None,
         curriculum_steps=10000,
@@ -255,11 +306,9 @@ class Drive_PBT(pufferlib.PufferEnv):
         self.ego_ratio = ego_ratio
         self.population_path = population_path
         self.pbt_mode = pbt_mode
-        self.agent_sampling = agent_sampling
-        # Uniform sampling does not learn or consume assignment scores.
-        self._score_tracking_enabled = self.agent_sampling and strategy != "uniform"
-        if self.pbt_mode == "reactive" and not self.agent_sampling:
-            raise ValueError("reactive population_keys sampling requires agent_sampling=True")
+        self.strategy = strategy
+        # PLR learns assignment scores; uniform/curriculum only sample.
+        self._score_tracking_enabled = strategy == "prioritized"
         saved_dir = os.path.join(self.population_path, "saved")
         fp_gid = os.path.join(saved_dir, "global_ids.npy")
         self.global_ids = np.load(fp_gid, mmap_mode="r")
@@ -275,22 +324,17 @@ class Drive_PBT(pufferlib.PufferEnv):
                 num_combination, int(self.other_actions.shape[0]), source=fp_actions
             )
             self.num_combination = int(self.combination_index.size)
-            if not agent_sampling:
-                self._allocate_replay(self.num_agents, self.map_ids)
-            else:
-                self.replay_actions = np.zeros(
-                    (self.num_agents, self.resample_frequency, 1), dtype=np.int32
-                )
+            self.replay_actions = np.zeros(
+                (self.num_agents, self.resample_frequency, 1), dtype=np.int32
+            )
             self._init_partner_tracking(strategy, score_transform, curriculum_types,
                                        curriculum_types_path, curriculum_steps)
         elif pbt_mode == "reactive":
-            populations = sorted(
-                f for f in os.listdir(population_path)
-                if f.endswith(".pt")
-            )
+            policy_files = resolve_reactive_policy_files(population_path)
+            populations = [name for _, name in policy_files]
             self.num_other_policies = len(populations)
             if self.num_other_policies < 1:
-                raise FileNotFoundError(f"No .pt checkpoints under {population_path}")
+                raise FileNotFoundError(f"No reactive policies resolved under {population_path}")
             fp_pk = os.path.join(saved_dir, "population_keys.npy")
             self.population_keys = np.load(fp_pk, mmap_mode="r")
             if self.population_keys.ndim != 2:
@@ -375,13 +419,13 @@ class Drive_PBT(pufferlib.PufferEnv):
         self.actions_map_id = _as_layout_1d(np.load(fp_m, mmap_mode="r"))
 
     def _build_population_key_to_policy_idx(self, saved_dir, populations):
-        """Map manifest population_keys values → index into loaded sorted .pt list."""
+        """Map manifest population_keys values → index into loaded policy list."""
         name_to_idx = {name: i for i, name in enumerate(populations)}
         manifest_path = os.path.join(saved_dir, "population_manifest.json")
         if not os.path.isfile(manifest_path):
             manifest_path = os.path.join(self.population_path, "population_manifest.json")
         if not os.path.isfile(manifest_path):
-            # Assume keys already match sorted checkpoint order.
+            # Assume keys already match loaded checkpoint order.
             return np.arange(len(populations), dtype=np.int64)
         with open(manifest_path, encoding="utf-8") as f:
             man = json.load(f)
@@ -395,7 +439,7 @@ class Drive_PBT(pufferlib.PufferEnv):
             if ckpt not in name_to_idx:
                 raise ValueError(
                     f"Manifest checkpoint {ckpt!r} not found among loaded policies "
-                    f"under {self.population_path}: {populations}"
+                    f"{populations}"
                 )
             lut[int(entry["key"])] = int(name_to_idx[ckpt])
         return lut
@@ -403,9 +447,7 @@ class Drive_PBT(pufferlib.PufferEnv):
     def _init_partner_tracking(
         self, strategy, score_transform, curriculum_types, curriculum_types_path, curriculum_steps
     ):
-        """
-        Initialize partner tracking variables and set up agent sampler if enabled.
-        """
+        """Initialize partner tracking and the combination sampler (strategy-selected)."""
         n_other = int(self.other_indices_arr.size)
         self._episode_return = np.zeros(self.num_agents, dtype=np.float32)
         self.minimum_distance = np.full(n_other, np.inf, dtype=np.float32)
@@ -416,18 +458,17 @@ class Drive_PBT(pufferlib.PufferEnv):
         self.rollout_flatten = np.full(n_other, -1, dtype=np.int64)
         self.combination_ids = np.full(self.num_envs, -1, dtype=np.int64)
         self._init_minimum_map_idx(self.map_ids)
-        if self.agent_sampling:
-            self.agent_sampler = self._make_agent_sampler(
-                num_combination=self.num_combination,
-                strategy=strategy,
-                score_transform=score_transform,
-                num_maps=self.num_maps,
-                curriculum_types=curriculum_types,
-                curriculum_types_path=curriculum_types_path,
-                curriculum_steps=curriculum_steps,
-            )
-            self._last_sampling_metrics = {}
-            self._last_raw_return_metrics = {}
+        self.agent_sampler = self._make_agent_sampler(
+            num_combination=self.num_combination,
+            strategy=strategy,
+            score_transform=score_transform,
+            num_maps=self.num_maps,
+            curriculum_types=curriculum_types,
+            curriculum_types_path=curriculum_types_path,
+            curriculum_steps=curriculum_steps,
+        )
+        self._last_sampling_metrics = {}
+        self._last_raw_return_metrics = {}
 
     def _make_agent_sampler(
         self,
@@ -439,6 +480,7 @@ class Drive_PBT(pufferlib.PufferEnv):
         curriculum_types_path=None,
         curriculum_steps=10000,
     ):
+        """Build sampler from ``strategy``: curriculum | prioritized | uniform."""
         if strategy == "curriculum":
             types = load_difficulty_types(
                 curriculum_types,
@@ -453,15 +495,26 @@ class Drive_PBT(pufferlib.PufferEnv):
                 pbt_mode=self.pbt_mode,
                 num_maps=num_maps,
             )
-        return AgentSampler(
-            num_combination=num_combination,
-            strategy=strategy,
-            pbt_mode=self.pbt_mode,
-            score_transform=score_transform,
-            num_maps=num_maps,
+        if strategy in ("prioritized", "uniform"):
+            return AgentSampler(
+                num_combination=num_combination,
+                strategy=strategy,
+                pbt_mode=self.pbt_mode,
+                score_transform=score_transform,
+                num_maps=num_maps,
+            )
+        raise ValueError(
+            f"Unknown pbt.strategy={strategy!r}; "
+            "expected one of: prioritized, uniform, curriculum"
         )
 
-    _SAMPLING_METRIC_GROUPS = ("sampling", "sampling_summary", "sampling_weight_mean", "sampling_weight_max")
+    _SAMPLING_METRIC_GROUPS = (
+        "sampling",
+        "sampling_summary",
+        "sampling_weight_mean",
+        "sampling_weight_max",
+        "curriculum",
+    )
 
     def _sampling_info_groups(self):
         groups = {}
@@ -645,7 +698,7 @@ class Drive_PBT(pufferlib.PufferEnv):
         minimum_distance: (num_others, )
         minimum_ego_idx: (num_other, )
         """
-        if not self.agent_sampling:
+        if not self._score_tracking_enabled:
             return
         partner_states = self.get_global_partner_state()
         other_ids = partner_states["other_id"].astype(np.int64)
@@ -717,38 +770,19 @@ class Drive_PBT(pufferlib.PufferEnv):
     def reset(self, seed=0):
         binding.vec_reset(self.c_envs, seed)
         self.tick = 0
-        partner_resampled = False
-        if self.agent_sampling:
-            self._episode_return.fill(0.0)
-            self._reset_other_indices()
-            partner_resampled = True
-            if self._score_tracking_enabled:
-                self._update_minimum_distance()
+        self._episode_return.fill(0.0)
+        self._reset_other_indices()
+        partner_resampled = True
+        if self._score_tracking_enabled:
+            self._update_minimum_distance()
         info = [{"agent_offsets": self.agent_offsets, "map_ids": self.map_ids, "num_envs": self.num_envs, "ego_indices": self.ego_indices}]
         if self.pbt_mode == "reactive":
             info[0]["other_indices"] = self.policy_per_slot
             info[0]["combination_ids"] = self.combination_ids.copy()
         info[0]["partner_resampled"] = partner_resampled
-        if self.agent_sampling and self._last_sampling_metrics:
+        if self._last_sampling_metrics:
             info[0].update(self._sampling_info_groups())
         return self.observations, info
-
-    def _allocate_replay(self, num_agents, map_ids):
-        self.replay_actions = np.zeros((num_agents, self.resample_frequency, 1), dtype=np.int32)
-        agent_ind = 0
-        num_combination = int(self.num_combination)
-        for _, map_id in enumerate(map_ids):
-            sample_ind = np.random.randint(0, num_combination)
-            map_indices = int(np.where(self.actions_map_id == map_id)[0][0])
-            lo = int(self.actions_agent_offsets[map_indices])
-            hi = int(self.actions_agent_offsets[map_indices + 1])
-            n = hi - lo
-            if agent_ind + n > num_agents:
-                n = num_agents - agent_ind
-            self.replay_actions[agent_ind : agent_ind + n] = self.other_actions[
-                self._corpus_row(sample_ind), lo : lo + n
-            ].copy()
-            agent_ind += n
 
     def step(self, actions):
         self.terminals[:] = 0
@@ -803,8 +837,6 @@ class Drive_PBT(pufferlib.PufferEnv):
             self.other_mask[self.ego_indices] = False
             self.other_indices_arr = np.flatnonzero(self.other_mask).astype(np.int64)
             self._ego_index_set = set(self.ego_indices.tolist())
-            if self.pbt_mode == "replay" and not self.agent_sampling:
-                self._allocate_replay(self.num_agents, self.map_ids)
 
             env_ids = []
             seed = np.random.randint(0, 2**32 - 1)
@@ -855,10 +887,9 @@ class Drive_PBT(pufferlib.PufferEnv):
 
             binding.vec_reset(self.c_envs, seed)
             self.terminals[:] = 1
-            if self.agent_sampling:
-                self._reset_other_indices()
-                if self._score_tracking_enabled:
-                    self._update_minimum_distance()
+            self._reset_other_indices()
+            if self._score_tracking_enabled:
+                self._update_minimum_distance()
         if len(info) == 0:
             info = [{"agent_offsets": self.agent_offsets, "map_ids": self.map_ids, "num_envs": self.num_envs, "ego_indices": self.ego_indices}]
         else:
@@ -870,7 +901,7 @@ class Drive_PBT(pufferlib.PufferEnv):
             info[0]["other_indices"] = self.policy_per_slot
             info[0]["combination_ids"] = self.combination_ids.copy()
         info[0]["partner_resampled"] = partner_resampled
-        if self.agent_sampling and self._last_sampling_metrics:
+        if self._last_sampling_metrics:
             info[0].update(self._sampling_info_groups())
 
         return (self.observations, self.rewards, self.terminals, self.truncations, info)
