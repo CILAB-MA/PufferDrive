@@ -21,7 +21,7 @@ CATEGORIES: list[tuple[str, list[str]]] = [
     (
         "Time-Scale (16)",
         ["ET", "PET", "PTTC", "PrET / SPrET / TA", "TET", "THW", "TIT", "TTB", "TTC",
-         "TTCE", "TTS / TTK / TTR / generic TTM", "WTTC"],
+         "TTCE", "TTK", "TTR", "TTS (and TTM's m='steer' case)", "TTZ", "WTTC"],
     ),
     ("Distance-Scale (4)", ["AGS", "DCE", "HW", "PSD"]),
     ("Velocity-Scale (2)", ["CS (Conflict Severity)", "Delta-v"]),
@@ -33,8 +33,8 @@ CATEGORIES: list[tuple[str, list[str]]] = [
     ("Jerk-Scale (2)", ["LongJ"]),  # LatJ bundled under a_lat,req above
     (
         "Index-Scale (10)",
-        ["ACI", "AM", "BTN", "CI (Conflict Index)", "CPI_deterministic", "PRI",
-         "RSS_long_violation", "RSS-DS (full)", "SOI", "TCI"],
+        ["ACI", "AM", "BTN", "CI (Conflict Index)", "CPI", "PRI",
+         "RSS_long_violation", "SOI", "TCI"],
     ),
     ("Probability-Scale (3)", ["P-MC", "P-SMH", "P-SRS"]),
     ("Potential-Scale (2)", ["PF (Potential Functions)", "SP (Safety Potential / SFF)"]),
