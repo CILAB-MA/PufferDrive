@@ -20,21 +20,20 @@ OUT_PATH = Path(__file__).parent / "CRITICALITY_METRICS.md"
 CATEGORIES: list[tuple[str, list[str]]] = [
     (
         "Time-Scale (16)",
-        ["ET", "PET", "PTTC", "PrET / SPrET / TA", "TET", "THW", "TIT", "TTB", "TTC",
-         "TTCE", "TTK", "TTR", "TTS (and TTM's m='steer' case)", "TTZ", "WTTC"],
+        ["ET/PET", "PTTC", "TA/PrET/SPrET", "TET", "THW", "TIT", "TTB", "TTC",
+         "TTCE", "TTK", "TTR", "TTS", "TTZ", "WTTC"],
     ),
     ("Distance-Scale (4)", ["AGS", "DCE", "HW", "PSD"]),
     ("Velocity-Scale (2)", ["CS (Conflict Severity)", "Delta-v"]),
     (
         "Acceleration-Scale (4)",
-        ["DST (ts=0)", "DST (ts>0)", "a_lat,req / STN / LatJ", "a_long,req (DRAC)",
-         "a_req (combined norm)"],
+        ["DST (ts=0)", "DST (ts>0)", "a_lat,req", "a_long,req (DRAC)", "a_req (combined norm)"],
     ),
-    ("Jerk-Scale (2)", ["LongJ"]),  # LatJ bundled under a_lat,req above
+    ("Jerk-Scale (2)", ["LongJ", "LatJ"]),
     (
         "Index-Scale (10)",
         ["ACI", "AM", "BTN", "CI (Conflict Index)", "CPI", "PRI",
-         "RSS_long_violation", "SOI", "TCI"],
+         "RSS_long_violation", "RSS_full", "SOI", "TCI"],
     ),
     ("Probability-Scale (3)", ["P-MC", "P-SMH", "P-SRS"]),
     ("Potential-Scale (2)", ["PF (Potential Functions)", "SP (Safety Potential / SFF)"]),

@@ -95,6 +95,49 @@ def has_readout(pack: dict[str, np.ndarray]) -> bool:
     return "exp_accel_traj" in pack
 
 
+def has_width(pack: dict[str, np.ndarray]) -> bool:
+    """True when both agents' vehicle widths are captured (ego_width scalar,
+    other_width_traj per-step) -- needed for a_lat,req/STN/a_req (those need width only,
+    not length). Verified against a real compiled rollout: other_width_traj ~2.0m,
+    realistic."""
+    return "ego_width" in pack and "other_width_traj" in pack
+
+
+def has_dimensions(pack: dict[str, np.ndarray]) -> bool:
+    """True when BOTH length and width are captured for both agents -- needed for
+    encroachment_times_traj (ET/PET) and time_to_steer_traj (TTS), which build full
+    oriented rectangles/discs from vehicle geometry, not just a width-only lateral term
+    the way a_lat,req does. Found via code review (not a crash observed in practice,
+    since rollout.py's capture_pose always sets ego_length alongside ego_width in the
+    same block, and other_length_traj alongside other_width_traj) that the ET/PET call
+    site was gated only on "other_length_traj" in pack, silently assuming width would
+    also be present rather than checking -- this helper makes that assumption explicit
+    and centralizes it so any future change to what rollout.py captures together can't
+    silently reintroduce a KeyError."""
+    return "ego_length" in pack and has_width(pack) and "other_length_traj" in pack
+
+
+def has_pose(pack: dict[str, np.ndarray]) -> bool:
+    """True for packs from rollout_per_ego(..., capture_pose=True): ego and nearest-
+    partner (x, y, heading, speed) trajectories, ego vehicle dimensions, and the
+    nearest-partner's raw identity per step (other_id_traj). Verified end-to-end against
+    a real compiled rollout (not just synthetic data) -- see git history for
+    rollout.py/common.py's capture_pose additions."""
+    return all(
+        k in pack
+        for k in (
+            "ego_x_traj",
+            "ego_y_traj",
+            "ego_heading_traj",
+            "other_x_traj",
+            "other_y_traj",
+            "other_heading_traj",
+            "other_speed_traj",
+            "other_id_traj",
+        )
+    )
+
+
 # ============================================================================
 # 1. TIME-SCALE METRICS
 # ============================================================================
@@ -225,39 +268,147 @@ def time_to_kickdown_traj(pack: dict[str, np.ndarray], *, a_max: float = A_MAX) 
     """TTK -- Time To Kickdown, the maneuver='kickdown' (full acceleration) special case
     of TTM [Hillenbrand 2007 dissertation, Sec. 5.2.5 -- presented as TTB's mirror image:
     "since this is a one-dimensional problem", ego switches to +a_max instead of -a_max].
-    APPROXIMATE (see APPROXIMATE_METRICS['TTK']).
+    EXACT when pose is available, APPROXIMATE/conditional otherwise (see
+    APPROXIMATE_METRICS['TTK']).
 
     Algebraically identical in form to TTB (TTK = TTC - closing/a_max, using the
-    accelerate-away bound in place of the brake bound -- the same magnitude A_MAX here,
-    since this env's action space is symmetric). The reason this is APPROXIMATE rather
-    than EXACT despite the dissertation confirming the 1D math: kickdown only helps when
-    accelerating REDUCES the closing rate (e.g. the ego is racing to clear a crossing
-    point, or outrunning something approaching from behind) -- it is actively
-    counterproductive if the interacting agent is a lead vehicle ahead (accelerating would
-    INCREASE the closing rate there). The pack's closing_traj sign convention does not
-    distinguish these two geometric configurations, so TTK values should be treated as a
-    conditional "if kickdown is even the right maneuver here" quantity, not a
-    universally-valid time margin the way TTB is.
+    accelerate-away bound in place of the brake bound). Kickdown only helps when
+    accelerating REDUCES the closing rate (escaping a rear threat or racing to clear a
+    crossing point) -- it is actively counterproductive if the interacting agent is a
+    lead vehicle ahead (accelerating would INCREASE the closing rate there). Earlier
+    versions of this pipeline had no way to tell these two geometric configurations
+    apart (closing_traj's sign alone is direction-agnostic). Now that capture_pose
+    provides real position/heading, this determines the true ahead/behind relationship
+    by projecting the other agent's relative position onto the ego's own heading (the
+    same technique already used by rss_full_violation_traj/required_lat_accel_traj) and
+    masks TTK to NaN whenever the other agent is genuinely ahead (kickdown would not
+    help there, so the value is undefined rather than misleadingly reported). Falls back
+    to the old unconditional (direction-unverified) computation when pose isn't
+    available in the pack.
     """
     ttc = pack["ttc_traj"]
     cl = pack["closing_traj"]
     kick_time = np.where(cl > 0, cl / a_max, np.nan)
-    return ttc - kick_time
+    ttk = ttc - kick_time
+    if "ego_x_traj" in pack and "other_x_traj" in pack:
+        ex, ey, eh = pack["ego_x_traj"], pack["ego_y_traj"], pack["ego_heading_traj"]
+        ox, oy = pack["other_x_traj"], pack["other_y_traj"]
+        d_long = (ox - ex) * np.cos(eh) + (oy - ey) * np.sin(eh)
+        ttk = np.where(d_long < 0, ttk, np.nan)  # other genuinely behind ego
+    return ttk
 
 
 def time_to_react_approx_traj(pack: dict[str, np.ndarray], *, a_max: float = A_MAX) -> np.ndarray:
     """TTR -- Time To React [Hillenbrand 2007 dissertation eq. 5.16: TTR ~= max(TTB, TTS,
     TTK); Tamke, Dang, Breuel 2011 generalized the same max-over-maneuvers structure].
-    APPROXIMATE, conservative (see APPROXIMATE_METRICS['TTR']).
+    APPROXIMATE, conservative, CHEAP VARIANT (see APPROXIMATE_METRICS['TTR']).
 
-    TTS (the steer-maneuver term) is not computable here (needs vehicle widths + minimum
-    turning radius -- see NOT_APPLICABLE). TTR_approx = max(TTB, TTK) omits it. Since
-    dropping a term from a max can only reduce the result, TTR_approx <= TTR_true always
-    -- a systematic *underestimate* of how much time remains, i.e. it biases toward
-    treating situations as more urgent than they truly are, which is the safe direction
-    for a criticality metric to be wrong in.
+    This is the trajectory-only variant: TTR_approx = max(TTB, TTK), which omits TTS (the
+    steer-maneuver term). TTS *is* now computable (see time_to_steer_traj below) when
+    pose+width are captured, but it is far more expensive per-step than every other
+    metric in this module (a discretized forward-simulation search, not a closed-form
+    solve) -- compute_all_metrics() computes the fuller max(TTB, TTK, TTS) separately
+    (as 'TTR_full_min_s_approx') when pose+width are available, rather than making every
+    caller of this cheap function pay TTS's cost implicitly. Since dropping a term from a
+    max can only reduce the result, this function's TTR_approx <= the true TTR always --
+    a systematic *underestimate* of how much time remains, i.e. it biases toward treating
+    situations as more urgent than they truly are, which is the safe direction for a
+    criticality metric to be wrong in.
     """
-    return np.maximum(time_to_brake_traj(pack, a_max=a_max), time_to_kickdown_traj(pack, a_max=a_max))
+    # np.fmax (not np.maximum) is required here: TTK is frequently NaN (the direction-
+    # gating fix means "kickdown isn't a valid maneuver here", not "unknown data"), and
+    # np.maximum propagates NaN through the whole max -- silently making TTR NaN even
+    # when TTB is a perfectly good, available answer. np.fmax correctly ignores a NaN
+    # operand and falls back to the other maneuver's value instead (found via testing
+    # this file's own real captured data, which routinely has TTK=NaN).
+    return np.fmax(time_to_brake_traj(pack, a_max=a_max), time_to_kickdown_traj(pack, a_max=a_max))
+
+
+def time_to_steer_traj(
+    pack: dict[str, np.ndarray],
+    *,
+    a_lat_mag: float = 7.0,
+    n_tau: int = 9,
+    horizon_s: float = 3.0,
+    dt_grid: float = 0.2,
+) -> np.ndarray:
+    """TTS -- Time To Steer, the maneuver='steer' special case of TTM [Hillenbrand 2007
+    dissertation Sec. 5.2.4]. APPROXIMATE, requires pose+width (see
+    APPROXIMATE_METRICS['TTS']).
+
+    Hillenbrand's own TTS is a circular-arc turning-radius model solved by nested
+    interval bisection -- genuinely hard to reproduce faithfully. Instead, this follows
+    the architecturally SIMPLER approach used by the actively-maintained CommonRoad-CriMe
+    reference toolbox (commonroad_crime/measure/time/tts.py, confirmed by reading its
+    actual solver code): bisect over the maneuver-start offset tau in [0, TTC], and at
+    each candidate tau, forward-simulate a point-mass steering maneuver (constant lateral
+    acceleration a_lat_mag, starting from zero lateral velocity at tau; longitudinal speed
+    held at its current value) against the other agent's constant-velocity-extrapolated
+    path, checking disc-vs-disc collision (radius = each agent's own circumscribing-circle
+    radius from length/width, the same disc approximation used by WTTC and
+    CommonRoad-CriMe's own multi-disc chains, simplified here to one disc per vehicle
+    instead of three). TTS = max(TTM(steer left), TTM(steer right)), each computed by
+    scanning n_tau candidate tau values on [0,TTC] and taking the largest one that avoids
+    collision over the whole horizon_s window (a discretized, not exact-bisection, search
+    -- coarser than CommonRoad-CriMe's binary_search() but avoids implementing their full
+    jerk-limited SimulationLat point-mass integrator). If no candidate tau (including
+    tau=0, i.e. steer immediately) avoids collision, returns -inf (matches the survey's
+    own {-inf} U [0,inf) output scale for TTM/TTS: no steer maneuver, however early,
+    avoids the collision under this model).
+
+    Deliberately NOT vectorized over (ego, t, tau, s) simultaneously -- this is
+    substantially more expensive per-call than every other metric in this module (each
+    (ego,t) pair does 2 * n_tau forward simulations of horizon_s/dt_grid steps); the
+    n_tau/horizon_s/dt_grid defaults trade resolution for runtime. If you want a fuller
+    TTR than time_to_react_approx_traj's max(TTB,TTK), combine this with those:
+    max(TTB, TTK, TTS).
+    """
+    ex, ey, eh, ev = pack["ego_x_traj"], pack["ego_y_traj"], pack["ego_heading_traj"], pack["speed_traj"]
+    ox, oy, oh, ov = (
+        pack["other_x_traj"],
+        pack["other_y_traj"],
+        pack["other_heading_traj"],
+        pack["other_speed_traj"],
+    )
+    ttc = pack["ttc_traj"]
+    r_ego_arr = np.hypot(pack["ego_length"] / 2.0, pack["ego_width"] / 2.0)
+    r_other_arr = np.hypot(pack["other_length_traj"] / 2.0, pack["other_width_traj"] / 2.0)
+
+    n, T = ex.shape
+    out = np.full((n, T), np.nan, dtype=np.float64)
+    s_grid = np.arange(0.0, horizon_s + dt_grid, dt_grid)
+
+    for i in range(n):
+        r_sum_base = r_ego_arr[i]
+        for t in range(T):
+            tt = ttc[i, t]
+            if not (np.isfinite(tt) and tt > 0):
+                continue
+            r_sum = r_sum_base + r_other_arr[i, t]
+            if not np.isfinite(r_sum):
+                continue
+            heading, speed = eh[i, t], ev[i, t]
+            hux, huy = np.cos(heading), np.sin(heading)
+            pux, puy = -np.sin(heading), np.cos(heading)
+            ovx = ov[i, t] * np.cos(oh[i, t])
+            ovy = ov[i, t] * np.sin(oh[i, t])
+            ex0, ey0, ox0, oy0 = ex[i, t], ey[i, t], ox[i, t], oy[i, t]
+            long_d = speed * s_grid
+            oth_x = ox0 + s_grid * ovx
+            oth_y = oy0 + s_grid * ovy
+
+            taus = np.linspace(0.0, float(tt), n_tau)
+            best = -np.inf
+            for sign in (1.0, -1.0):
+                for tau in taus:
+                    lat_d = np.where(s_grid >= tau, 0.5 * sign * a_lat_mag * (s_grid - tau) ** 2, 0.0)
+                    eg_x = ex0 + long_d * hux + lat_d * pux
+                    eg_y = ey0 + long_d * huy + lat_d * puy
+                    d = np.hypot(eg_x - oth_x, eg_y - oth_y)
+                    if d.min() > r_sum:
+                        best = max(best, float(tau))
+            out[i, t] = best
+    return out
 
 
 def potential_ttc_traj(pack: dict[str, np.ndarray], *, assumed_decel: float = A_MAX) -> np.ndarray:
@@ -285,6 +436,286 @@ def potential_ttc_traj(pack: dict[str, np.ndarray], *, assumed_decel: float = A_
         t = (cl - np.sqrt(np.maximum(disc, 0.0))) / a
     valid = np.isfinite(d) & np.isfinite(cl) & (cl > 0) & (disc >= 0)
     return np.where(valid, t, np.inf)
+
+
+def _time_advantage_traj(pack: dict[str, np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
+    """Shared solve for TA / PrET (constant-velocity case) and SPrET.
+
+    Requires pose (see has_pose). Solves p1(t) + t1*v1(t) = p2(t) + t2*v2(t) for the two
+    straight-line paths' crossing times t1, t2 (both agents' velocity vectors
+    reconstructed from heading + speed, per Neurohr et al. 2021's own constant-velocity
+    model). A per-instant computation -- like TTC/PTTC, this only uses state AT time t,
+    so it does NOT need other_id continuity across steps (unlike a hypothetical ET/PET
+    implementation, which would).
+    """
+    ex, ey, eh, ev = pack["ego_x_traj"], pack["ego_y_traj"], pack["ego_heading_traj"], pack["speed_traj"]
+    ox, oy, oh, ov = (
+        pack["other_x_traj"],
+        pack["other_y_traj"],
+        pack["other_heading_traj"],
+        pack["other_speed_traj"],
+    )
+    oid = pack["other_id_traj"]
+
+    v1x, v1y = ev * np.cos(eh), ev * np.sin(eh)
+    v2x, v2y = ov * np.cos(oh), ov * np.sin(oh)
+    dx, dy = ox - ex, oy - ey
+    det = v2x * v1y - v1x * v2y
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t1 = (-dx * v2y + v2x * dy) / det
+        t2 = (v1x * dy - v1y * dx) / det
+    valid = (
+        (oid >= 0)
+        & (np.abs(det) > 1e-6)
+        & np.isfinite(t1)
+        & np.isfinite(t2)
+        & (t1 >= 0)
+        & (t2 >= 0)
+    )
+    return np.where(valid, t1, np.nan), np.where(valid, t2, np.nan)
+
+
+def _crossing_point_traj(
+    pack: dict[str, np.ndarray],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Like _time_advantage_traj, but also returns the PREDICTED crossing point
+    (px, py) = ego_pos(t) + t1*v1(t) -- reuses the same validated constant-velocity
+    solve (see _time_advantage_traj's own hand-verified test cases) rather than trying
+    to find where the two agents' actual (noisy, 10Hz) observed paths literally cross,
+    which is a much more fragile computation. Used by encroachment_times_traj() below."""
+    ex, ey, eh, ev = pack["ego_x_traj"], pack["ego_y_traj"], pack["ego_heading_traj"], pack["speed_traj"]
+    t1, t2 = _time_advantage_traj(pack)
+    v1x, v1y = ev * np.cos(eh), ev * np.sin(eh)
+    px = np.where(np.isfinite(t1), ex + t1 * v1x, np.nan)
+    py = np.where(np.isfinite(t1), ey + t1 * v1y, np.nan)
+    return t1, t2, px, py
+
+
+def _point_in_oriented_rect(
+    px: np.ndarray, py: np.ndarray, cx: float, cy: float, heading: np.ndarray, half_l: np.ndarray, half_w: np.ndarray
+) -> np.ndarray:
+    """Whether point (px,py) [world frame] falls inside a rectangle centered at (cx,cy),
+    oriented along `heading`, with half-length half_l and half-width half_w."""
+    dx, dy = px - cx, py - cy
+    hux, huy = np.cos(heading), np.sin(heading)
+    pux, puy = -np.sin(heading), np.cos(heading)
+    along = dx * hux + dy * huy
+    across = dx * pux + dy * puy
+    return (np.abs(along) <= half_l) & (np.abs(across) <= half_w)
+
+
+def encroachment_times_traj(pack: dict[str, np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
+    """ET -- Encroachment Time [Allen, Shin, Cooper 1978] and PET -- Post Encroachment
+    Time [same source]. APPROXIMATE, scenario-level (one value per ego, not per-step --
+    see APPROXIMATE_METRICS['ET/PET']).
+
+    ET(A1,CA) = t_exit(A1,CA) - t_entry(A1,CA); PET(A1,A2,CA) = t_entry(A2,CA) -
+    t_exit(A1,CA), defined only when A1 leaves CA before or at the time A2 enters it.
+    The conflict area CA is operationally defined as each agent's own real, ORIENTED
+    rectangular footprint (length x width, at its own per-step heading -- using width
+    was a later upgrade; an earlier version used a circular disc of radius=length/2,
+    under-using data this pipeline already captures) sweeping through the predicted
+    path-crossing point (see _crossing_point_traj), matching Laureshyn et al.'s own
+    practical rectangular-footprint refinement of Allen et al.'s definition more closely
+    than a disc does. Computed once per maximal other_id-stable window (the window's
+    crossing-point prediction closest to, but not after, the event is used as the
+    anchor), then each agent's own entry/exit is the first/last timestep within that
+    window where the crossing point falls inside its own oriented rectangle. If an ego
+    has multiple such windows (interacting with different agents at different times),
+    the MOST critical (smallest) ET/PET across windows is reported, matching this
+    module's worst-case-aggregate convention elsewhere (TTC_min, TTB_min, ...).
+    """
+    ex, ey, eh = pack["ego_x_traj"], pack["ego_y_traj"], pack["ego_heading_traj"]
+    ox, oy, oh = pack["other_x_traj"], pack["other_y_traj"], pack["other_heading_traj"]
+    elen, ewid = pack["ego_length"], pack["ego_width"]
+    olen, owid = pack["other_length_traj"], pack["other_width_traj"]
+    oid = pack["other_id_traj"]
+    _t1, _t2, px, py = _crossing_point_traj(pack)
+
+    n, T = ex.shape
+    et_out = np.full(n, np.nan, dtype=np.float64)
+    pet_out = np.full(n, np.nan, dtype=np.float64)
+
+    for i in range(n):
+        ids = oid[i]
+        t = 0
+        while t < T:
+            if ids[t] < 0:
+                t += 1
+                continue
+            t_start = t
+            while t + 1 < T and ids[t + 1] == ids[t]:
+                t += 1
+            t_end = t  # inclusive; [t_start, t_end] is one maximal stable-id window
+
+            # The crossing prediction is only valid (t1>=0) for timesteps BEFORE the
+            # predicted event -- it goes NaN once the crossing has passed (t1 would be
+            # negative). Anchor on the timestep with the smallest nonnegative t1 within
+            # the window: the prediction made closest to, but not after, the event.
+            window_t1 = _t1[i, t_start : t_end + 1]
+            valid_window = np.isfinite(window_t1)
+            if not valid_window.any():
+                t += 1
+                continue
+            anchor = t_start + int(np.flatnonzero(valid_window)[np.argmin(window_t1[valid_window])])
+
+            if np.isfinite(px[i, anchor]):
+                xstar, ystar = float(px[i, anchor]), float(py[i, anchor])
+                sl = slice(t_start, t_end + 1)
+
+                # _point_in_oriented_rect(px,py, cx,cy, heading, half_l, half_w): test
+                # whether the fixed crossing point (xstar,ystar) falls inside a rectangle
+                # centered at each agent's own moving position -- xstar,ystar go in the
+                # function's "point" slot, the agent's per-step position/heading go in
+                # its "rectangle" slot.
+                ego_valid = np.isfinite(ex[i, sl])
+                near_ego = ego_valid & _point_in_oriented_rect(
+                    xstar, ystar, ex[i, sl], ey[i, sl], eh[i, sl], elen[i] / 2.0, ewid[i] / 2.0
+                )
+                other_valid = np.isfinite(ox[i, sl])
+                near_other = other_valid & _point_in_oriented_rect(
+                    xstar, ystar, ox[i, sl], oy[i, sl], oh[i, sl], olen[i, sl] / 2.0, owid[i, sl] / 2.0
+                )
+
+                if near_ego.any():
+                    idx_ego = np.flatnonzero(near_ego)
+                    t_entry_ego, t_exit_ego = idx_ego[0], idx_ego[-1]
+                    et_val = float(t_exit_ego - t_entry_ego) * DT
+                    et_out[i] = et_val if np.isnan(et_out[i]) else min(et_out[i], et_val)
+
+                    if near_other.any():
+                        idx_other = np.flatnonzero(near_other)
+                        t_entry_other = idx_other[0]
+                        if t_entry_other >= t_exit_ego:
+                            pet_val = float(t_entry_other - t_exit_ego) * DT
+                            pet_out[i] = pet_val if np.isnan(pet_out[i]) else min(pet_out[i], pet_val)
+            t += 1
+
+    return et_out, pet_out
+
+
+def time_advantage_traj(pack: dict[str, np.ndarray]) -> np.ndarray:
+    """TA -- Time Advantage [Hansson 1975; formalized by Laureshyn, Svensson, Hyden
+    2010]; also the constant-velocity special case of PrET -- Predictive Encroachment
+    Time [Neurohr, Bussler, Koopmann, Kamran, Reich 2021, "Criticality Analysis for the
+    Verification and Validation of Automated Vehicles", IEEE Access, Sec. V.A.6.d]. EXACT
+    given captured pose (see EXACT_METRICS['TA/PrET']).
+
+    TA(A1,A2,t) = |t1~-t2~| where t1~,t2~ solve p1(t+t1~) = p2(t+t2~) under each agent's
+    own constant-velocity extrapolation (heading+speed reconstructed into a velocity
+    vector) -- i.e. the predicted PET assuming both agents hold their current path.
+    Undefined (NaN) when the two paths are parallel (never cross) or the crossing lies in
+    either agent's past.
+    """
+    t1, t2 = _time_advantage_traj(pack)
+    return np.abs(t1 - t2)
+
+
+def scaled_predictive_encroachment_time_traj(pack: dict[str, np.ndarray]) -> np.ndarray:
+    """SPrET -- Scaled Predictive Encroachment Time [Neurohr et al. 2021, eq. (1)].
+    EXACT given captured pose (see EXACT_METRICS['TA/PrET']).
+
+    SPrET = |t1~^2 - t2~^2| = (t1~+t2~)*|t1~-t2~| -- down-weights situations far before
+    the predicted intersection relative to plain TA/PrET, "incorporates prediction
+    uncertainty" per the original paper.
+    """
+    t1, t2 = _time_advantage_traj(pack)
+    return np.abs(t1**2 - t2**2)
+
+
+def has_crosswalks(pack: dict[str, np.ndarray]) -> bool:
+    """True when capture_map_geometry crosswalk fields are present AND non-empty for at
+    least one scenario (a map with zero crosswalks in view still has the keys, just with
+    size-0 arrays -- confirmed on a real map, which had 5 crosswalk polylines / 20 pts)."""
+    return "crosswalk_polyline_lengths" in pack and pack["crosswalk_polyline_lengths"].size > 0
+
+
+def _unpack_polylines(
+    x: np.ndarray, y: np.ndarray, lengths: np.ndarray, scenario_ids: np.ndarray
+) -> list[tuple[int, np.ndarray]]:
+    """Reconstruct (scenario_id, points[k,2]) polylines from capture_map_geometry's flat
+    encoding (x/y concatenated across all polylines, lengths[k] = point count of
+    polyline k)."""
+    out: list[tuple[int, np.ndarray]] = []
+    offset = 0
+    for length, sid in zip(lengths.tolist(), scenario_ids.tolist()):
+        pts = np.stack([x[offset : offset + length], y[offset : offset + length]], axis=-1)
+        out.append((int(sid), pts))
+        offset += length
+    return out
+
+
+def _ray_polyline_ttc(px: float, py: float, vx: float, vy: float, segments: np.ndarray) -> float:
+    """Smallest t>=0 at which the ray p+t*v (v already scaled so t comes out in seconds)
+    crosses any of the given line segments (shape (S,2,2): S segments, 2 endpoints, xy).
+    Returns inf if v is ~0 or no segment is crossed ahead."""
+    if (vx * vx + vy * vy) < 1e-6:
+        return float("inf")
+    ax, ay = segments[:, 0, 0], segments[:, 0, 1]
+    bx, by = segments[:, 1, 0], segments[:, 1, 1]
+    ex, ey = bx - ax, by - ay
+    denom = ex * vy - ey * vx
+    with np.errstate(divide="ignore", invalid="ignore"):
+        t = (ex * (ay - py) - ey * (ax - px)) / denom
+        s = (vx * (ay - py) - vy * (ax - px)) / denom
+    valid = np.isfinite(t) & np.isfinite(s) & (t >= 0) & (s >= 0) & (s <= 1) & (np.abs(denom) > 1e-9)
+    if not valid.any():
+        return float("inf")
+    return float(t[valid].min())
+
+
+def time_to_zebra_traj(pack: dict[str, np.ndarray]) -> np.ndarray:
+    """TTZ -- Time To Zebra [Varhelyi 1998]. APPROXIMATE, requires pose + crosswalk
+    geometry (see APPROXIMATE_METRICS['TTZ']) -- unlocked by capture_map_geometry's new
+    crosswalk-polyline accessor (verified against a real compiled map: 5 crosswalk
+    polylines, 20 points, coordinate frame matches the existing road-edge getter).
+
+    TTZ(A1,CA,t) = min({t~>=0 | d(p1(t+t~), p_CA(t+t~)) = 0} u {inf}): time until the ego,
+    extrapolated at its CURRENT heading and speed (a static-target special case of the
+    same constant-velocity model used for TA/PrET), first reaches a crosswalk polygon
+    boundary. Solved as a ray-vs-polyline-segment intersection (smallest nonnegative
+    crossing time over all segments of any crosswalk in the ego's own scenario).
+    APPROXIMATE rather than EXACT because: crosswalks are treated as their boundary
+    polyline (a thin region), not the paper's zebra "position" abstraction exactly, and
+    the constant-velocity extrapolation (like TA/PrET, TTB, etc. elsewhere in this
+    module) assumes the ego holds its current heading/speed rather than using a full
+    trajectory predictor.
+    """
+    ex, ey, eh, ev = pack["ego_x_traj"], pack["ego_y_traj"], pack["ego_heading_traj"], pack["speed_traj"]
+    n, T = ex.shape
+    out = np.full((n, T), np.nan, dtype=np.float64)
+    if not has_crosswalks(pack):
+        return out
+
+    polylines = _unpack_polylines(
+        pack["crosswalk_polyline_x"],
+        pack["crosswalk_polyline_y"],
+        pack["crosswalk_polyline_lengths"],
+        pack["crosswalk_polyline_scenario_id"],
+    )
+    scene_id = pack["scene_id"]
+    segments_by_scene: dict[int, np.ndarray] = {}
+    for sid, pts in polylines:
+        segs = np.stack([pts[:-1], pts[1:]], axis=1)  # (k-1, 2, 2)
+        if segs.shape[0] == 0:
+            continue
+        segments_by_scene.setdefault(sid, []).append(segs)
+    segments_by_scene = {
+        sid: np.concatenate(chunks, axis=0) for sid, chunks in segments_by_scene.items()
+    }
+
+    for i in range(n):
+        segs = segments_by_scene.get(int(scene_id[i]))
+        if segs is None:
+            continue
+        for t in range(T):
+            speed = float(ev[i, t])
+            heading = float(eh[i, t])
+            vx, vy = speed * np.cos(heading), speed * np.sin(heading)
+            tt = _ray_polyline_ttc(float(ex[i, t]), float(ey[i, t]), vx, vy, segs)
+            if np.isfinite(tt):
+                out[i, t] = tt
+    return out
 
 
 # ============================================================================
@@ -478,8 +909,93 @@ def deceleration_to_safety_time_traj(pack: dict[str, np.ndarray], *, ts: float =
     return np.where(np.abs(denom) < EPS, np.nan, dst)
 
 
-# a_lat,req, STN, a_req (combined norm): NOT_APPLICABLE -- see dict below (no steer/lateral
-# signal persisted in the packs).
+def required_lat_accel_traj(pack: dict[str, np.ndarray]) -> np.ndarray:
+    """a_lat,req -- Required Lateral Acceleration [Jansson 2005, "Collision Avoidance
+    Theory: With Application to Automotive Collision Mitigation", PhD thesis, Linkoping
+    University, Eq. 5.46-5.49 constant-acceleration special case]. APPROXIMATE, requires
+    pose+width (see APPROXIMATE_METRICS['a_lat,req']) -- unlocked by capture_pose +
+    capture_map_geometry's incidental partner-width plumbing (verified against a real
+    compiled rollout: other_width_traj range ~2.0m, realistic).
+
+    a1,lat,k(t) = a2,lat + 2*(v2,lat-v1,lat)/TTC + (2/TTC^2)*[k*(w1+w2)/2 + (p2,lat-p1,lat)],
+    for k in {+1,-1} (steer left/right); a_lat,req = min(|a1,lat,left|, |a1,lat,right|) --
+    the minimal average lateral acceleration A1 needs, in either direction, to avoid a
+    future collision by steering. Decomposes relative position/velocity onto ego's
+    heading-perpendicular axis (same technique as rss_full_violation_traj's lateral
+    half). v1,lat is the ego's own lateral velocity in its own per-step heading frame --
+    unlike the other agent (only ~1/3 of steps valid, see other_id_traj), ego position is
+    captured every single step, so this is computed by finite-differencing (ex,ey) and
+    projecting onto the perpendicular axis, rather than assumed 0 as an earlier version
+    of this function did. a2,lat=0 (the other agent's lateral acceleration) remains
+    unmeasured/assumed 0 (same "assume 0" convention already used for a_long,req's a2) --
+    other's data coverage is too sparse to finite-difference reliably the way ego's can
+    be. w1, w2 are ego_width and other_width.
+    """
+    ex, ey, eh = pack["ego_x_traj"], pack["ego_y_traj"], pack["ego_heading_traj"]
+    ox, oy, oh, ov = (
+        pack["other_x_traj"],
+        pack["other_y_traj"],
+        pack["other_heading_traj"],
+        pack["other_speed_traj"],
+    )
+    ttc = pack["ttc_traj"]
+    w1 = pack["ego_width"][:, None]
+    w2 = pack["other_width_traj"]
+
+    perp_ux, perp_uy = -np.sin(eh), np.cos(eh)
+    dx, dy = ox - ex, oy - ey
+    d_lat = dx * perp_ux + dy * perp_uy
+
+    if ex.shape[1] >= 2:
+        ego_vx = np.gradient(ex, DT, axis=1)
+        ego_vy = np.gradient(ey, DT, axis=1)
+        v1_lat = ego_vx * perp_ux + ego_vy * perp_uy
+    else:
+        v1_lat = np.zeros_like(ex)  # single-step pack: fall back to the old v1_lat=0 assumption
+
+    v2x, v2y = ov * np.cos(oh), ov * np.sin(oh)
+    v_lat_diff = (v2x * perp_ux + v2y * perp_uy) - v1_lat  # (v2,lat - v1,lat)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        base = 2.0 * v_lat_diff / ttc
+        term = 2.0 / ttc**2
+        a_left = base + term * ((w1 + w2) / 2.0 + d_lat)
+        a_right = base + term * (-(w1 + w2) / 2.0 + d_lat)
+    a_req = np.minimum(np.abs(a_left), np.abs(a_right))
+    valid = np.isfinite(ttc) & (ttc > 0) & np.isfinite(d_lat) & np.isfinite(w2)
+    return np.where(valid, a_req, np.nan)
+
+
+def steer_threat_number_traj(pack: dict[str, np.ndarray], *, a_lat_min: float = 7.0) -> np.ndarray:
+    """STN -- Steer Threat Number [Jansson 2005; multi-actor extension Eidehall 2011].
+    APPROXIMATE (see APPROXIMATE_METRICS['a_lat,req']).
+
+    STN = a_lat,req / a_lat,min. By definition STN >= 1 means a steering maneuver cannot
+    avoid the collision under the assumed model. a_lat_min defaults to 7.0 m/s^2, Jansson's
+    own demonstrator-vehicle deployed lateral-capability bound (Table 8.3) -- the more
+    conservative of his two reported values (the other, 9.82 m/s^2 =~ 1g, is his idealized
+    physical limit; pass a_lat_min=9.82 to use that instead).
+    """
+    return required_lat_accel_traj(pack) / a_lat_min
+
+
+def combined_required_accel_traj(pack: dict[str, np.ndarray]) -> np.ndarray:
+    """a_req -- combined Required Acceleration [Jansson 2005]. APPROXIMATE (see
+    APPROXIMATE_METRICS['a_lat,req']).
+
+    a_req = sqrt(a_long,req^2 + a_lat,req^2). Jansson's thesis actually gives THREE
+    distinct combination formulas (a plain min(), this sqrt-of-squares "SOCC" form, and a
+    friction-ellipse feasibility check) -- this implements the sqrt form since that's
+    what the Westhofen survey itself attributes to Jansson and is the most commonly cited
+    version, but per a direct read of Jansson Eq. 5.59-5.61 it is itself already a
+    simplification of his true joint-optimal (A_x, A_y) solve, not a literal transcription
+    -- flagged explicitly since this implementation combines two INDEPENDENTLY computed
+    1D terms (required_long_decel_traj, required_lat_accel_traj) post-hoc, which is the
+    survey's reading of Jansson, not Jansson's own coupled optimization.
+    """
+    a_long = required_long_decel_traj(pack)
+    a_lat = required_lat_accel_traj(pack)
+    return np.sqrt(a_long**2 + a_lat**2)
 
 
 # ============================================================================
@@ -489,21 +1005,27 @@ def deceleration_to_safety_time_traj(pack: dict[str, np.ndarray], *, ts: float =
 
 def longitudinal_jerk_proxy(pack: dict[str, np.ndarray]) -> np.ndarray:
     """LongJ -- Longitudinal Jerk [general concept; curve-safety use in Ambros2019].
-    APPROXIMATE (see APPROXIMATE_METRICS['LongJ']).
+    EXACT when accel_traj is present, APPROXIMATE otherwise (see
+    APPROXIMATE_METRICS['LongJ']).
 
-    LongJ(A1,t) = j1,long(t) = d(a1,long)/dt. The actually-*executed* per-step acceleration
-    isn't persisted in the saved packs (only its episode-level hard-braking fraction is);
-    what IS available is exp_accel_traj, the policy's softmax-expected acceleration. We
-    finite-difference that as a proxy for the policy's decision smoothness, not the
-    vehicle's physically realized jerk.
+    LongJ(A1,t) = j1,long(t) = d(a1,long)/dt. rollout.py now persists accel_traj -- the
+    actually-sampled/executed acceleration for dynamics_model="classic" (this pipeline's
+    default) -- which was already computed every step but previously discarded after
+    only feeding mean_hard_brake. When present, LongJ is the exact finite-difference
+    jerk of that real signal. Packs saved before this addition (or using
+    dynamics_model="jerk", where the C side's own jerk_long field would be the right
+    source instead -- not currently exposed) only have exp_accel_traj, the policy's
+    softmax-expected acceleration -- finite-differencing that remains a decision-
+    smoothness proxy, not physically realized jerk, for those older packs.
     """
-    a = pack["exp_accel_traj"]
+    a = pack["accel_traj"] if "accel_traj" in pack else pack["exp_accel_traj"]
     jerk = np.diff(a, axis=1) / DT
     pad = np.full((jerk.shape[0], 1), np.nan, dtype=jerk.dtype)
     return np.concatenate([pad, jerk], axis=1)
 
 
-# LatJ: NOT_APPLICABLE -- same missing-steer-signal reason as a_lat,req.
+# LatJ: NOT_APPLICABLE -- needs an executed lateral-accel signal (steer not persisted),
+# unlike a_lat,req below which only needs pose+width (see NOT_APPLICABLE['LatJ']).
 
 
 # ============================================================================
@@ -603,6 +1125,91 @@ def rss_longitudinal_violation_traj(pack: dict[str, np.ndarray], **kwargs: Any) 
     return pack["min_dist_traj"] < d_min
 
 
+def rss_full_violation_traj(
+    pack: dict[str, np.ndarray],
+    *,
+    rho: float = 1.0,
+    a_max_accel_long: float = A_RSS_MAX_ACCEL,
+    a_min_brake_long: float = A_MAX,
+    a_max_brake_long: float = A_RSS_MAX_BRAKE_OTHER,
+    a_max_accel_lat: float = 0.2,
+    a_min_brake_lat: float = 0.8,
+    mu: float = 0.1,
+) -> np.ndarray:
+    """RSS-DS -- full Responsibility-Sensitive Safety Dangerous-Situation flag, both axes
+    [Shalev-Shwartz, Shammah, Shashua 2017, Definitions 1+2 (longitudinal, Lemma 2) and
+    Definition 6 (lateral, Lemma 4)]. APPROXIMATE, requires pose (see
+    APPROXIMATE_METRICS['RSS_full']) -- this SUPERSEDES rss_longitudinal_violation_traj
+    (which cannot determine true ahead/behind or evaluate the lateral axis at all) when
+    pose is available.
+
+    RSS-DS = 1 iff BOTH the longitudinal AND lateral safe distances are simultaneously
+    violated (Definition 9). Longitudinal front/rear roles are now determined from the
+    real sign of the projected relative position (previously assumed ego=rear always).
+    Lateral closing is evaluated via ego-heading-relative projection: since ego's own
+    lateral velocity in its own frame is ~0 by construction (only longitudinal motion is
+    directly measured), the "positive-side car" / "negative-side car" role assignment in
+    the paper's Definition 6 is resolved by the sign of the projected lateral offset. The
+    lateral accel/brake bounds (a_max_accel_lat=0.2, a_min_brake_lat=0.8, mu=0.1m) are the
+    same Intel ad-rss-lib reference values used for the longitudinal bounds elsewhere in
+    this module -- the original paper itself publishes no numeric values for either axis.
+    Flagged APPROXIMATE rather than EXACT because: (a) the lateral sign-role assignment is
+    this implementation's own resolution of an ambiguity in the paper's v_i +/- rho*a_lat
+    notation, not something verified against a reference implementation, and (b) ego's own
+    lateral velocity is assumed zero rather than measured.
+    """
+    ex, ey, eh, ev = pack["ego_x_traj"], pack["ego_y_traj"], pack["ego_heading_traj"], pack["speed_traj"]
+    ox, oy, oh, ov = (
+        pack["other_x_traj"],
+        pack["other_y_traj"],
+        pack["other_heading_traj"],
+        pack["other_speed_traj"],
+    )
+
+    heading_ux, heading_uy = np.cos(eh), np.sin(eh)
+    perp_ux, perp_uy = -np.sin(eh), np.cos(eh)
+
+    dx, dy = ox - ex, oy - ey
+    d_long = dx * heading_ux + dy * heading_uy
+    d_lat = dx * perp_ux + dy * perp_uy
+
+    v2x, v2y = ov * np.cos(oh), ov * np.sin(oh)
+    v2_long = v2x * heading_ux + v2y * heading_uy
+    v2_lat = v2x * perp_ux + v2y * perp_uy
+    v1_long = ev
+    v1_lat = np.zeros_like(ev)
+
+    # Longitudinal: assign front/rear roles from the measured sign of d_long.
+    ahead = d_long >= 0
+    v_front = np.clip(np.where(ahead, v2_long, v1_long), 0.0, None)
+    v_rear = np.clip(np.where(ahead, v1_long, v2_long), 0.0, None)
+    d_min_long = np.maximum(
+        v_rear * rho
+        + 0.5 * a_max_accel_long * rho**2
+        + (v_rear + rho * a_max_accel_long) ** 2 / (2.0 * a_min_brake_long)
+        - v_front**2 / (2.0 * a_max_brake_long),
+        0.0,
+    )
+
+    # Lateral: assign positive-/negative-side roles from the measured sign of d_lat.
+    other_is_positive = d_lat >= 0
+    v1_l = np.where(other_is_positive, v2_lat, v1_lat)
+    v2_l = np.where(other_is_positive, v1_lat, v2_lat)
+    gap_lat = np.abs(d_lat)
+    v1_rho = v1_l + rho * a_max_accel_lat
+    v2_rho = v2_l - rho * a_max_accel_lat
+    d_min_lat = mu + np.maximum(
+        0.0,
+        (v1_l + v1_rho) / 2.0 * rho
+        + v1_rho**2 / (2.0 * a_min_brake_lat)
+        - ((v2_l + v2_rho) / 2.0 * rho - v2_rho**2 / (2.0 * a_min_brake_lat)),
+    )
+
+    valid = np.isfinite(d_long) & np.isfinite(d_lat)
+    violation = (np.abs(d_long) < d_min_long) & (gap_lat < d_min_lat)
+    return np.where(valid, violation, False)
+
+
 def safety_potential_traj(
     pack: dict[str, np.ndarray], *, a_min: float = A_MAX, k: float = 2.0
 ) -> np.ndarray:
@@ -671,7 +1278,7 @@ def monte_carlo_collision_probability(packs_by_seed: list[dict[str, np.ndarray]]
     our own car", mirroring this pipeline's own data gap), but it needs the FULL per-bin
     action-probability vector per step, which rollout.py currently does NOT persist (only
     scalar aggregates like p_brake/exp_accel are saved) -- the same class of missing-
-    capture issue documented for the steer signal (see NOT_APPLICABLE['a_lat,req...']).
+    capture issue documented for the steer signal (see NOT_APPLICABLE['LatJ']).
 
     Args:
         packs_by_seed: per-seed pack dicts for the SAME method (record/reactive/selfplay),
@@ -697,10 +1304,151 @@ def monte_carlo_collision_probability(packs_by_seed: list[dict[str, np.ndarray]]
 
 
 # ============================================================================
-# 8. POTENTIAL-SCALE METRICS -- PF, SP: NOT_APPLICABLE (see dict below; both need
-#    per-object-type potential functions built on lane/road geometry or vehicle
-#    footprints, neither of which the packs carry).
+# 8. POTENTIAL-SCALE METRICS -- SP is implemented in the Index-Scale section above
+#    (was ported there before this comment was updated; left in place to avoid an
+#    unnecessary code move). PF is implemented below.
 # ============================================================================
+
+
+def _nearest_point_to_rect_distance(
+    px: np.ndarray, py: np.ndarray, half_l: float | np.ndarray, half_w: np.ndarray
+) -> np.ndarray:
+    """Distance from point (px,py), given in a rectangle's own body frame (rectangle
+    centered at origin, half-length half_l along x, half-width half_w along y), to the
+    rectangle's boundary. 0 if the point is inside/on the rectangle."""
+    dx = np.maximum(np.abs(px) - half_l, 0.0)
+    dy = np.maximum(np.abs(py) - half_w, 0.0)
+    return np.hypot(dx, dy)
+
+
+def potential_functions_traj(
+    pack: dict[str, np.ndarray],
+    *,
+    a_car: float = 10.0,
+    alpha_car: float = 0.5,
+    beta_car: float = 0.6,
+    t_follow: float = 3.0,
+    d0_car: float = 50.0,
+    a_lane: float = 2.0,
+    sigma_lane: float | None = None,
+    eta_road: float = 3.0,
+    gamma_vel: float = 0.2,
+    v_des: float = 25.0,
+) -> np.ndarray:
+    """PF -- Potential Functions as Superposition of Scoring Functions [Wolf, Burdick
+    2008, "Artificial Potential Functions for Highway Driving with Collision Avoidance",
+    IEEE ICRA 2008; full text + Table I parameters obtained directly]. APPROXIMATE (see
+    APPROXIMATE_METRICS['PF']).
+
+    U = U_lane + U_road + U_car + U_vel. Defaults are Wolf & Burdick's own Table I
+    simulation parameters (labeled by them as scenario-specific demonstration values,
+    not universal constants -- d0_car is the one exception: it is referenced in their
+    text as "max distance at which U_car has influence" but not actually listed in
+    Table I, so 50.0m here is this implementation's own choice, not theirs).
+
+    U_car,m(K) = A_car * exp(-alpha*K) / K, a Yukawa potential in a pseudo-distance K to
+    the nearest other agent, measured in THAT AGENT'S OWN body frame (forward = its
+    heading). K is the nearest-point-to-rectangle distance (rectangle = that agent's own
+    length x width) EXCEPT behind the agent, where the paper appends a rearward "wedge"
+    (encouraging lane-changing over stopping) via a velocity-dependent longitudinal
+    rescaling xi_m(v) = xi0(v)*exp(-beta*(v-v_m)), xi0(v) = d0/(Tf*v) if v>=d0/Tf else 1
+    -- APPROXIMATED HERE by nearest-rectangle-distance on the RESCALED body-frame
+    position rather than reconstructing the paper's exact triangular wedge polygon
+    (which needs figure-level geometric detail beyond the text).
+
+    U_lane, U_road need a road-relative lateral (y) coordinate; this pipeline has no
+    road-aligned coordinate frame (WOMD scenarios include curves/intersections, not just
+    Wolf & Burdick's straight highway). APPROXIMATED via signed perpendicular distance
+    from the ego's position to the nearest lane-centerline / road-edge polyline segment
+    (reusing the point-to-segment-distance building block also used by
+    _nearest_point_to_rect_distance, applied per-segment) as a stand-in for their
+    y-y_c,i / y-y_0,j terms -- a real deviation from the paper's straight-highway
+    parameterization, not just a missing constant.
+
+    U_vel = gamma*(v-v_des)*x, x interpreted here as the ego's own cumulative
+    along-path distance traveled since episode start (not raw world (x,y), which
+    would make the potential depend on absolute map position -- clearly not the
+    paper's intent for a "progress" term).
+    """
+    ex, ey, eh, ev = pack["ego_x_traj"], pack["ego_y_traj"], pack["ego_heading_traj"], pack["speed_traj"]
+    ox, oy, oh, ov = (
+        pack["other_x_traj"],
+        pack["other_y_traj"],
+        pack["other_heading_traj"],
+        pack["other_speed_traj"],
+    )
+    n, T = ex.shape
+
+    # --- U_car ---
+    other_l = pack.get("other_length_traj")
+    other_w = pack.get("other_width_traj")
+    u_car = np.zeros((n, T), dtype=np.float64)
+    if other_l is not None and other_w is not None:
+        dx, dy = ex - ox, ey - oy  # ego relative to other, world frame
+        cos_oh, sin_oh = np.cos(oh), np.sin(oh)
+        x_body = dx * cos_oh + dy * sin_oh
+        y_body = -dx * sin_oh + dy * cos_oh
+        v_threshold = d0_car / t_follow
+        with np.errstate(divide="ignore", invalid="ignore"):
+            xi0 = np.where(ev >= v_threshold, d0_car / np.maximum(t_follow * ev, EPS), 1.0)
+        xi_m = xi0 * np.exp(-beta_car * (ev - ov))
+        x_body_eff = np.where(x_body < 0, xi_m * x_body, x_body)
+        k = _nearest_point_to_rect_distance(x_body_eff, y_body, other_l / 2.0, other_w / 2.0)
+        k = np.maximum(k, EPS)
+        u_car_valid = a_car * np.exp(-alpha_car * k) / k
+        valid = np.isfinite(x_body) & np.isfinite(y_body) & (pack.get("other_id_traj", np.ones((n, T))) >= 0)
+        u_car = np.where(valid, u_car_valid, 0.0)
+
+    # --- U_lane, U_road (perpendicular distance to nearest polyline segment) ---
+    def _min_perp_dist_to_polylines(
+        px_t: np.ndarray, py_t: np.ndarray, x_key: str, y_key: str, len_key: str, sid_key: str
+    ) -> np.ndarray:
+        out = np.full((n, T), np.nan, dtype=np.float64)
+        if len_key not in pack or pack[len_key].size == 0:
+            return out
+        polylines = _unpack_polylines(pack[x_key], pack[y_key], pack[len_key], pack[sid_key])
+        scene_id = pack["scene_id"]
+        segs_by_scene: dict[int, np.ndarray] = {}
+        for sid, pts in polylines:
+            if pts.shape[0] < 2:
+                continue
+            segs = np.stack([pts[:-1], pts[1:]], axis=1)
+            segs_by_scene.setdefault(sid, []).append(segs)
+        segs_by_scene = {sid: np.concatenate(v, axis=0) for sid, v in segs_by_scene.items()}
+        for i in range(n):
+            segs = segs_by_scene.get(int(scene_id[i]))
+            if segs is None:
+                continue
+            a = segs[:, 0, :]  # (S,2)
+            b = segs[:, 1, :]
+            ab = b - a
+            ab_len2 = np.maximum((ab**2).sum(axis=-1), EPS)
+            for t in range(T):
+                p = np.array([px_t[i, t], py_t[i, t]])
+                tproj = np.clip(((p - a) * ab).sum(axis=-1) / ab_len2, 0.0, 1.0)
+                closest = a + tproj[:, None] * ab
+                d = np.hypot(*(p - closest).T)
+                out[i, t] = float(d.min())
+        return out
+
+    d_lane = _min_perp_dist_to_polylines(
+        ex, ey, "lane_polyline_x", "lane_polyline_y", "lane_polyline_lengths", "lane_polyline_scenario_id"
+    )
+    d_road = _min_perp_dist_to_polylines(
+        ex, ey, "road_edge_polyline_x", "road_edge_polyline_y", "road_edge_polyline_lengths",
+        "road_edge_polyline_scenario_id",
+    )
+    sigma = sigma_lane if sigma_lane is not None else 1.2  # 0.3 * Wolf&Burdick's own lane width (4m)
+    u_lane = np.where(np.isfinite(d_lane), a_lane * np.exp(-(d_lane**2) / (2 * sigma**2)), 0.0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        u_road = np.where(np.isfinite(d_road), (eta_road / 2.0) / np.maximum(d_road, EPS) ** 2, 0.0)
+
+    # --- U_vel (x = cumulative along-path distance traveled, not raw world x) ---
+    step_dist = np.hypot(np.diff(ex, axis=1, prepend=ex[:, :1]), np.diff(ey, axis=1, prepend=ey[:, :1]))
+    path_dist = np.cumsum(step_dist, axis=1)
+    u_vel = gamma_vel * (ev - v_des) * path_dist
+
+    return u_lane + u_road + u_car + u_vel
 
 
 # ============================================================================
@@ -764,6 +1512,52 @@ def compute_all_metrics(
         jerk = longitudinal_jerk_proxy(pack)
         out["LongJ_policy_proxy_mean_abs_mps3"] = np.nanmean(np.abs(jerk), axis=1)
 
+    if has_pose(pack):
+        ta = time_advantage_traj(pack)
+        out["TA_PrET_min_s"] = np.nanmin(ta, axis=1)
+        sprEt = scaled_predictive_encroachment_time_traj(pack)
+        out["SPrET_min_s2"] = np.nanmin(sprEt, axis=1)
+        rss_full = rss_full_violation_traj(pack)
+        out["RSS_full_violation_frac_approx"] = np.mean(rss_full, axis=1)
+
+    if has_pose(pack) and has_crosswalks(pack):
+        ttz = time_to_zebra_traj(pack)
+        out["TTZ_min_s_approx"] = np.nanmin(ttz, axis=1)
+
+    if has_pose(pack) and has_dimensions(pack):
+        et_scenario, pet_scenario = encroachment_times_traj(pack)
+        out["ET_s_approx"] = et_scenario
+        out["PET_s_approx"] = pet_scenario
+
+    if has_pose(pack) and "other_length_traj" in pack:
+        # potential_functions_traj degrades gracefully via .get()/None-checks if width
+        # is absent (u_car contributes 0 rather than crashing) -- unlike ET/PET and TTS
+        # below, which index length/width directly and need has_dimensions' full check.
+        pf = potential_functions_traj(pack)
+        out["PF_mean_approx"] = np.nanmean(pf, axis=1)
+        out["PF_worst_approx"] = np.nanmax(pf, axis=1)
+
+    if has_pose(pack) and has_width(pack):
+        a_lat = required_lat_accel_traj(pack)
+        out["a_lat_req_worst_mps2_approx"] = np.nanmax(a_lat, axis=1)
+        stn = steer_threat_number_traj(pack)
+        out["STN_max_approx"] = np.nanmax(stn, axis=1)
+        a_comb = combined_required_accel_traj(pack)
+        out["a_req_combined_worst_mps2_approx"] = np.nanmax(a_comb, axis=1)
+
+    if has_pose(pack) and has_dimensions(pack):
+        tts = time_to_steer_traj(pack)
+        # nanmin naturally preserves -inf (genuinely "no steer maneuver, however early,
+        # avoids collision") as the most-critical value, while skipping NaN (undefined,
+        # e.g. no TTC) -- this is the correct worst-case aggregate, not a filtering bug.
+        out["TTS_min_s_approx"] = np.nanmin(tts, axis=1)
+        # Fuller TTR = max(TTB, TTK, TTS) -- see time_to_react_approx_traj's docstring for
+        # why the cheap TTR_min_s_approx above (computed earlier, traj-only) omits TTS.
+        # np.fmax, not np.maximum -- same NaN-propagation reasoning as
+        # time_to_react_approx_traj above (TTK and/or TTS are frequently NaN here too).
+        ttr_full = np.fmax(time_to_brake_traj(pack), np.fmax(time_to_kickdown_traj(pack), tts))
+        out["TTR_full_min_s_approx"] = np.nanmin(ttr_full, axis=1)
+
     return out
 
 
@@ -801,6 +1595,7 @@ EXACT_METRICS: dict[str, str] = {
     "DST (ts=0)": "agrees with a_long,req at ts=0, per the survey's own note.",
     "PSD": "Astarita, Guido, Vitale, Giofre (2012) confirm, from the original paper directly, that for car-following/rear-end interactions (this pipeline's scenario type) the 'conflict point' p_CA is defined as the lead vehicle's own position -- exactly min_dist_traj -- not an independently-defined intersection polygon, so no substitution/approximation is needed here.",
     "TTB": "Hillenbrand (2007) KIT dissertation, read directly, confirms the 1D/no-lateral-intersection case (this pipeline's setup) is pure longitudinal kinematics using the EGO's OWN max-braking bound -- exactly this env's own A_MAX action-space bound, not an assumed external constant.",
+    "TA/PrET/SPrET": "unlocked by capture_pose (verified end-to-end against a real compiled rollout, not just synthetic data): with ego and nearest-partner (x, y, heading, speed) now captured, Neurohr et al. (2021)'s constant-velocity path-intersection solve is a direct 2x2 linear system -- exactly what the formula requires, no substitution needed. Undefined (NaN) when paths are parallel or the crossing lies in either agent's past, per the formula's own definition.",
 }
 
 APPROXIMATE_METRICS: dict[str, str] = {
@@ -808,31 +1603,31 @@ APPROXIMATE_METRICS: dict[str, str] = {
     "WTTC": "Wachenfeld et al. (2016)'s original is paywalled, but its cited open-source reference implementation (CommonRoad-CriMe) reveals the true formula applies the SAME a_max independently to both vehicles and grows an isotropic 2D disc (from vehicle footprint radii) at combined rate (a1+a2). Under a symmetric-vehicle assumption this validates '2x this env's a_max' as a real consequence of the original's own structure (not an arbitrary multiplier) -- but the isotropic-2D-to-1D-closing-direction collapse and the disc-to-point-vehicle simplification (no footprint radii available) are real, additional departures from the original geometry.",
     "CPI": "Cunto's 2008 PhD thesis (the primary source, read directly) gives the actual normal-distribution parameters for Maximum Available Deceleration Rate (mean=8.45, std=1.40 m/s^2, cars) used here; this is now much closer to the original formula (P(MADR<=DRAC) via the normal CDF) than a prior deterministic-threshold version of this metric, but MADR is still a fleet-wide human-vehicle distribution being applied to an RL policy operating under a fixed, narrower discrete action space, which is itself an approximation of what CPI is meant to model.",
     "Delta-v": "assumes equal vehicle mass (Shelby 2011's own convention when masses are unavailable, read directly from the original -- not an arbitrary guess) and uses the closing speed at the timestep of minimum distance as a stand-in for pre-impact relative velocity (Shelby 2011 does exactly this substitution -- 'predicted-collision relative velocity' -- when extending Delta-v to non-collision conflicts, confirmed from his original text), not a physically measured post-collision speed change.",
-    "RSS_long_violation": "implements only the longitudinal half of RSS-DS's simultaneous lateral+longitudinal violation test; confirmed directly from Shalev-Shwartz et al. (2017) that the lateral formula needs an independently-decomposed lateral velocity component that cannot be recovered from a single radial closing-speed scalar without heading/bearing information (not a missing-assumption problem, a missing-input-category problem). Uses field-standard constants from Intel's ad-rss-lib reference implementation (rho=1.0s, a_max_accel=3.5, a_min_brake=4.0, a_max_brake=8.0) since the original paper deliberately declines to publish numeric values. Over-flags relative to the true RSS-DS (longitudinal violation alone is a necessary but not sufficient condition for the full metric).",
-    "LongJ": "computed on the policy's *expected* acceleration (softmax-weighted mean over the discrete action distribution) since the actually-sampled/executed per-step acceleration isn't persisted in the packs -- a policy-smoothness proxy, not physically realized vehicle jerk.",
+    "RSS_long_violation": "scalar-only fallback (works on any pack, even without capture_pose) that implements just the longitudinal half of RSS-DS's simultaneous lateral+longitudinal violation test, and blindly assumes ego=rear/following (it has no real position data to determine true ahead/behind). SUPERSEDED by RSS_full when pose is available (see below) -- kept only for packs from run_coordination.sh's scalar-only rollouts. Uses field-standard constants from Intel's ad-rss-lib reference implementation (rho=1.0s, a_max_accel=3.5, a_min_brake=4.0, a_max_brake=8.0) since the original paper deliberately declines to publish numeric values.",
+    "RSS_full": "unlocked by capture_pose (verified end-to-end against a real compiled rollout): now correctly determines true front/rear roles from the measured sign of the longitudinal offset (rather than always assuming ego=rear), and evaluates the lateral axis too (Definition 6/Lemma 4) via projection onto ego's heading-perpendicular direction, using ego's own lateral velocity in its own frame as 0. Passed hand-computable sanity tests (stationary-adjacent-lane no-violation, closing-fast tiny-gap violation, etc.) but is flagged APPROXIMATE rather than EXACT because the lateral formula's v_i +/- rho*a_lat sign convention (which of the two cars is the 'positive-side' one) is this implementation's own resolution of an ambiguity in the source notation, not verified against Intel's ad-rss-lib or another reference implementation. Same field-standard longitudinal constants as RSS_long_violation, plus a_max_accel_lat=0.2, a_min_brake_lat=0.8, mu=0.1m for the lateral axis (also Intel ad-rss-lib defaults).",
+    "LongJ": "UPGRADED: rollout.py now persists accel_traj, the actually-sampled/executed per-step acceleration -- this was already computed every step (used only for mean_hard_brake) but discarded before this fix. For dynamics_model='classic' (this pipeline's default) this is the exact physically-applied longitudinal acceleration (confirmed by reading the C integration step directly: `signed_speed += acceleration*dt` uses this exact same decoded value), so LongJ computed from it is EXACT, not approximate. Still listed here (not in EXACT_METRICS) because packs saved before this fix -- or using dynamics_model='jerk', where the C side's own jerk_long field would be the right source instead, not currently exposed -- only have exp_accel_traj (the policy's softmax-expected acceleration), for which LongJ remains a decision-smoothness proxy, not physically realized jerk.",
     "P-MC": "RELABELED from an earlier version of this metric: what's actually computed (empirical fraction of training-seed replicates that collide, same method/map) estimates policy-checkpoint outcome variance, confirmed (via Broadhurst's own CMU-RI-TR-04-11 precursor report) to be a DIFFERENT random variable than the original paper's per-instant control-input-uncertainty integral, not merely a looser version of it. See monte_carlo_collision_probability()'s docstring for the full distinction and for what a truer one-step approximation would need (full per-bin action probabilities, not currently persisted).",
     "PTTC": "Wakabayashi et al. (2003), read directly (original Japanese text via J-STAGE), reveals the original paper ALSO never isolates the other agent's true acceleration -- it substitutes a preset constant from three empirically-measured braking-severity classes (0.93/2.78/5.56 m/s^2). This pipeline follows the same substitution (default: this env's own A_MAX, which falls between Wakabayashi's medium/hard presets), so the approximation directly mirrors the original method rather than deviating from it.",
-    "TTK": "Hillenbrand (2007) confirms the underlying 1D kinematics are identical to TTB, but the SIGN/DIRECTION of when kickdown actually helps (only when accelerating reduces the closing rate, e.g. escaping a rear threat or a crossing point -- actively wrong if the interacting agent is a lead vehicle ahead) cannot be determined from this pipeline's direction-agnostic closing-speed scalar, so TTK values should be read as conditional on a maneuver-applicability assumption this pipeline cannot verify.",
-    "TTR": "= max(TTB, TTK) only (the true TTR = max(TTB, TTS, TTK) also includes TTS, which is not applicable here -- see NOT_APPLICABLE). Provably a systematic underestimate of the true TTR (dropping a term from a max can only lower it), which is the safe-biased direction for a criticality metric to be wrong in.",
+    "TTK": "UPGRADED: Hillenbrand (2007) confirms the underlying 1D kinematics are identical to TTB, and the direction ambiguity (kickdown only helps when the interacting agent is behind, not ahead) is now RESOLVED when pose is available -- time_to_kickdown_traj projects the other agent's relative position onto the ego's own heading (same technique as RSS_full/a_lat,req) and returns NaN whenever the other agent is genuinely ahead, rather than reporting an unverified value. Hand-tested (other-ahead -> NaN, other-behind -> finite, no-pose -> old unconditional fallback). On the one real episode tested, every interaction happened to have the other agent ahead, so TTK came out entirely NaN for it -- a more honest result than the previous version's misleading finite value for the same data. Still listed as approximate (not exact) because packs without capture_pose fall back to the old direction-unverified computation.",
+    "TTR": "compute_all_metrics reports TWO variants. 'TTR_min_s_approx' (cheap, always available on any trajectory pack) = max(TTB, TTK) only, omitting TTS since it's far more expensive to compute (a forward-simulation search, not a closed-form solve) -- provably an underestimate of the true TTR (dropping a max term can only lower it), the safe-biased direction to be wrong in. 'TTR_full_min_s_approx' (only when pose+width are available) = max(TTB, TTK, TTS), the fuller value. Earlier text here claimed TTS was 'not applicable' -- that was true when this note was first written but is now stale; TTS has since been implemented (see its own entry above) and TTR_full uses it. BUG FOUND AND FIXED during verification: both variants originally used np.maximum, which PROPAGATES NaN through the whole max -- since TTK is frequently and legitimately NaN (the direction-gating fix means 'not a valid maneuver here', not 'unknown'), this silently made TTR NaN even when TTB was a perfectly good answer, confirmed on real captured data (TTK all-NaN for one episode's ego made TTR_min_s_approx report NaN instead of falling back to TTB). Switched to np.fmax, which correctly ignores a NaN operand; re-verified TTR_min_s_approx now equals TTB_min_s exactly wherever TTK is NaN.",
     "AGS": "reframed, per Alhajyaseen et al. (2013)'s own univariate cumulative-Weibull gap-acceptance model (confirmed from the original: the function itself takes only gap TIME as input, not the demographic covariates the survey's abstraction implies are required), as a purely temporal quantity -- the realized TTC at the last pre-tight step. A full acceptance-PROBABILITY curve additionally needs alpha/beta parameters fitted to THIS domain; Alhajyaseen's own fitted values are for a pedestrian left-turn scenario and are not reused here as defaults.",
     "CS (Conflict Severity)": "Bagdadi (2013)'s original text is paywalled and unreachable, but the survey's 'not run-time capable' framing was re-examined: the actual blocker is a PRECONDITION (needing an identified evasive-maneuver onset), not a look-ahead requirement, and this pipeline already detects such an onset causally via tight_onset (paralleling how the Swedish Traffic Conflicts Technique manual itself defines its analogous severity moment). Computed the instant tight_onset fires, using the equal-mass convention and a one-step finite-difference of speed_traj for the ego's realized deceleration (no mass data, and Bagdadi's own numeric CS target value is for his own naturalistic-driving population, not transferable here as a hard threshold).",
     "SP (Safety Potential / SFF)": "implements the NVIDIA whitepaper's own explicitly-labeled single-control-policy 'Implementation Example' (read directly, both the full whitepaper and its plain-language companion doc), not the full general n-actor/arbitrary-control-policy SFF theory (which needs footprints/claimed-set geometry this pipeline doesn't have). t_int is approximated by this pipeline's own TTC (a faithful substitution specifically for the paper's 1D worked case, confirmed against its prose description of that case) and v_other by the same ego_speed-minus-closing-speed approximation used elsewhere; a_min is an implementer's choice by the source's own design (the paper publishes no numeric value), defaulted to this env's own A_MAX for consistency with BTN/DST/TTB.",
+    "a_lat,req": "unlocked by capture_pose + capture_map_geometry's incidental partner-width plumbing (both agents' widths verified against a real compiled rollout, ~2.0-2.3m, realistic): Jansson (2005)'s constant-acceleration formula (Eq. 5.46-5.49) implemented directly, using the same heading-perpendicular lateral decomposition already built for RSS_full. UPGRADED: v1,lat (ego's own lateral velocity in its own frame) is now finite-differenced from the ego's own (100%-covered) position trajectory rather than assumed 0 -- confirmed via a straight-line-motion test (recovers the same value as the old v1,lat=0 assumption) and a lateral-drift test (produces a genuinely different, larger value, confirming the signal is live). a2,lat (the other agent's lateral acceleration) remains assumed 0 -- the other agent's position coverage (~1/3 of steps) is too sparse to finite-difference as reliably as ego's. Hand-computed sanity test (head-on, zero lateral offset, known TTC and widths) matched the closed-form expectation exactly. STN = a_lat,req / 7.0 m/s^2 (Jansson's own deployed-demonstrator lateral bound).",
+    "a_req (combined norm)": "= sqrt(a_long_req^2 + a_lat_req^2), now computable since both terms are (see a_lat,req above). Per the survey's own attributed (simplified) combination -- Jansson's thesis has two OTHER combination formulas (a plain min() and a coupled friction-ellipse solve) that are not implemented; this is the survey's reading of Jansson, not a literal transcription of his joint-optimal (A_x,A_y) solve (Eq. 5.59-5.61).",
+    "TTS": "Hillenbrand (2007)'s own approach is a genuine 2D circular-arc turning-radius model solved by nested interval bisection -- not reproduced faithfully. Instead follows the architecturally simpler approach found in the actively-maintained CommonRoad-CriMe reference toolbox's actual solver code (confirmed by reading commonroad_crime/measure/time/tts.py directly): single-level bisection over the maneuver-start offset tau, forward-simulating a constant-lateral-acceleration point-mass steer maneuver against the other agent's constant-velocity path, checked via single-disc (circumscribing-circle) collision rather than CommonRoad-CriMe's own 3-disc chain or Hillenbrand's exact arc geometry. Hand-verified: sane finite TTS for a head-on scenario, correctly -inf when even immediate steering can't avoid collision (verified with deliberately very-wide vehicles), correctly NaN when TTC is undefined, and a clean monotonic trend (narrower vehicles -> larger TTS) across a parameter sweep. TTM's m='steer' case is exactly this. Substantially more expensive to compute than every other metric in this module (a discretized 2D forward-simulation search per (ego, timestep) pair, ~1.85s for a single 91-step episode in testing) -- n_tau/horizon_s/dt_grid are exposed as tunable resolution/runtime knobs.",
+    "ET/PET": "unlocked by capture_pose's ego+other position/heading and other_length_traj/ego_length/ego_width/other_width_traj (real dimensions for both agents, both axes). Operationalizes the conflict area (CA) as each agent's own ORIENTED RECTANGLE (length x width, at its own per-step heading) sweeping through the predicted path-crossing point -- itself computed by reusing the already-validated constant-velocity crossing solve from TA/PrET (_crossing_point_traj), anchored at the timestep within each other_id-stable window whose predicted crossing time is smallest-but-still-nonnegative (closest to, but not after, the event -- the forward-only t>=0 constraint means the raw prediction goes undefined once a crossing has passed, which an earlier draft of this function got wrong by anchoring on the window's last timestep instead). UPGRADED from an earlier version that used a circular disc of radius=length/2 (leaving width unused despite being captured) to a proper oriented-rectangle point-containment test -- closer to Laureshyn et al.'s own practical rectangular-footprint refinement of Allen et al.'s definition. Re-verified after the upgrade with the same 3 hand-computed synthetic cases: simultaneous arrival (ET well-defined per agent, PET correctly undefined per Allen et al.'s own assumption -- rectangle ET came out larger than the old disc version, 0.4s vs 0.2s, which is the physically expected direction: a car's own length dominates dwell time when driving straight through a point, which a disc of radius=length/2 under-counts relative to a length-2 rectangle), staggered arrival (matches closed-form expectations), and non-crossing parallel paths (NaN). Scenario-level (one value per ego, not per-step), reporting the most-critical (smallest) ET/PET across all stable-id windows if an ego has more than one. On the one real map available for testing, this pipeline's captured episode happened to produce NaN (no genuine path-crossing detected in that specific rollout, plausible for an interaction dominated by car-following/adjacent-lane geometry rather than intersection-crossing) -- not evidence of a bug, but a reminder that ET/PET's finite-rate will depend heavily on how many genuine crossing conflicts a given map/policy combination produces.",
+    "PF (Potential Functions)": "Wolf & Burdick (2008) -- note: 2008, not 2018 as an earlier pass at this registry stated, a citekey typo traced and corrected -- full text obtained on a second attempt (a different, working Caltech repository record for the same paper). Confirmed the vehicle-avoidance potential (U_car) IS velocity-dependent, not distance-only: a Yukawa potential A_car*exp(-alpha*K)/K in a pseudo-distance K, with a rearward 'wedge' behind the obstacle rescaled by xi_m(v)=xi0(v)*exp(-beta*(v-v_other)) -- implemented here using nearest-point-to-rectangle distance (rectangle = the other agent's real length x width) instead of reconstructing the paper's exact triangular wedge polygon (needs figure-level detail beyond the text), and Wolf & Burdick's own Table I values as defaults EXCEPT d0 (referenced in their text as 'max distance at which U_car has influence' but never actually listed in Table I -- 50.0m here is this implementation's own choice). U_lane/U_road need a road-relative lateral coordinate the paper assumes (straight highway); this pipeline's WOMD scenarios include curves/intersections, so these are approximated via signed perpendicular distance to the nearest lane-centerline/road-edge polyline segment instead -- a real deviation from the paper's coordinate frame, not just a missing constant. U_vel's 'x' term is interpreted as cumulative along-path distance since episode start (not raw world (x,y), which would make potential depend on absolute map position). CAVEAT discovered during testing: with Wolf & Burdick's own beta=0.6, the wedge rescaling saturates extremely fast for agents with even moderately different speeds (e.g. a 15 m/s speed differential over 50m already pins K at its numerical floor) -- verified this is the formula's actual documented behavior, not an implementation bug, but it means PF may report near-identical extreme values across many differing scenarios unless retuned for this pipeline's speed range. Also worth noting: the Westhofen survey's own authors, in their worked example, independently excluded PF (and SP) as insufficiently validated even with full geometric data available.",
+    "TTZ": "unlocked by capture_map_geometry's new crosswalk-polyline accessor (verified against a real compiled map: 5 crosswalk polylines / 20 points, coordinate frame confirmed against the existing road-edge getter). Solved as ray-vs-polyline-segment intersection under constant-velocity extrapolation (ego's current heading+speed) -- hand-verified with straight-ahead, behind, missed-to-the-side, and diagonal-approach test cases, all matching closed-form expectations exactly. Approximate rather than exact because crosswalks are treated as boundary polylines (not the paper's abstract 'position') and the constant-velocity model is the same simplification used elsewhere (TA/PrET, TTB, ...) rather than a full trajectory predictor. Still genuinely vehicle-only: this pipeline has no VRU/pedestrian-presence signal, so TTZ here answers 'when would the ego geometrically reach the crosswalk', not 'is a pedestrian there' -- pair with an external pedestrian-presence source if you need the paper's full VRU-conflict framing.",
 }
 
 NOT_APPLICABLE: dict[str, str] = {
-    "ET": "needs a defined conflict area (CA) -- a lane/road-geometry construct not present in the saved packs. Confirmed via the CommonRoad-CriMe reference implementation (which computes ET from lanelet-polygon intersections and full vehicle footprints): no formulation found, in the original literature or any practical implementation, that drops the CA/footprint requirement.",
-    "PET": "same CA requirement as ET, plus needs the *other* agent's own entry/exit times for that CA, i.e. its full (x,y) trajectory and footprint dimensions -- confirmed via Laureshyn et al.'s own practical/video-based PET method (which replaces the *lane-defined* CA with a *footprint-derived* one, but still fundamentally needs both agents' trajectories and rectangular dimensions, neither of which this pipeline captures).",
-    "PrET / SPrET / TA": "Neurohr et al. (2021), read in full, confirms all three reduce to 'find where two predicted straight-line 2D paths cross', needing each agent's absolute (x,y) position AND individual velocity vector/heading in isolation. This pipeline's 'closing speed' is a scalar projection onto the line-of-sight, not a recoverable 2D vector -- there is no assumption that lets a single relative-projection scalar stand in for two independent heading/velocity vectors.",
-    "TTZ": "pedestrian-crossing-specific; needs a crosswalk/zebra position and the pipeline carries no VRU/crosswalk semantics.",
-    "CI (Conflict Index)": "built on top of PET, which this pipeline does not have (TTC is a closing-rate projection, not a footprint-clearance timing measure -- the two are not interchangeable), plus vehicle masses and approach headings at CA entry/exit. Even the standalone probability-proxy term e^(-beta*PET) cannot be evaluated without PET itself, independent of the missing calibration constant beta (confirmed: beta is described everywhere in the literature as site-calibrated, with no universal published value either).",
+    "CI (Conflict Index)": "built on top of PET (now available; see APPROXIMATE_METRICS) plus vehicle masses and approach headings at CA entry/exit (masses still unavailable, same gap as Delta-v/CS). Even granting those, the standalone probability-proxy term e^(-beta*PET) still needs the calibration constant beta -- confirmed a genuine dead end on a second, deeper pass: the Procedia Computer Science version of Alhajyaseen's paper is legitimately gold-OA per Unpaywall but every automated fetch is Cloudflare-bot-walled (not a subscription paywall -- a human browser would likely succeed where this couldn't); the Arab J Sci Eng version has no OA copy anywhere; no citing paper in the broader conflict-severity-index literature reports an example beta either. So CI stays blocked by a genuinely missing constant with no accessible route to it, not by missing PET anymore.",
     "PRI": "confirmed genuinely and completely pedestrian/crosswalk-specific from the original paper (Cafiso et al. 2011, read in full) -- needs the pedestrian's own position/walking-speed trajectory toward a defined crosswalk conflict area, with no vehicle-vehicle analogue anywhere in the source.",
     "TCI": "Junietz's 2019 dissertation (read directly, the fullest available source), confirms TCI is computed via constrained trajectory (MPC) optimization needing world-frame (x,y)/heading vehicle state and a genuine lane-relative lateral offset d_lat distinct from the longitudinal gap. The author explicitly states 'there is no additional longitudinal component' and declines to define a degenerate/longitudinal-only fallback himself.",
-    "ACI": "Kuang et al. (2015) is paywalled and unreachable in full text. A plausible standard reaction-time constant for one branch of its causal tree was located (lognormal, mean=0.92s, SD=0.28s, Triggs & Harris 1982, used throughout this sub-literature) but is unconfirmed against Kuang's own text, and the tree still needs the LEAD vehicle's kinematics modeled independently of the follower (this pipeline only has the relative/closing projection) plus the following vehicle's own braking-capacity distribution and the tree's full ~8-branch conditional structure, none of which are recoverable regardless of the reaction-time constant.",
-    "SOI": "Ogawa (2007) and Johnsson et al. (2018), both read in full, confirm the 'personal space' buffer is (a) an oriented rectangle along the direction of travel, needing heading (excluded from this data budget), and (b) only has published numeric areas for pedestrians (5.0 m^2) and bicycles (12.8 m^2) in the accessible literature -- no car-scale constant exists to substitute even if the orientation requirement were relaxed to an isotropic circle.",
-    "PF (Potential Functions)": "Wolf & Burdick (2008) -- note: 2008, not 2018 as an earlier pass at this registry stated, a citekey typo traced and corrected -- could not be read in full text (403 from every mirror including the open Caltech repository). Abstract-level evidence across independent secondary sources indicates the vehicle-avoidance potential term depends on relative velocity and surrounding traffic context, not distance alone, undermining a hoped-for pure-distance-decay simplification; the lane-marking/road-geometry potential terms remain unconditionally unavailable regardless. Also worth noting: the Westhofen survey's own authors, in their worked example, independently excluded PF (and SP) as insufficiently validated even with full geometric data available.",
+    "ACI": "Kuang et al.'s original AAP 2015 paper is paywalled, but a companion paper by the same two lead authors (Kuang & Qu 2015, EPPM conference, openly hosted) restates the FULL top-level aggregation math -- the probability tree's combination formula (their eq. 1), the ACI sum (eq. 2), and a time-averaging extension (eq. 3) not even in the Westhofen survey -- plus confirms MADR is drawn from a truncated normal (AASHTO 2004 / Cunto & Saccomanno 2008) rather than a plain normal. What remains genuinely locked behind the paywall: the companion paper explicitly references 'Table 1' for what each of the 4 condition levels / 8 leaf nodes physically means (e.g. which node represents 'lead vehicle brakes and follower fails to react in time'), but does not reprint that table -- so the aggregation MATH is now known, but the domain-specific TREE STRUCTURE is not, and fabricating plausible-sounding leaf-node semantics would misrepresent the metric rather than approximate it. Would need either primary-paper access (confirmed genuinely unreachable via Unpaywall/ResearchGate/institutional repos/citing-paper search) or a caller willing to supply their own tree structure to a generic N-level implementation -- not attempted here since guessing the semantics defeats the purpose of citing Kuang et al. specifically. Reaction time (if you build your own tree): LogNormal(mean=0.92s, SD=0.28s), Triggs & Harris (1982), confirmed used throughout this sub-literature.",
+    "SOI": "Ogawa (2007) and Johnsson et al. (2018), both read in full, confirm the 'personal space' buffer is an oriented rectangle along the direction of travel -- the ORIENTATION half of this is no longer a blocker now that capture_pose provides heading for both agents, but the SIZE half still is: the only published numeric areas in the accessible literature are for pedestrians (5.0 m^2) and bicycles (12.8 m^2), not cars. Fabricating a car-scale personal-space area (e.g. from vehicle footprint * some multiplier) would not be reusing a literature constant, it would be inventing one, so this stays not-applicable rather than shipping an ungrounded threshold.",
     "P-SMH": "Sanchez Morales et al. (2019), read in full, confirms algebraically that a degenerate N=M=1 hypothesis-per-side instantiation collapses the formula to exactly the binary collision indicator (AM), not a meaningful trivial P-SMH -- the metric's entire value-add is the weighted sum over a NONTRIVIAL (N,M>1) hypothesis set, which needs full trajectory generation (two-track ego model, one-track other-agent model, lane-topology-dependent scoring penalties) this pipeline doesn't produce.",
     "P-SRS": "Althoff et al. (2009)'s original PDF is bot-blocked on every mirror, but the survey's formula-level (not just prose) paraphrase, cross-checked against independent secondary sources, confirms the method needs offline-precomputed Markov-chain reachability tables over a discretized, ROAD-RELATIVE position x velocity partition -- genuinely requiring lane/road geometry this pipeline doesn't have, not just an online-computation shortcut.",
-    "a_lat,req / STN / LatJ": "Jansson (2005), read in full, confirms the required-lateral-acceleration formula (Eq. 5.46-5.49) intrinsically needs both vehicles' WIDTHS (the lateral clearance the maneuver must achieve is a function of vehicle geometry, not just capability) plus the other agent's independent lateral position/velocity -- there is no width-free version of a_lat,req itself in the source (only the downstream capability-normalization step, i.e. STN = a_lat,req/a_lat,min, is width-free, but that still needs a_lat,req first). Separately: common.py's action_stats_from_logits() DOES compute a 'steer'/'steer_mag' signal from the policy logits, but rollout.py's readout_out capture map only pulls accel/p_brake/p_yield/gap_press/entropy into the saved pack -- steer was never persisted, so even the ego's OWN lateral effort isn't available today, let alone the other agent's position/width needed for the true formula. If vehicle width/other-agent lateral position were ever added, literature-grounded a_lat,min values from Jansson's own demonstrator: 7.0 m/s^2 (deployed-system bound) or 9.82 m/s^2 (idealized physical limit, ~1g).",
-    "a_req (combined norm)": "downstream of a_lat,req (not applicable, see above) regardless of which of Jansson's three original combination formulas is used (a plain min(), the paper's own sqrt-of-squares joint-optimal solution -- which is itself NOT simply two independent 1D formulas combined post-hoc, per a direct read of Jansson Eq. 5.59-5.61 -- or a friction-ellipse feasibility check). Reporting only the longitudinal term would silently misrepresent whichever of these three the reader assumes is meant, so it is omitted rather than degraded.",
-    "TTS (and TTM's m='steer' case)": "Hillenbrand (2007), read in full, confirms TTS is a genuine 2D circular-arc turning-radius model (needing the ego's minimum turning radius -- itself a function of vehicle geometry and a friction-limited bound -- plus the other agent's lateral offset and both vehicles' width/length), with explicitly NO simplified constant-lateral-clearance fallback anywhere in the source -- the actual model is geometrically more detailed than a clearance heuristic would be, not less. TTB and TTK (TTM's m='brake'/'kickdown' cases) ARE implemented -- see EXACT_METRICS/APPROXIMATE_METRICS.",
+    "LatJ": "needs an EXECUTED lateral-acceleration time series to differentiate into jerk -- distinct from a_lat,req (now available; see APPROXIMATE_METRICS), which is a 'required to avoid collision' threat quantity, not what the vehicle actually did. common.py's action_stats_from_logits() DOES compute a 'steer'/'steer_mag' signal from the policy logits, but rollout.py's readout_out capture map only pulls accel/p_brake/p_yield/gap_press/entropy into the saved pack -- steer was never persisted. Adding a 'steer': 'steer' entry to that dict (and re-running run_ego_readout.sh) would unlock this; not done here since it requires re-collecting rollout data.",
 }

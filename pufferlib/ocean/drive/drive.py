@@ -348,8 +348,11 @@ class Drive(pufferlib.PufferEnv):
         """Get current global state of all active agents.
 
         Returns:
-            dict with keys 'x', 'y', 'heading', 'id', 'speed', containing numpy arrays
-            of shape (num_active_agents,)
+            dict with keys 'x', 'y', 'heading', 'other_id', 'ego_id', 'speed', 'length',
+            'width' containing numpy arrays of shape (num_active_agents, num_partners)
+            (length/width are the nearest-partner's own vehicle dimensions, read directly
+            off its Entity -- not to be confused with get_global_agent_state()'s 'id',
+            which is a different (track-id) numbering than 'other_id' here).
         """
         num_agents = self.num_agents
         num_partners = self.max_partner_objects
@@ -360,6 +363,8 @@ class Drive(pufferlib.PufferEnv):
             "other_id": np.full((num_agents, num_partners), -1, dtype=np.int32),
             "ego_id": np.full((num_agents, ), -1, dtype=np.int32),
             "speed": np.zeros((num_agents, num_partners), dtype=np.float32),
+            "length": np.zeros((num_agents, num_partners), dtype=np.float32),
+            "width": np.zeros((num_agents, num_partners), dtype=np.float32),
         }
 
         binding.vec_get_global_partner_state(
@@ -370,9 +375,65 @@ class Drive(pufferlib.PufferEnv):
             states["other_id"],
             states["ego_id"],
             states["speed"],
+            states["length"],
+            states["width"],
         )
 
         return states
+
+    def get_lane_polylines(self):
+        """Get lane centerline polylines for all scenarios.
+
+        Returns:
+            dict with keys 'x', 'y', 'lengths', 'scenario_id' containing numpy arrays.
+            x, y are flattened point coordinates; lengths indicates points per polyline.
+            Map geometry is static per scenario -- call once after reset, not per step.
+        """
+        num_polylines, total_points = binding.vec_get_lane_counts(self.c_envs)
+
+        polylines = {
+            "x": np.zeros(total_points, dtype=np.float32),
+            "y": np.zeros(total_points, dtype=np.float32),
+            "lengths": np.zeros(num_polylines, dtype=np.int32),
+            "scenario_id": np.zeros(num_polylines, dtype=np.int32),
+        }
+
+        binding.vec_get_lane_polylines(
+            self.c_envs,
+            polylines["x"],
+            polylines["y"],
+            polylines["lengths"],
+            polylines["scenario_id"],
+        )
+
+        return polylines
+
+    def get_crosswalk_polylines(self):
+        """Get crosswalk region polylines for all scenarios.
+
+        Returns:
+            dict with keys 'x', 'y', 'lengths', 'scenario_id' containing numpy arrays.
+            x, y are flattened point coordinates; lengths indicates points per polyline.
+            Map geometry is static per scenario -- call once after reset, not per step.
+        """
+        num_polylines, total_points = binding.vec_get_crosswalk_counts(self.c_envs)
+
+        polylines = {
+            "x": np.zeros(total_points, dtype=np.float32),
+            "y": np.zeros(total_points, dtype=np.float32),
+            "lengths": np.zeros(num_polylines, dtype=np.int32),
+            "scenario_id": np.zeros(num_polylines, dtype=np.int32),
+        }
+
+        binding.vec_get_crosswalk_polylines(
+            self.c_envs,
+            polylines["x"],
+            polylines["y"],
+            polylines["lengths"],
+            polylines["scenario_id"],
+        )
+
+        return polylines
 
     def get_ground_truth_trajectories(self):
         """Get ground truth trajectories for all active agents.
