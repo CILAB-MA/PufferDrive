@@ -312,6 +312,12 @@ class Drive(pufferlib.PufferEnv):
         # print(f"Rewards {self.rewards.max()} {self.rewards.mean()}")
         return (self.observations, self.rewards, self.terminals, self.truncations, info)
 
+    def get_collision_state(self):
+        num_agents = self.num_agents
+        state = np.zeros(num_agents, dtype=np.int32)
+        binding.vec_get_collision_state(self.c_envs, state)
+        return state
+
     def get_global_agent_state(self):
         """Get current global state of all active agents.
 

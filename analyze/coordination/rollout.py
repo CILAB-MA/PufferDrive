@@ -25,7 +25,6 @@ from runtime import (
     safe_close_vecenv,
 )
 
-OBS_COLLISION_IDX = 5
 DT = 0.1
 
 
@@ -123,7 +122,12 @@ def rollout_per_ego(
     accel_s = np.zeros((n_ego, sim_steps), dtype=np.float32)
     approach = np.zeros((n_ego, sim_steps), dtype=bool)
     tight = np.zeros((n_ego, sim_steps), dtype=bool)
-    env_coll = np.zeros((n_ego, sim_steps), dtype=bool)
+    # Two separate collision_state==1/==2 trajectories (see driver.get_collision_state's
+    # docstring) -- NOT the same as the observation's own collapsed collision flag this
+    # used to read, which cannot tell an actual agent collision apart from an offroad
+    # excursion.
+    env_agent_coll = np.zeros((n_ego, sim_steps), dtype=bool)
+    env_offroad = np.zeros((n_ego, sim_steps), dtype=bool)
     prev_xy = np.full((n_ego, 2), np.nan, dtype=np.float64)
 
     if capture_pose:
@@ -273,16 +277,19 @@ def rollout_per_ego(
                 readout_s[out][:, t] = stats[src].index_select(0, ego_t).detach().cpu().numpy()
 
         obs, _, _, _, _ = vecenv.step(action_np)
+        collision_state = driver.get_collision_state()
         for li, g in enumerate(ego_idx):
-            row = obs[int(g)]
-            env_coll[li, t] = row.shape[0] > OBS_COLLISION_IDX and float(row[OBS_COLLISION_IDX]) == 1.0
+            cs = int(collision_state[int(g)])
+            env_agent_coll[li, t] = cs == 1  # VEHICLE_COLLISION (any entity type -- see docstring)
+            env_offroad[li, t] = cs == 2  # OFFROAD
 
     try:
         safe_close_vecenv(vecenv)
     except Exception:
         pass
 
-    collided = np.any(env_coll, axis=1)
+    collided = np.any(env_agent_coll, axis=1)
+    offroad = np.any(env_offroad, axis=1)
     had_approach = np.any(approach, axis=1)
     had_tight = np.any(tight, axis=1)
     resolved = had_approach & (~had_tight)
@@ -328,6 +335,7 @@ def rollout_per_ego(
     pack: dict[str, np.ndarray] = {
         "scene_id": scene_ids.astype(np.int64, copy=False),
         "collided": collided.astype(bool),
+        "offroad": offroad.astype(bool),
         "had_approach": had_approach.astype(bool),
         "had_tight": had_tight.astype(bool),
         "resolved": resolved.astype(bool),

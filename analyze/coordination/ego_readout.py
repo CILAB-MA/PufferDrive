@@ -659,7 +659,7 @@ def main() -> None:
                 print(f"  [{PRETTY[alias]}] {ckpt.name} maps={args.num_maps} capture_readout")
                 by_alias[alias] = rollout_per_ego(
                     ckpt=ckpt, num_maps=args.num_maps, device=args.device,
-                    capture_readout=True, **thr,
+                    capture_readout=True, capture_pose=True, capture_map_geometry=True, **thr,
                 )
                 save_ego_pack(pack_path, by_alias[alias])
             r = by_alias[alias]

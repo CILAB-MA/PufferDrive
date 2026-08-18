@@ -1037,7 +1037,17 @@ def accident_metric(pack: dict[str, np.ndarray]) -> np.ndarray:
     """AM -- Accident Metric [general/implicit, e.g. GIDAS database usage].
 
     AM(Sc) = 0 if no accident happened, 1 otherwise. Exact: this is exactly the pack's own
-    `collided` flag, formalized under its survey name.
+    `collided` flag, formalized under its survey name. FIXED: `collided` used to be read
+    from the observation's own collision flag, which the C sim (drive.h) sets for BOTH an
+    actual agent collision (collision_state==VEHICLE_COLLISION) AND an offroad excursion
+    (collision_state==OFFROAD) -- silently conflating two different failure modes into one
+    "accident" bit. rollout.py now reads driver.get_collision_state() (a new C-exposed
+    getter added specifically for this) and only counts collision_state==VEHICLE_COLLISION
+    as `collided`; the offroad case is tracked separately as the pack's own `offroad` flag
+    instead. Still not vehicle-specific in the sense its C-side name implies: collision_check()
+    (drive.h) does not filter by entity type, so a `collided`==True could be a collision with
+    another vehicle, a pedestrian, or a cyclist -- see NOT_APPLICABLE['TTZ'] for the related
+    finding that this pipeline has no per-agent type signal anywhere.
     """
     return pack["collided"].astype(np.float64)
 
@@ -1520,9 +1530,9 @@ def compute_all_metrics(
         rss_full = rss_full_violation_traj(pack)
         out["RSS_full_violation_frac_approx"] = np.mean(rss_full, axis=1)
 
-    if has_pose(pack) and has_crosswalks(pack):
-        ttz = time_to_zebra_traj(pack)
-        out["TTZ_min_s_approx"] = np.nanmin(ttz, axis=1)
+    # TTZ (Time To Zebra) is intentionally NOT computed here -- see NOT_APPLICABLE['TTZ']:
+    # this pipeline has no pedestrian-presence signal, so it cannot answer the vehicle-
+    # pedestrian conflict question TTZ is actually defined to answer.
 
     if has_pose(pack) and has_dimensions(pack):
         et_scenario, pet_scenario = encroachment_times_traj(pack)
@@ -1577,12 +1587,70 @@ def summarize_metrics(
 
 
 # ============================================================================
+# Direction registry -- for each compute_all_metrics() output column, which way is safer.
+# "down"/"up" mean lower/higher values indicate a SAFER outcome; "context" means the value
+# is descriptive (a timestamp, an observed choice) rather than a safety margin, so no
+# single direction applies; "caveat" means the source itself warns the sign/monotonicity
+# convention needs care (see that metric's own docstring) before reading a raw value as
+# better or worse. Used by criticality_report.py to annotate report.md.
+# ============================================================================
+
+METRIC_DIRECTION: dict[str, str] = {
+    "AM_accident_metric": "down",
+    "DCE_distance_closest_encounter_m": "up",
+    "TTC_min_s": "up",
+    "TTCE_time_to_closest_encounter_s": "context",
+    "HW_mean_m": "up",
+    "THW_mean_s": "up",
+    "TET_tight_s": "down",
+    "TET_approach_s": "down",
+    "TIT_tight_s2": "down",
+    "TIT_approach_s2": "down",
+    # a_long_req is stored <= 0 (0 = no braking needed, more negative = more braking
+    # required) -- so numerically HIGHER (closer to 0) is the safer direction here, the
+    # opposite of most other acceleration-magnitude metrics below.
+    "a_long_req_worst_mps2": "up",
+    "BTN_max": "down",
+    "BTN_frac_unavoidable": "down",
+    "DST_ts0_worst_mps2": "down",
+    "TTB_min_s": "up",
+    "TTK_min_s_approx": "up",
+    "TTR_min_s_approx": "up",
+    "PTTC_min_s_approx": "up",
+    "WTTC_min_s_approx": "up",
+    "PSD_mean": "up",
+    "CPI_approx": "down",
+    "DeltaV_proxy_mps_approx": "down",
+    "RSS_long_violation_frac_approx": "down",
+    # SP's own source uses a sign/monotonicity convention its docstring flags as subtle
+    # ("unsafe-set inequalities stated as >=0 almost everywhere") -- not asserting a
+    # direction without verifying against the original whitepaper.
+    "SP_worst_approx": "caveat",
+    "AGS_accepted_gap_ttc_s_approx": "context",
+    "CS_conflict_severity_approx": "down",
+    "LongJ_policy_proxy_mean_abs_mps3": "down",
+    "TA_PrET_min_s": "up",
+    "SPrET_min_s2": "up",
+    "RSS_full_violation_frac_approx": "down",
+    "ET_s_approx": "up",
+    "PET_s_approx": "up",
+    "PF_mean_approx": "down",
+    "PF_worst_approx": "down",
+    "a_lat_req_worst_mps2_approx": "down",
+    "STN_max_approx": "down",
+    "a_req_combined_worst_mps2_approx": "down",
+    "TTS_min_s_approx": "up",
+    "TTR_full_min_s_approx": "up",
+}
+
+
+# ============================================================================
 # Applicability registry -- what's implemented exactly, what's approximated and how, and
 # what's excluded and why. Printed by criticality_report.py for transparency.
 # ============================================================================
 
 EXACT_METRICS: dict[str, str] = {
-    "AM": "Accident Metric == the pack's own `collided` flag.",
+    "AM": "Accident Metric == the pack's own `collided` flag -- now sourced from driver.get_collision_state() (VEHICLE_COLLISION only), not the observation's collapsed collision bit, which used to double-count offroad excursions as accidents (see accident_metric()'s own docstring, and the pack's separate `offroad` flag).",
     "DCE": "Distance of Closest Encounter == ep_min_dist / nanmin(min_dist_traj).",
     "TTC": "Time To Collision == the simulator's own ttc_traj / ep_min_ttc (already computed by nearest_from_states in rollout.py).",
     "TTCE": "Time To Closest Encounter == argmin(min_dist_traj) * dt.",
@@ -1618,7 +1686,6 @@ APPROXIMATE_METRICS: dict[str, str] = {
     "TTS": "Hillenbrand (2007)'s own approach is a genuine 2D circular-arc turning-radius model solved by nested interval bisection -- not reproduced faithfully. Instead follows the architecturally simpler approach found in the actively-maintained CommonRoad-CriMe reference toolbox's actual solver code (confirmed by reading commonroad_crime/measure/time/tts.py directly): single-level bisection over the maneuver-start offset tau, forward-simulating a constant-lateral-acceleration point-mass steer maneuver against the other agent's constant-velocity path, checked via single-disc (circumscribing-circle) collision rather than CommonRoad-CriMe's own 3-disc chain or Hillenbrand's exact arc geometry. Hand-verified: sane finite TTS for a head-on scenario, correctly -inf when even immediate steering can't avoid collision (verified with deliberately very-wide vehicles), correctly NaN when TTC is undefined, and a clean monotonic trend (narrower vehicles -> larger TTS) across a parameter sweep. TTM's m='steer' case is exactly this. Substantially more expensive to compute than every other metric in this module (a discretized 2D forward-simulation search per (ego, timestep) pair, ~1.85s for a single 91-step episode in testing) -- n_tau/horizon_s/dt_grid are exposed as tunable resolution/runtime knobs.",
     "ET/PET": "unlocked by capture_pose's ego+other position/heading and other_length_traj/ego_length/ego_width/other_width_traj (real dimensions for both agents, both axes). Operationalizes the conflict area (CA) as each agent's own ORIENTED RECTANGLE (length x width, at its own per-step heading) sweeping through the predicted path-crossing point -- itself computed by reusing the already-validated constant-velocity crossing solve from TA/PrET (_crossing_point_traj), anchored at the timestep within each other_id-stable window whose predicted crossing time is smallest-but-still-nonnegative (closest to, but not after, the event -- the forward-only t>=0 constraint means the raw prediction goes undefined once a crossing has passed, which an earlier draft of this function got wrong by anchoring on the window's last timestep instead). UPGRADED from an earlier version that used a circular disc of radius=length/2 (leaving width unused despite being captured) to a proper oriented-rectangle point-containment test -- closer to Laureshyn et al.'s own practical rectangular-footprint refinement of Allen et al.'s definition. Re-verified after the upgrade with the same 3 hand-computed synthetic cases: simultaneous arrival (ET well-defined per agent, PET correctly undefined per Allen et al.'s own assumption -- rectangle ET came out larger than the old disc version, 0.4s vs 0.2s, which is the physically expected direction: a car's own length dominates dwell time when driving straight through a point, which a disc of radius=length/2 under-counts relative to a length-2 rectangle), staggered arrival (matches closed-form expectations), and non-crossing parallel paths (NaN). Scenario-level (one value per ego, not per-step), reporting the most-critical (smallest) ET/PET across all stable-id windows if an ego has more than one. On the one real map available for testing, this pipeline's captured episode happened to produce NaN (no genuine path-crossing detected in that specific rollout, plausible for an interaction dominated by car-following/adjacent-lane geometry rather than intersection-crossing) -- not evidence of a bug, but a reminder that ET/PET's finite-rate will depend heavily on how many genuine crossing conflicts a given map/policy combination produces.",
     "PF (Potential Functions)": "Wolf & Burdick (2008) -- note: 2008, not 2018 as an earlier pass at this registry stated, a citekey typo traced and corrected -- full text obtained on a second attempt (a different, working Caltech repository record for the same paper). Confirmed the vehicle-avoidance potential (U_car) IS velocity-dependent, not distance-only: a Yukawa potential A_car*exp(-alpha*K)/K in a pseudo-distance K, with a rearward 'wedge' behind the obstacle rescaled by xi_m(v)=xi0(v)*exp(-beta*(v-v_other)) -- implemented here using nearest-point-to-rectangle distance (rectangle = the other agent's real length x width) instead of reconstructing the paper's exact triangular wedge polygon (needs figure-level detail beyond the text), and Wolf & Burdick's own Table I values as defaults EXCEPT d0 (referenced in their text as 'max distance at which U_car has influence' but never actually listed in Table I -- 50.0m here is this implementation's own choice). U_lane/U_road need a road-relative lateral coordinate the paper assumes (straight highway); this pipeline's WOMD scenarios include curves/intersections, so these are approximated via signed perpendicular distance to the nearest lane-centerline/road-edge polyline segment instead -- a real deviation from the paper's coordinate frame, not just a missing constant. U_vel's 'x' term is interpreted as cumulative along-path distance since episode start (not raw world (x,y), which would make potential depend on absolute map position). CAVEAT discovered during testing: with Wolf & Burdick's own beta=0.6, the wedge rescaling saturates extremely fast for agents with even moderately different speeds (e.g. a 15 m/s speed differential over 50m already pins K at its numerical floor) -- verified this is the formula's actual documented behavior, not an implementation bug, but it means PF may report near-identical extreme values across many differing scenarios unless retuned for this pipeline's speed range. Also worth noting: the Westhofen survey's own authors, in their worked example, independently excluded PF (and SP) as insufficiently validated even with full geometric data available.",
-    "TTZ": "unlocked by capture_map_geometry's new crosswalk-polyline accessor (verified against a real compiled map: 5 crosswalk polylines / 20 points, coordinate frame confirmed against the existing road-edge getter). Solved as ray-vs-polyline-segment intersection under constant-velocity extrapolation (ego's current heading+speed) -- hand-verified with straight-ahead, behind, missed-to-the-side, and diagonal-approach test cases, all matching closed-form expectations exactly. Approximate rather than exact because crosswalks are treated as boundary polylines (not the paper's abstract 'position') and the constant-velocity model is the same simplification used elsewhere (TA/PrET, TTB, ...) rather than a full trajectory predictor. Still genuinely vehicle-only: this pipeline has no VRU/pedestrian-presence signal, so TTZ here answers 'when would the ego geometrically reach the crosswalk', not 'is a pedestrian there' -- pair with an external pedestrian-presence source if you need the paper's full VRU-conflict framing.",
 }
 
 NOT_APPLICABLE: dict[str, str] = {
@@ -1630,4 +1697,5 @@ NOT_APPLICABLE: dict[str, str] = {
     "P-SMH": "Sanchez Morales et al. (2019), read in full, confirms algebraically that a degenerate N=M=1 hypothesis-per-side instantiation collapses the formula to exactly the binary collision indicator (AM), not a meaningful trivial P-SMH -- the metric's entire value-add is the weighted sum over a NONTRIVIAL (N,M>1) hypothesis set, which needs full trajectory generation (two-track ego model, one-track other-agent model, lane-topology-dependent scoring penalties) this pipeline doesn't produce.",
     "P-SRS": "Althoff et al. (2009)'s original PDF is bot-blocked on every mirror, but the survey's formula-level (not just prose) paraphrase, cross-checked against independent secondary sources, confirms the method needs offline-precomputed Markov-chain reachability tables over a discretized, ROAD-RELATIVE position x velocity partition -- genuinely requiring lane/road geometry this pipeline doesn't have, not just an online-computation shortcut.",
     "LatJ": "needs an EXECUTED lateral-acceleration time series to differentiate into jerk -- distinct from a_lat,req (now available; see APPROXIMATE_METRICS), which is a 'required to avoid collision' threat quantity, not what the vehicle actually did. common.py's action_stats_from_logits() DOES compute a 'steer'/'steer_mag' signal from the policy logits, but rollout.py's readout_out capture map only pulls accel/p_brake/p_yield/gap_press/entropy into the saved pack -- steer was never persisted. Adding a 'steer': 'steer' entry to that dict (and re-running run_ego_readout.sh) would unlock this; not done here since it requires re-collecting rollout data.",
+    "TTZ": "DOWNGRADED from APPROXIMATE after auditing this pipeline's agent-type coverage: TTZ's own definition [Varhelyi 1998] is a vehicle-PEDESTRIAN conflict metric, but this pipeline cannot tell whether the ego's tracked 'nearest other agent' -- or anyone else near a crosswalk -- is actually a pedestrian. Confirmed by reading the C simulator directly: init_mode='create_all_valid' (drive.ini) does spawn PEDESTRIAN/CYCLIST entities alongside VEHICLE ones (drive.h's set_active_agents()), and the nearest-partner search (c_get_partner_gloabl_state) does not filter by entity type -- but the Python-exposed get_global_partner_state() returns only x/y/heading/speed/length/width, no type/is_vehicle field (confirmed directly in drive.py), so there is no VRU-presence signal anywhere in the captured pack. What the old implementation computed -- 'when does the ego's own extrapolated path geometrically reach a crosswalk polyline' -- answers a materially different question than the source metric (crosswalk presence, not pedestrian conflict), so it is withdrawn from the report rather than left mislabeled as an approximation of Varhelyi's metric. time_to_zebra_traj()/has_crosswalks() are left in criticality_metrics.py (not deleted, just no longer called from compute_all_metrics) for reuse if a pedestrian-presence signal is added later -- see the 'nearest-partner is agent-type-blind' finding for the broader fix (a partner 'type' field would need adding to c_get_partner_gloabl_state, then threading through drive.py/rollout.py/nearest_from_states_with_pose).",
 }

@@ -833,6 +833,34 @@ static PyObject *vec_get_global_partner_state(PyObject *self, PyObject *args) {
     Py_RETURN_NONE;
 }
 
+static PyObject *vec_get_collision_state(PyObject *self, PyObject *args) {
+    if (PyTuple_Size(args) != 2) {
+        PyErr_SetString(PyExc_TypeError, "vec_get_collision_state requires 2 arguments");
+        return NULL;
+    }
+
+    VecEnv *vec = unpack_vecenv(args);
+    if (!vec) {
+        return NULL;
+    }
+
+    PyObject *state_arr = PyTuple_GetItem(args, 1);
+    if (!PyArray_Check(state_arr)) {
+        PyErr_SetString(PyExc_TypeError, "state array must be a NumPy array");
+        return NULL;
+    }
+    int *state_base = (int *)PyArray_DATA((PyArrayObject *)state_arr);
+
+    int offset = 0;
+    for (int i = 0; i < vec->num_envs; i++) {
+        Drive *drive = (Drive *)vec->envs[i];
+        c_get_collision_state(drive, &state_base[offset]);
+        offset += drive->active_agent_count;
+    }
+
+    Py_RETURN_NONE;
+}
+
 static PyObject *get_global_agent_state(PyObject *self, PyObject *args) {
     if (PyTuple_Size(args) != 7) {
         PyErr_SetString(PyExc_TypeError, "get_global_agent_state requires 7 arguments");
@@ -1251,6 +1279,8 @@ static PyMethodDef methods[] = {
     {"vec_render", vec_render, METH_VARARGS, "Render the vector of environments"},
     {"vec_close", vec_close, METH_VARARGS, "Close the vector of environments"},
     {"shared", (PyCFunction)my_shared, METH_VARARGS | METH_KEYWORDS, "Shared state"},
+    {"vec_get_collision_state", vec_get_collision_state, METH_VARARGS,
+     "Get per-agent collision_state (0=none, 1=vehicle collision, 2=offroad) from vectorized env"},
     {"get_global_agent_state", get_global_agent_state, METH_VARARGS, "Get global agent state"},
     {"vec_get_global_agent_state", vec_get_global_agent_state, METH_VARARGS, "Get agent state from vectorized env"},
     {"get_global_partner_state", get_global_partner_state, METH_VARARGS, "Get global parnter state"},

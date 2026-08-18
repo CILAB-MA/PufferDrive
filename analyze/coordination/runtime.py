@@ -190,10 +190,21 @@ def build_human_replay_drive_args(
     finally:
         sys.argv = saved_argv
 
+    if map_start != 0:
+        # Drive.__init__ (pufferlib/ocean/drive/drive.py) has no map_start parameter, and
+        # the C binding's map_idx (binding.c) always starts at 0 -- there is no native
+        # starting-offset concept to forward this to. Fail loudly rather than silently
+        # ignoring the requested shard offset (mechanism.py's sharding callers need this
+        # implemented, e.g. via a C-side offset or a map_dir subset, before map_start != 0
+        # can work).
+        raise NotImplementedError(
+            f"map_start={map_start} requested, but the Drive env has no starting-map-offset "
+            "support (see binding.c's map_idx). Only map_start=0 works today."
+        )
+
     map_section = args.get(data_mode) or args["eval"]
     args["env"]["map_dir"] = map_section["map_dir"]
     args["env"]["num_maps"] = num_maps
-    args["env"]["map_start"] = int(map_start)
     args["env"]["sequential_map_sampling"] = True
     args["env"]["episode_length"] = 91
     args["env"]["termination_mode"] = 0

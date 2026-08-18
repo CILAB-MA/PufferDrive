@@ -34,6 +34,7 @@ from common import ORDER, PRETTY, aggregate_numeric_across_seeds, jsonable
 from criticality_metrics import (
     APPROXIMATE_METRICS,
     EXACT_METRICS,
+    METRIC_DIRECTION,
     NOT_APPLICABLE,
     compute_all_metrics,
     has_readout,
@@ -41,6 +42,8 @@ from criticality_metrics import (
     monte_carlo_collision_probability,
     summarize_metrics,
 )
+
+_DIRECTION_SYMBOL = {"down": "↓", "up": "↑", "context": "–", "caveat": "‼"}
 
 _SEED_RE = re.compile(r"^seed(\d+)_(.+)\.npz$")
 
@@ -127,6 +130,16 @@ def render_markdown(sources: list[dict[str, Any]]) -> str:
         f"`criticality_metrics.NOT_APPLICABLE`)."
     )
     lines.append("")
+    lines.append(
+        "**Direction legend** (appended to each metric name below): "
+        "↓ lower is safer/better -- "
+        "↑ higher is safer/better -- "
+        "– descriptive only, no safety direction (e.g. a timestamp) -- "
+        "‼ sign/monotonicity convention needs care, see the metric's own docstring in "
+        "`criticality_metrics.py` before reading a raw value as better or worse "
+        "(see `criticality_metrics.METRIC_DIRECTION`)."
+    )
+    lines.append("")
 
     for src in sources:
         lines.append(f"## {src['label']} ({src['pack_dir']})")
@@ -146,7 +159,7 @@ def render_markdown(sources: list[dict[str, Any]]) -> str:
             "collide, per map, averaged over maps):"
         )
         lines.append("")
-        lines.append("| Method | P-MC |")
+        lines.append("| Method | P-MC ↓ |")
         lines.append("|---|---|")
         for a in aliases:
             mc = by_method[a]["monte_carlo_collision_probability"]["overall_mean"]
@@ -166,7 +179,8 @@ def render_markdown(sources: list[dict[str, Any]]) -> str:
         lines.append(header)
         lines.append(sep)
         for k in all_metric_names:
-            row = [k]
+            symbol = _DIRECTION_SYMBOL.get(METRIC_DIRECTION.get(k, ""), "")
+            row = [f"{k} {symbol}".rstrip()]
             for a in aliases:
                 m = by_method[a]["metrics"].get(k)
                 row.append(_fmt(m["mean"]) if m else "--")
