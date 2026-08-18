@@ -671,10 +671,12 @@ static PyObject *vec_log(PyObject *self, PyObject *args) {
 
     float n = aggregate.n;
     float ego_n = aggregate.ego_n;
-    // Average across agents
+    // Average across agents. Ego fields stay 0 when no ego was logged (do not divide by 0 → NaN).
     for (int i = 0; i < num_keys; i++) {
         if (i >= first_one_index) {
-            ((float *)&aggregate)[i] /= ego_n;
+            if (ego_n >= 1.0f) {
+                ((float *)&aggregate)[i] /= ego_n;
+            }
             continue;
         }
         ((float *)&aggregate)[i] /= n;

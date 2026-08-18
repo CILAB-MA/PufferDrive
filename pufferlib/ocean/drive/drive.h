@@ -405,7 +405,9 @@ void add_log(Drive *env) {
         // ego_local_indices from Python when num_ego_local > 0; legacy i==0 only when
         // num_ego > 0 but ego_local was not passed (old single-ego setups). When num_ego == 0
         // (PBT env with no ego in this map), do not count local 0 as ego.
+        // CONTROL_SDC_ONLY (human log-replay): SDC is always local 0 and is the ego.
         if ((env->num_ego_local > 0 && is_ego_local(env, i)) ||
+            (env->num_ego_local == 0 && env->control_mode == CONTROL_SDC_ONLY && i == 0) ||
             (env->num_ego_local == 0 && env->num_ego > 0 && i == 0)) {
             env->log.ego_score += (frac_goal_reached > threshold && !collision_occurred) ? 1.0f : 0.0f;
             env->log.ego_offroad_rate += offroad;
