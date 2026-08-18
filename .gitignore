@@ -192,3 +192,7 @@ docs/book/*
 !docs/book/assets/
 
 toy_population_outputs
+
+# Host-local data for analyze/coordination (checkpoints, converted map binaries, raw
+# validation JSON) -- never meant to be committed, kept out of the repo entirely.
+puffer_data/

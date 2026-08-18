@@ -110,6 +110,68 @@ def accel_from_actions(action_np: np.ndarray) -> np.ndarray:
     return ACCEL_VALUES_NP[accel_idx]
 
 
+def _nearest_from_states_full(
+    ego_xy: np.ndarray,
+    ego_heading: float,
+    ego_speed: float,
+    other_xy: np.ndarray,
+    other_heading: np.ndarray,
+    other_speed: np.ndarray,
+    other_id: np.ndarray,
+    other_length: np.ndarray | None = None,
+    other_width: np.ndarray | None = None,
+) -> tuple[float, float, float, float, float, float, int, float, float, float]:
+    """Shared implementation: nearest-partner kinematics plus that partner's own pose,
+    identity, speed, and dimensions.
+
+    Returns (distance, closing_speed, ttc, other_x, other_y, other_heading, other_id,
+    other_speed_scalar, other_length, other_width). The pose/speed/dims fields are NaN
+    (id -1) when there is no valid partner, or when other_length/other_width are not
+    passed in (older call sites -- kept optional for backward compatibility). IMPORTANT:
+    "nearest" is recomputed independently at every call/timestep -- the returned other_id
+    can (and does, near crossovers -- confirmed empirically: ~3% of step-to-step
+    transitions in a real rollout) refer to a DIFFERENT physical agent from one timestep
+    to the next. Any downstream use that needs a single coherent trajectory (e.g.
+    computing when a specific other vehicle enters/exits a region, or projecting its
+    constant-velocity path for PrET/TA) MUST check that other_id stays constant across
+    the window being analyzed before treating a run of (other_x, other_y, other_heading,
+    other_speed_scalar) values as one agent's path.
+
+    other_length/other_width, when passed, come directly from
+    driver.get_global_partner_state()'s own 'length'/'width' fields (confirmed present
+    and populated with real vehicle dimensions against a compiled env -- see
+    c_get_partner_gloabl_state in drive.h) -- these are read from the SAME Entity as
+    other_x/other_y/other_heading/other_speed, so there is no id-matching ambiguity (this
+    supersedes an earlier note in this docstring that dimensions were unavailable without
+    a dedicated entity-index accessor; that accessor turned out to be a two-line addition
+    to the existing partner-state loop, not a new lookup mechanism).
+    """
+    valid = other_id >= 0
+    if not np.any(valid):
+        nan = float("nan")
+        return nan, 0.0, nan, nan, nan, nan, -1, nan, nan, nan
+    rel = other_xy[valid] - ego_xy[None, :]
+    dist = np.linalg.norm(rel, axis=-1)
+    j = int(np.argmin(dist))
+    d = float(dist[j])
+    other_x = float(other_xy[valid][j, 0])
+    other_y = float(other_xy[valid][j, 1])
+    oh = float(other_heading[valid][j])
+    oid = int(other_id[valid][j])
+    osp = float(other_speed[valid][j])
+    olen = float(other_length[valid][j]) if other_length is not None else float("nan")
+    owid = float(other_width[valid][j]) if other_width is not None else float("nan")
+    if d < 1e-3:
+        return d, 0.0, 0.0, other_x, other_y, oh, oid, osp, olen, owid
+    unit = rel[j] / d
+    eh = float(ego_heading)
+    ev = np.array([np.cos(eh), np.sin(eh)], dtype=np.float64) * float(ego_speed)
+    ov = np.array([np.cos(oh), np.sin(oh)], dtype=np.float64) * osp
+    closing = float(-np.dot(ov - ev, unit))
+    ttc = d / closing if closing > 0.1 else float("nan")
+    return d, closing, ttc, other_x, other_y, oh, oid, osp, olen, owid
+
+
 def nearest_from_states(
     ego_xy: np.ndarray,
     ego_heading: float,
@@ -119,23 +181,42 @@ def nearest_from_states(
     other_speed: np.ndarray,
     other_id: np.ndarray,
 ) -> tuple[float, float, float]:
-    valid = other_id >= 0
-    if not np.any(valid):
-        return float("nan"), 0.0, float("nan")
-    rel = other_xy[valid] - ego_xy[None, :]
-    dist = np.linalg.norm(rel, axis=-1)
-    j = int(np.argmin(dist))
-    d = float(dist[j])
-    if d < 1e-3:
-        return d, 0.0, 0.0
-    unit = rel[j] / d
-    eh = float(ego_heading)
-    oh = float(other_heading[valid][j])
-    ev = np.array([np.cos(eh), np.sin(eh)], dtype=np.float64) * float(ego_speed)
-    ov = np.array([np.cos(oh), np.sin(oh)], dtype=np.float64) * float(other_speed[valid][j])
-    closing = float(-np.dot(ov - ev, unit))
-    ttc = d / closing if closing > 0.1 else float("nan")
+    d, closing, ttc, *_rest = _nearest_from_states_full(
+        ego_xy, ego_heading, ego_speed, other_xy, other_heading, other_speed, other_id
+    )
     return d, closing, ttc
+
+
+def nearest_from_states_with_pose(
+    ego_xy: np.ndarray,
+    ego_heading: float,
+    ego_speed: float,
+    other_xy: np.ndarray,
+    other_heading: np.ndarray,
+    other_speed: np.ndarray,
+    other_id: np.ndarray,
+    other_length: np.ndarray | None = None,
+    other_width: np.ndarray | None = None,
+) -> tuple[float, float, float, float, float, float, int, float, float, float]:
+    """Same as nearest_from_states, plus the nearest partner's own (x, y, heading, id,
+    speed, length, width) -- used when capturing pose for geometry-aware analysis (see
+    rollout_per_ego's capture_pose flag). Pass other_length/other_width from
+    partner_state['length']/['width'] to also get real vehicle dimensions (added
+    together with lane/crosswalk map-geometry capture; see
+    Drive.get_lane_polylines()/get_crosswalk_polylines()). See
+    _nearest_from_states_full's docstring for the identity-continuity caveat on
+    other_id."""
+    return _nearest_from_states_full(
+        ego_xy,
+        ego_heading,
+        ego_speed,
+        other_xy,
+        other_heading,
+        other_speed,
+        other_id,
+        other_length,
+        other_width,
+    )
 
 
 def action_stats_from_logits(actions) -> dict[str, torch.Tensor]:

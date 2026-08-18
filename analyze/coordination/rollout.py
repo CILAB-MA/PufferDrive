@@ -8,7 +8,13 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from common import DEFAULT_THRESHOLDS, accel_from_actions, action_stats_from_logits, nearest_from_states
+from common import (
+    DEFAULT_THRESHOLDS,
+    accel_from_actions,
+    action_stats_from_logits,
+    nearest_from_states,
+    nearest_from_states_with_pose,
+)
 from runtime import (
     agent_scenario_ids,
     build_human_replay_drive_args,
@@ -19,7 +25,6 @@ from runtime import (
     safe_close_vecenv,
 )
 
-OBS_COLLISION_IDX = 5
 DT = 0.1
 
 
@@ -44,6 +49,8 @@ def rollout_per_ego(
     hard_brake: float = DEFAULT_THRESHOLDS["hard_brake"],
     capture_readout: bool = False,
     capture_obs: bool = False,
+    capture_pose: bool = False,
+    capture_map_geometry: bool = False,
     brake_logit_bias: float = 0.0,
     bias_onset: np.ndarray | None = None,
     bias_tau_lo: int = -15,
@@ -71,6 +78,30 @@ def rollout_per_ego(
     n_ego = int(ego_idx.size)
     num_agents = int(vecenv.observation_space.shape[0])
 
+    map_geometry: dict[str, np.ndarray] = {}
+    if capture_map_geometry:
+        # Map geometry is static per scenario -- captured once right after reset, NOT
+        # per-step, and MUST happen before the env is closed (safe_close_vecenv below);
+        # calling it after close is a use-after-free (crashed with a segfault when first
+        # tried at the end of this function, hence capturing it here instead).
+        lanes = driver.get_lane_polylines()
+        map_geometry["lane_polyline_x"] = lanes["x"]
+        map_geometry["lane_polyline_y"] = lanes["y"]
+        map_geometry["lane_polyline_lengths"] = lanes["lengths"]
+        map_geometry["lane_polyline_scenario_id"] = lanes["scenario_id"]
+        crosswalks = driver.get_crosswalk_polylines()
+        map_geometry["crosswalk_polyline_x"] = crosswalks["x"]
+        map_geometry["crosswalk_polyline_y"] = crosswalks["y"]
+        map_geometry["crosswalk_polyline_lengths"] = crosswalks["lengths"]
+        map_geometry["crosswalk_polyline_scenario_id"] = crosswalks["scenario_id"]
+        # get_road_edge_polylines() already existed before this session (used elsewhere);
+        # just wasn't captured into analysis packs. Needed for PF's U_road component.
+        edges = driver.get_road_edge_polylines()
+        map_geometry["road_edge_polyline_x"] = edges["x"]
+        map_geometry["road_edge_polyline_y"] = edges["y"]
+        map_geometry["road_edge_polyline_lengths"] = edges["lengths"]
+        map_geometry["road_edge_polyline_scenario_id"] = edges["scenario_id"]
+
     num_agents_global = int(getattr(driver, "num_agents", num_agents))
     try:
         scene_ids = agent_scenario_ids(driver, num_agents_global)[ego_idx]
@@ -91,8 +122,34 @@ def rollout_per_ego(
     accel_s = np.zeros((n_ego, sim_steps), dtype=np.float32)
     approach = np.zeros((n_ego, sim_steps), dtype=bool)
     tight = np.zeros((n_ego, sim_steps), dtype=bool)
-    env_coll = np.zeros((n_ego, sim_steps), dtype=bool)
+    # Two separate collision_state==1/==2 trajectories (see driver.get_collision_state's
+    # docstring) -- NOT the same as the observation's own collapsed collision flag this
+    # used to read, which cannot tell an actual agent collision apart from an offroad
+    # excursion.
+    env_agent_coll = np.zeros((n_ego, sim_steps), dtype=bool)
+    env_offroad = np.zeros((n_ego, sim_steps), dtype=bool)
     prev_xy = np.full((n_ego, 2), np.nan, dtype=np.float64)
+
+    if capture_pose:
+        ego_x_s = np.full((n_ego, sim_steps), np.nan, dtype=np.float32)
+        ego_y_s = np.full((n_ego, sim_steps), np.nan, dtype=np.float32)
+        ego_heading_s = np.full((n_ego, sim_steps), np.nan, dtype=np.float32)
+        other_x_s = np.full((n_ego, sim_steps), np.nan, dtype=np.float32)
+        other_y_s = np.full((n_ego, sim_steps), np.nan, dtype=np.float32)
+        other_heading_s = np.full((n_ego, sim_steps), np.nan, dtype=np.float32)
+        # Raw entity index of whichever agent was nearest at each step -- "nearest" is
+        # recomputed independently every step, so this can (and does, near crossovers)
+        # switch identity mid-episode. Any metric using other_x/y/heading_traj as a
+        # single coherent trajectory must first check this stays constant over the
+        # window it analyzes.
+        other_id_s = np.full((n_ego, sim_steps), -1, dtype=np.int32)
+        other_speed_s = np.full((n_ego, sim_steps), np.nan, dtype=np.float32)
+        other_length_s = np.full((n_ego, sim_steps), np.nan, dtype=np.float32)
+        other_width_s = np.full((n_ego, sim_steps), np.nan, dtype=np.float32)
+        # Vehicle length/width are static per episode (entity property, not per-step
+        # state) -- captured once, from the first step's agent_state.
+        ego_length = np.full(n_ego, np.nan, dtype=np.float32)
+        ego_width = np.full(n_ego, np.nan, dtype=np.float32)
 
     readout_out = {
         "accel": "exp_accel",
@@ -125,15 +182,52 @@ def rollout_per_ego(
             )
             prev_xy[li] = xy
             speed_s[li, t] = spd
-            d, cl, ttc = nearest_from_states(
-                xy,
-                float(agent_state["heading"][g]),
-                spd,
-                np.stack([partner_state["x"][g], partner_state["y"][g]], axis=-1).astype(np.float64),
-                partner_state["heading"][g],
-                partner_state["speed"][g],
-                partner_state["other_id"][g],
-            )
+            if capture_pose:
+                (
+                    d,
+                    cl,
+                    ttc,
+                    other_x,
+                    other_y,
+                    other_heading,
+                    other_id,
+                    other_speed,
+                    other_length,
+                    other_width,
+                ) = nearest_from_states_with_pose(
+                    xy,
+                    float(agent_state["heading"][g]),
+                    spd,
+                    np.stack([partner_state["x"][g], partner_state["y"][g]], axis=-1).astype(np.float64),
+                    partner_state["heading"][g],
+                    partner_state["speed"][g],
+                    partner_state["other_id"][g],
+                    partner_state["length"][g],
+                    partner_state["width"][g],
+                )
+                ego_x_s[li, t] = xy[0]
+                ego_y_s[li, t] = xy[1]
+                ego_heading_s[li, t] = float(agent_state["heading"][g])
+                other_x_s[li, t] = other_x
+                other_y_s[li, t] = other_y
+                other_heading_s[li, t] = other_heading
+                other_id_s[li, t] = other_id
+                other_speed_s[li, t] = other_speed
+                other_length_s[li, t] = other_length
+                other_width_s[li, t] = other_width
+                if t == 0:
+                    ego_length[li] = float(agent_state["length"][g])
+                    ego_width[li] = float(agent_state["width"][g])
+            else:
+                d, cl, ttc = nearest_from_states(
+                    xy,
+                    float(agent_state["heading"][g]),
+                    spd,
+                    np.stack([partner_state["x"][g], partner_state["y"][g]], axis=-1).astype(np.float64),
+                    partner_state["heading"][g],
+                    partner_state["speed"][g],
+                    partner_state["other_id"][g],
+                )
             min_dist[li, t] = d
             closing_s[li, t] = cl
             ttc_s[li, t] = ttc
@@ -183,16 +277,19 @@ def rollout_per_ego(
                 readout_s[out][:, t] = stats[src].index_select(0, ego_t).detach().cpu().numpy()
 
         obs, _, _, _, _ = vecenv.step(action_np)
+        collision_state = driver.get_collision_state()
         for li, g in enumerate(ego_idx):
-            row = obs[int(g)]
-            env_coll[li, t] = row.shape[0] > OBS_COLLISION_IDX and float(row[OBS_COLLISION_IDX]) == 1.0
+            cs = int(collision_state[int(g)])
+            env_agent_coll[li, t] = cs == 1  # VEHICLE_COLLISION (any entity type -- see docstring)
+            env_offroad[li, t] = cs == 2  # OFFROAD
 
     try:
         safe_close_vecenv(vecenv)
     except Exception:
         pass
 
-    collided = np.any(env_coll, axis=1)
+    collided = np.any(env_agent_coll, axis=1)
+    offroad = np.any(env_offroad, axis=1)
     had_approach = np.any(approach, axis=1)
     had_tight = np.any(tight, axis=1)
     resolved = had_approach & (~had_tight)
@@ -238,6 +335,7 @@ def rollout_per_ego(
     pack: dict[str, np.ndarray] = {
         "scene_id": scene_ids.astype(np.int64, copy=False),
         "collided": collided.astype(bool),
+        "offroad": offroad.astype(bool),
         "had_approach": had_approach.astype(bool),
         "had_tight": had_tight.astype(bool),
         "resolved": resolved.astype(bool),
@@ -257,6 +355,13 @@ def rollout_per_ego(
         pack["ttc_traj"] = ttc_s.astype(np.float32)
         pack["closing_traj"] = closing_s.astype(np.float32)
         pack["speed_traj"] = speed_s.astype(np.float32)
+        # The actually-sampled/executed acceleration -- was already computed every step
+        # (used only for mean_hard_brake below) but never persisted as a trajectory
+        # until now. For dynamics_model="classic" (what this pipeline uses), this is the
+        # real physically-applied longitudinal acceleration, not a policy-expectation
+        # proxy like exp_accel_traj -- use this for LongJ instead of exp_accel_traj when
+        # available (see criticality_metrics.py's longitudinal_jerk_proxy).
+        pack["accel_traj"] = accel_s.astype(np.float32)
         # Guard against silent frozen-ego rollouts (e.g. drive.ini failed → dt=0).
         mean_speed = float(np.nanmean(np.abs(speed_s)))
         if not np.isfinite(mean_speed) or mean_speed < 1e-3:
@@ -267,6 +372,33 @@ def rollout_per_ego(
             )
     if capture_obs and obs_traj is not None:
         pack["obs_traj"] = obs_traj
+
+    if capture_pose:
+        pack["ego_x_traj"] = ego_x_s
+        pack["ego_y_traj"] = ego_y_s
+        pack["ego_heading_traj"] = ego_heading_s
+        pack["ego_length"] = ego_length
+        pack["ego_width"] = ego_width
+        # Nearest-partner pose. NOTE: the partner's own length/width are NOT captured
+        # here -- other_id (see nearest_from_states_with_pose) is a raw simulator
+        # entity index, a different numbering than agent_state's track-id-based "id",
+        # so it cannot be safely matched against get_global_agent_state()'s output to
+        # look up the partner's dimensions. That would need a small dedicated C-side
+        # accessor keyed by entity index (not implemented here).
+        pack["other_x_traj"] = other_x_s
+        pack["other_y_traj"] = other_y_s
+        pack["other_heading_traj"] = other_heading_s
+        pack["other_id_traj"] = other_id_s
+        pack["other_speed_traj"] = other_speed_s
+        pack["other_length_traj"] = other_length_s
+        pack["other_width_traj"] = other_width_s
+
+    if capture_map_geometry:
+        # Flat, NOT ego-indexed (unlike every other pack field): 'lengths'[k] is the
+        # point-count of polyline k, and the corresponding x/y run is the next
+        # lengths[k] entries of the flattened x/y arrays. Captured earlier (right after
+        # reset, before the env closes) -- see map_geometry above.
+        pack.update(map_geometry)
 
     if capture_readout:
         for key in readout_out.values():
