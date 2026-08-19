@@ -942,8 +942,9 @@ class Drive_PBT(pufferlib.PufferEnv):
         """Get current global state of all active agents.
 
         Returns:
-            dict with keys 'x', 'y', 'heading', 'id', 'speed', containing numpy arrays
-            of shape (num_active_agents,)
+            dict with keys 'x', 'y', 'heading', 'other_id', 'ego_id', 'speed', 'length',
+            'width' containing numpy arrays of shape (num_agents, num_partners)
+            (ego_id is shape (num_agents,)).
         """
         num_agents = self.num_agents
         num_partners = self.max_partner_objects
@@ -954,6 +955,8 @@ class Drive_PBT(pufferlib.PufferEnv):
             "other_id": np.full((num_agents, num_partners), -1, dtype=np.int32),
             "ego_id": np.full((num_agents, ), -1, dtype=np.int32),
             "speed": np.zeros((num_agents, num_partners), dtype=np.float32),
+            "length": np.zeros((num_agents, num_partners), dtype=np.float32),
+            "width": np.zeros((num_agents, num_partners), dtype=np.float32),
         }
 
         binding.vec_get_global_partner_state(
@@ -964,6 +967,8 @@ class Drive_PBT(pufferlib.PufferEnv):
             states["other_id"],
             states["ego_id"],
             states["speed"],
+            states["length"],
+            states["width"],
         )
 
         return states
