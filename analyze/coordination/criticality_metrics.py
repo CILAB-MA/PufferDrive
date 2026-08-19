@@ -792,14 +792,45 @@ def weibull_gap_acceptance_probability(gap: np.ndarray, *, alpha: float, beta: f
 # ============================================================================
 
 
+def _footprint_mass_ratio(pack: dict[str, np.ndarray], i: int, t: int) -> float:
+    """m2/(m1+m2) proxy from vehicle footprint area (length x width), used by delta_v_proxy
+    and conflict_severity_at_onset in place of an unmeasured true mass ratio. No mass data
+    exists anywhere in this pipeline (the simulator is a pure kinematic bicycle model with
+    no mass/inertia field -- confirmed by reading the C Entity struct directly), but
+    length/width ARE captured per-agent via capture_pose. Assuming equal areal density
+    across agents, the density term cancels in the ratio: m2/(m1+m2) = (rho*A2)/(rho*A1 +
+    rho*A2) = A2/(A1+A2). This is still an approximation (real vehicles aren't uniform-
+    density flat plates), but it at least differentiates a truck-sized encounter from a
+    compact-car one, unlike the flat 0.5/0.5 split it replaces. Falls back to 0.5 when
+    per-agent dimensions aren't captured (scalar-only packs from run_coordination.sh) or
+    are non-finite/non-positive at this step.
+    """
+    if not has_dimensions(pack):
+        return 0.5
+    el = pack["ego_length"][i]
+    ew = pack["ego_width"][i]
+    ol = pack["other_length_traj"][i, t]
+    ow = pack["other_width_traj"][i, t]
+    if not (np.isfinite(el) and np.isfinite(ew) and np.isfinite(ol) and np.isfinite(ow)):
+        return 0.5
+    area_ego = float(el) * float(ew)
+    area_other = float(ol) * float(ow)
+    total = area_ego + area_other
+    if total <= 0:
+        return 0.5
+    return area_other / total
+
+
 def delta_v_proxy(pack: dict[str, np.ndarray]) -> np.ndarray:
     """Delta-v -- [Gabauer2006; Carlson1979]. APPROXIMATE (see
     APPROXIMATE_METRICS['Delta-v']).
 
     Two-actor predictive formula: Delta-v(A1,A2,t) = m2/(m1+m2) * ||v2(t)-v1(t)||. With no
-    mass data, we assume equal mass (weight 0.5) and evaluate the closing speed at the
-    timestep of closest approach (TTCE) as a stand-in for ||v2-v1|| at the moment that
-    matters most -- not a physically measured post-collision speed change.
+    mass data, m2/(m1+m2) is approximated by _footprint_mass_ratio() (vehicle footprint
+    area, equal-areal-density assumption -- falls back to equal mass/0.5 when dimensions
+    aren't captured), and the closing speed at the timestep of closest approach (TTCE) is
+    used as a stand-in for ||v2-v1|| at the moment that matters most -- not a physically
+    measured post-collision speed change.
     """
     d = pack["min_dist_traj"]
     cl = pack["closing_traj"]
@@ -812,7 +843,7 @@ def delta_v_proxy(pack: dict[str, np.ndarray]) -> np.ndarray:
         j = int(np.nanargmin(row))
         c = cl[i, j]
         if np.isfinite(c):
-            out[i] = 0.5 * abs(float(c))
+            out[i] = _footprint_mass_ratio(pack, i, j) * abs(float(c))
     return out
 
 
@@ -829,12 +860,13 @@ def conflict_severity_at_onset(pack: dict[str, np.ndarray]) -> np.ndarray:
     Traffic Conflicts Technique manual, which underlies this literature, defines its
     analogous severity moment identically: "at the moment when one of the road users start
     taking an evasive action." This pipeline already detects such an onset causally
-    (tight_onset), so CS is evaluated the instant it fires: Delta_v ~ 0.5*|closing| at
-    onset (equal-mass convention, same as delta_v_proxy), TTA ~ ttc_traj at onset, and the
-    ego's own realized deceleration a1 from a one-step finite difference of speed_traj
-    (more physically grounded than the policy's expected-acceleration proxy used
-    elsewhere, since this evaluates a single known instant rather than averaging a jerk
-    trajectory).
+    (tight_onset), so CS is evaluated the instant it fires: Delta_v ~ m2/(m1+m2)*|closing|
+    at onset, TTA ~ ttc_traj at onset, and the ego's own realized deceleration a1 from a
+    one-step finite difference of speed_traj (more physically grounded than the policy's
+    expected-acceleration proxy used elsewhere, since this evaluates a single known instant
+    rather than averaging a jerk trajectory). m2/(m1+m2) comes from _footprint_mass_ratio()
+    (vehicle footprint area, equal-areal-density assumption -- falls back to equal mass/0.5
+    when dimensions aren't captured, same convention as delta_v_proxy).
     """
     onset = pack["tight_onset"]
     speed = pack["speed_traj"]
@@ -850,9 +882,10 @@ def conflict_severity_at_onset(pack: dict[str, np.ndarray]) -> np.ndarray:
         tta = ttc[i, e]
         if not (np.isfinite(cl) and np.isfinite(tta)):
             continue
-        dv = 0.5 * abs(float(cl))
+        mass_ratio = _footprint_mass_ratio(pack, i, e)
+        dv = mass_ratio * abs(float(cl))
         a1 = abs(float(speed[i, e] - speed[i, e - 1])) / DT
-        out[i] = dv - tta * a1 * 0.5
+        out[i] = dv - tta * a1 * mass_ratio
     return out
 
 
@@ -1670,7 +1703,7 @@ APPROXIMATE_METRICS: dict[str, str] = {
     "DST (ts>0)": "other agent's longitudinal speed v2 is approximated as ego_speed - closing_speed (assumes the closing-speed axis is approximately the longitudinal/car-following axis). No paper found (Hupfer 1997's original PDF was located but is an unOCR'd scan) recommends a standard non-zero ts value either, so ts remains a caller-supplied choice.",
     "WTTC": "Wachenfeld et al. (2016)'s original is paywalled, but its cited open-source reference implementation (CommonRoad-CriMe) reveals the true formula applies the SAME a_max independently to both vehicles and grows an isotropic 2D disc (from vehicle footprint radii) at combined rate (a1+a2). Under a symmetric-vehicle assumption this validates '2x this env's a_max' as a real consequence of the original's own structure (not an arbitrary multiplier) -- but the isotropic-2D-to-1D-closing-direction collapse and the disc-to-point-vehicle simplification (no footprint radii available) are real, additional departures from the original geometry.",
     "CPI": "Cunto's 2008 PhD thesis (the primary source, read directly) gives the actual normal-distribution parameters for Maximum Available Deceleration Rate (mean=8.45, std=1.40 m/s^2, cars) used here; this is now much closer to the original formula (P(MADR<=DRAC) via the normal CDF) than a prior deterministic-threshold version of this metric, but MADR is still a fleet-wide human-vehicle distribution being applied to an RL policy operating under a fixed, narrower discrete action space, which is itself an approximation of what CPI is meant to model.",
-    "Delta-v": "assumes equal vehicle mass (Shelby 2011's own convention when masses are unavailable, read directly from the original -- not an arbitrary guess) and uses the closing speed at the timestep of minimum distance as a stand-in for pre-impact relative velocity (Shelby 2011 does exactly this substitution -- 'predicted-collision relative velocity' -- when extending Delta-v to non-collision conflicts, confirmed from his original text), not a physically measured post-collision speed change.",
+    "Delta-v": "no real mass data exists anywhere in this pipeline (confirmed by reading the simulator's C Entity struct directly: it's a pure kinematic bicycle model with no mass/inertia field at all, not just an unexposed one). m2/(m1+m2) is approximated via _footprint_mass_ratio() -- vehicle footprint area (length x width, both captured via capture_pose) under an equal-areal-density assumption, so density cancels and only the area ratio remains; falls back to Shelby 2011's own equal-mass convention (0.5) when dimensions aren't captured (scalar-only packs) -- read directly from the original, not an arbitrary guess. Uses the closing speed at the timestep of minimum distance as a stand-in for pre-impact relative velocity (Shelby 2011 does exactly this substitution -- 'predicted-collision relative velocity' -- when extending Delta-v to non-collision conflicts, confirmed from his original text), not a physically measured post-collision speed change.",
     "RSS_long_violation": "scalar-only fallback (works on any pack, even without capture_pose) that implements just the longitudinal half of RSS-DS's simultaneous lateral+longitudinal violation test, and blindly assumes ego=rear/following (it has no real position data to determine true ahead/behind). SUPERSEDED by RSS_full when pose is available (see below) -- kept only for packs from run_coordination.sh's scalar-only rollouts. Uses field-standard constants from Intel's ad-rss-lib reference implementation (rho=1.0s, a_max_accel=3.5, a_min_brake=4.0, a_max_brake=8.0) since the original paper deliberately declines to publish numeric values.",
     "RSS_full": "unlocked by capture_pose (verified end-to-end against a real compiled rollout): now correctly determines true front/rear roles from the measured sign of the longitudinal offset (rather than always assuming ego=rear), and evaluates the lateral axis too (Definition 6/Lemma 4) via projection onto ego's heading-perpendicular direction, using ego's own lateral velocity in its own frame as 0. Passed hand-computable sanity tests (stationary-adjacent-lane no-violation, closing-fast tiny-gap violation, etc.) but is flagged APPROXIMATE rather than EXACT because the lateral formula's v_i +/- rho*a_lat sign convention (which of the two cars is the 'positive-side' one) is this implementation's own resolution of an ambiguity in the source notation, not verified against Intel's ad-rss-lib or another reference implementation. Same field-standard longitudinal constants as RSS_long_violation, plus a_max_accel_lat=0.2, a_min_brake_lat=0.8, mu=0.1m for the lateral axis (also Intel ad-rss-lib defaults).",
     "LongJ": "UPGRADED: rollout.py now persists accel_traj, the actually-sampled/executed per-step acceleration -- this was already computed every step (used only for mean_hard_brake) but discarded before this fix. For dynamics_model='classic' (this pipeline's default) this is the exact physically-applied longitudinal acceleration (confirmed by reading the C integration step directly: `signed_speed += acceleration*dt` uses this exact same decoded value), so LongJ computed from it is EXACT, not approximate. Still listed here (not in EXACT_METRICS) because packs saved before this fix -- or using dynamics_model='jerk', where the C side's own jerk_long field would be the right source instead, not currently exposed -- only have exp_accel_traj (the policy's softmax-expected acceleration), for which LongJ remains a decision-smoothness proxy, not physically realized jerk.",
@@ -1679,7 +1712,7 @@ APPROXIMATE_METRICS: dict[str, str] = {
     "TTK": "UPGRADED: Hillenbrand (2007) confirms the underlying 1D kinematics are identical to TTB, and the direction ambiguity (kickdown only helps when the interacting agent is behind, not ahead) is now RESOLVED when pose is available -- time_to_kickdown_traj projects the other agent's relative position onto the ego's own heading (same technique as RSS_full/a_lat,req) and returns NaN whenever the other agent is genuinely ahead, rather than reporting an unverified value. Hand-tested (other-ahead -> NaN, other-behind -> finite, no-pose -> old unconditional fallback). On the one real episode tested, every interaction happened to have the other agent ahead, so TTK came out entirely NaN for it -- a more honest result than the previous version's misleading finite value for the same data. Still listed as approximate (not exact) because packs without capture_pose fall back to the old direction-unverified computation.",
     "TTR": "compute_all_metrics reports TWO variants. 'TTR_min_s_approx' (cheap, always available on any trajectory pack) = max(TTB, TTK) only, omitting TTS since it's far more expensive to compute (a forward-simulation search, not a closed-form solve) -- provably an underestimate of the true TTR (dropping a max term can only lower it), the safe-biased direction to be wrong in. 'TTR_full_min_s_approx' (only when pose+width are available) = max(TTB, TTK, TTS), the fuller value. Earlier text here claimed TTS was 'not applicable' -- that was true when this note was first written but is now stale; TTS has since been implemented (see its own entry above) and TTR_full uses it. BUG FOUND AND FIXED during verification: both variants originally used np.maximum, which PROPAGATES NaN through the whole max -- since TTK is frequently and legitimately NaN (the direction-gating fix means 'not a valid maneuver here', not 'unknown'), this silently made TTR NaN even when TTB was a perfectly good answer, confirmed on real captured data (TTK all-NaN for one episode's ego made TTR_min_s_approx report NaN instead of falling back to TTB). Switched to np.fmax, which correctly ignores a NaN operand; re-verified TTR_min_s_approx now equals TTB_min_s exactly wherever TTK is NaN.",
     "AGS": "reframed, per Alhajyaseen et al. (2013)'s own univariate cumulative-Weibull gap-acceptance model (confirmed from the original: the function itself takes only gap TIME as input, not the demographic covariates the survey's abstraction implies are required), as a purely temporal quantity -- the realized TTC at the last pre-tight step. A full acceptance-PROBABILITY curve additionally needs alpha/beta parameters fitted to THIS domain; Alhajyaseen's own fitted values are for a pedestrian left-turn scenario and are not reused here as defaults.",
-    "CS (Conflict Severity)": "Bagdadi (2013)'s original text is paywalled and unreachable, but the survey's 'not run-time capable' framing was re-examined: the actual blocker is a PRECONDITION (needing an identified evasive-maneuver onset), not a look-ahead requirement, and this pipeline already detects such an onset causally via tight_onset (paralleling how the Swedish Traffic Conflicts Technique manual itself defines its analogous severity moment). Computed the instant tight_onset fires, using the equal-mass convention and a one-step finite-difference of speed_traj for the ego's realized deceleration (no mass data, and Bagdadi's own numeric CS target value is for his own naturalistic-driving population, not transferable here as a hard threshold).",
+    "CS (Conflict Severity)": "Bagdadi (2013)'s original text is paywalled and unreachable, but the survey's 'not run-time capable' framing was re-examined: the actual blocker is a PRECONDITION (needing an identified evasive-maneuver onset), not a look-ahead requirement, and this pipeline already detects such an onset causally via tight_onset (paralleling how the Swedish Traffic Conflicts Technique manual itself defines its analogous severity moment). Computed the instant tight_onset fires, using a one-step finite-difference of speed_traj for the ego's realized deceleration and m2/(m1+m2) from _footprint_mass_ratio() -- the same footprint-area proxy as Delta-v, falling back to equal-mass (0.5) when dimensions aren't captured -- since no real mass data exists anywhere in this pipeline's simulator. Bagdadi's own numeric CS target value is for his own naturalistic-driving population, not transferable here as a hard threshold.",
     "SP (Safety Potential / SFF)": "implements the NVIDIA whitepaper's own explicitly-labeled single-control-policy 'Implementation Example' (read directly, both the full whitepaper and its plain-language companion doc), not the full general n-actor/arbitrary-control-policy SFF theory (which needs footprints/claimed-set geometry this pipeline doesn't have). t_int is approximated by this pipeline's own TTC (a faithful substitution specifically for the paper's 1D worked case, confirmed against its prose description of that case) and v_other by the same ego_speed-minus-closing-speed approximation used elsewhere; a_min is an implementer's choice by the source's own design (the paper publishes no numeric value), defaulted to this env's own A_MAX for consistency with BTN/DST/TTB.",
     "a_lat,req": "unlocked by capture_pose + capture_map_geometry's incidental partner-width plumbing (both agents' widths verified against a real compiled rollout, ~2.0-2.3m, realistic): Jansson (2005)'s constant-acceleration formula (Eq. 5.46-5.49) implemented directly, using the same heading-perpendicular lateral decomposition already built for RSS_full. UPGRADED: v1,lat (ego's own lateral velocity in its own frame) is now finite-differenced from the ego's own (100%-covered) position trajectory rather than assumed 0 -- confirmed via a straight-line-motion test (recovers the same value as the old v1,lat=0 assumption) and a lateral-drift test (produces a genuinely different, larger value, confirming the signal is live). a2,lat (the other agent's lateral acceleration) remains assumed 0 -- the other agent's position coverage (~1/3 of steps) is too sparse to finite-difference as reliably as ego's. Hand-computed sanity test (head-on, zero lateral offset, known TTC and widths) matched the closed-form expectation exactly. STN = a_lat,req / 7.0 m/s^2 (Jansson's own deployed-demonstrator lateral bound).",
     "a_req (combined norm)": "= sqrt(a_long_req^2 + a_lat_req^2), now computable since both terms are (see a_lat,req above). Per the survey's own attributed (simplified) combination -- Jansson's thesis has two OTHER combination formulas (a plain min() and a coupled friction-ellipse solve) that are not implemented; this is the survey's reading of Jansson, not a literal transcription of his joint-optimal (A_x,A_y) solve (Eq. 5.59-5.61).",
