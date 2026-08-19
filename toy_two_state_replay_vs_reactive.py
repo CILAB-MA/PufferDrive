@@ -63,15 +63,87 @@ STATE_NAMES = ["safe", "risky"]
 
 # Heatmap layout (shared by compute / plot / cache)
 _HEATMAP_MODE_ORDER = ["replay", "reactive"]
-_HEATMAP_METRIC_LAYOUT = [
-    ["safe_pgo", "risky_return_fixed", "risky_collision_fixed"],
-    ["risky_pgo", "risky_return_reactive", "risky_collision_reactive"],
-]
+_HEATMAP_LAYOUTS = {
+    "1x3": [
+        ["risky_pgo", "risky_return_fixed", "risky_collision_fixed"],
+    ],
+    "2x3": [
+        ["safe_pgo", "risky_return_fixed", "risky_collision_fixed"],
+        ["risky_pgo", "risky_return_reactive", "risky_collision_reactive"],
+    ],
+}
+_HEATMAP_COL_GROUP_TITLES = {
+    "1x3": ["P(Go)", "Risky state Return", "Risky state Collision"],
+    "2x3": ["P(Go)", "Risky state Return", "Risky state Collision"],
+}
+DEFAULT_HEATMAP_LAYOUT = "1x3"
+DEFAULT_RISKY_SCALES = (0.10, 0.15, 0.20, 0.25)
 HEATMAP_METRICS_CACHE = "heatmap_metrics_cache.pkl"
 
 
-def _heatmap_metric_order():
-    return [k for row in _HEATMAP_METRIC_LAYOUT for k in row]
+def _heatmap_layout(layout_key):
+    key = str(layout_key).strip().lower()
+    if key not in _HEATMAP_LAYOUTS:
+        raise ValueError(
+            f"Unknown heatmap layout {layout_key!r}. "
+            f"Available: {list(_HEATMAP_LAYOUTS)}"
+        )
+    return _HEATMAP_LAYOUTS[key]
+
+
+def _heatmap_metric_order(layout_key=None):
+    if layout_key is None:
+        keys = []
+        seen = set()
+        for layout in _HEATMAP_LAYOUTS.values():
+            for k in (cell for row in layout for cell in row):
+                if k not in seen:
+                    seen.add(k)
+                    keys.append(k)
+        return keys
+    return [k for row in _heatmap_layout(layout_key) for k in row]
+
+
+def parse_risky_scales(text, scale_steps=11):
+    parts = [x.strip() for x in str(text).split(",") if x.strip()]
+    if parts:
+        return [float(x) for x in parts]
+    n_s = max(2, int(scale_steps))
+    return list(np.linspace(0.0, 1.0, n_s, dtype=np.float64))
+
+
+def select_heatmap_scale_slice(metrics, src_scales, dst_scales, atol=1e-8):
+    """Subset (or linearly interpolate) heatmap metric grids onto ``dst_scales``."""
+    src = np.asarray(src_scales, dtype=np.float64).reshape(-1)
+    dst = np.asarray(dst_scales, dtype=np.float64).reshape(-1)
+    if src.size == 0:
+        raise ValueError("Heatmap cache has no α scales to plot.")
+    idxs = []
+    exact = True
+    for a in dst:
+        hits = np.where(np.isclose(src, a, atol=atol, rtol=0.0))[0]
+        if hits.size == 0:
+            exact = False
+            break
+        idxs.append(int(hits[0]))
+    out = {}
+    if exact:
+        for mode, md in metrics.items():
+            out[mode] = {
+                k: np.ascontiguousarray(np.asarray(v)[:, idxs]) for k, v in md.items()
+            }
+        return out, [float(x) for x in dst], False
+    order = np.argsort(src)
+    src_sorted = src[order]
+    for mode, md in metrics.items():
+        out[mode] = {}
+        for k, v in md.items():
+            arr = np.asarray(v, dtype=np.float64)
+            out[mode][k] = np.stack(
+                [np.interp(dst, src_sorted, arr[i, order]) for i in range(arr.shape[0])],
+                axis=0,
+            )
+    return out, [float(x) for x in dst], True
 
 
 def _family_display_name_plot(name: str) -> str:
@@ -663,7 +735,9 @@ def compute_metric_grouped_heatmaps(cfg, family_names, risky_scales):
     return metrics
 
 
-def plot_metric_grouped_heatmaps_from_metrics(metrics, family_names, risky_scales, out_path):
+def plot_metric_grouped_heatmaps_from_metrics(
+    metrics, family_names, risky_scales, out_path, layout_key=DEFAULT_HEATMAP_LAYOUT
+):
     """Render heatmap PDF from precomputed ``metrics`` (replay minus reactive per cell)."""
     n_rows = len(family_names)
     n_cols = len(risky_scales)
@@ -675,7 +749,19 @@ def plot_metric_grouped_heatmaps_from_metrics(metrics, family_names, risky_scale
     fs_cell = 12
     fs_cbar = 13
 
-    metric_layout = _HEATMAP_METRIC_LAYOUT
+    metric_layout = _heatmap_layout(layout_key)
+    needed = _heatmap_metric_order(layout_key)
+    missing = [
+        k for k in needed
+        if k not in metrics.get("replay", {}) or k not in metrics.get("reactive", {})
+    ]
+    if missing:
+        raise KeyError(
+            f"Heatmap layout {layout_key!r} needs metrics {missing}; "
+            "re-run the full pipeline so heatmap_metrics_cache.pkl has them."
+        )
+    n_plot_rows = len(metric_layout)
+    n_plot_cols = len(metric_layout[0])
     metric_titles = {
         "safe_pgo": r"$P(\mathrm{Go} \mid \mathtt{safe})$",
         "risky_pgo": r"$P(\mathrm{Go} \mid \mathtt{risky})$",
@@ -694,24 +780,25 @@ def plot_metric_grouped_heatmaps_from_metrics(metrics, family_names, risky_scale
         "ytick.labelsize": fs_tick,
     }
     with plt.rc_context(rc):
-        fig = plt.figure(figsize=(16.5, 9.2), constrained_layout=True)
+        fig_h = 5.2 if n_plot_rows == 1 else 9.2
+        fig = plt.figure(figsize=(16.5, fig_h), constrained_layout=True)
         gs = fig.add_gridspec(
-            nrows=2,
-            ncols=6,
-            width_ratios=[1.0, 0.018, 1.0, 0.018, 1.0, 0.018],
+            nrows=n_plot_rows,
+            ncols=2 * n_plot_cols,
+            width_ratios=[1.0, 0.018] * n_plot_cols,
             wspace=0.05,
             hspace=0.09,
         )
-        axes = np.empty((2, 3), dtype=object)
-        cbar_axes = np.empty((2, 3), dtype=object)
-        for r in range(2):
-            for c in range(3):
+        axes = np.empty((n_plot_rows, n_plot_cols), dtype=object)
+        cbar_axes = np.empty((n_plot_rows, n_plot_cols), dtype=object)
+        for r in range(n_plot_rows):
+            for c in range(n_plot_cols):
                 axes[r, c] = fig.add_subplot(gs[r, 2 * c])
                 cbar_axes[r, c] = fig.add_subplot(gs[r, 2 * c + 1])
 
-        col_group_titles = ["P(Go)", "Riksy state Return", "Risky state Collision"]
-        for r in range(2):
-            for c in range(3):
+        col_group_titles = _HEATMAP_COL_GROUP_TITLES.get(str(layout_key).strip().lower(), [])
+        for r in range(n_plot_rows):
+            for c in range(n_plot_cols):
                 metric_key = metric_layout[r][c]
                 ax = axes[r, c]
                 data = metrics["replay"][metric_key] - metrics["reactive"][metric_key]
@@ -750,7 +837,7 @@ def plot_metric_grouped_heatmaps_from_metrics(metrics, family_names, risky_scale
                 else:
                     ax.set_yticklabels([])
                 ax.set_xlabel("α scale", fontsize=fs_axis)
-                if r == 0:
+                if r == 0 and c < len(col_group_titles):
                     ax.text(
                         0.5,
                         1.12,
@@ -805,9 +892,13 @@ def load_heatmap_metrics_cache(output_dir):
         return pickle.load(f)
 
 
-def plot_metric_grouped_heatmaps(cfg, family_names, risky_scales, out_path):
+def plot_metric_grouped_heatmaps(
+    cfg, family_names, risky_scales, out_path, layout_key=DEFAULT_HEATMAP_LAYOUT
+):
     metrics = compute_metric_grouped_heatmaps(cfg, family_names, risky_scales)
-    plot_metric_grouped_heatmaps_from_metrics(metrics, family_names, risky_scales, out_path)
+    plot_metric_grouped_heatmaps_from_metrics(
+        metrics, family_names, risky_scales, out_path, layout_key=layout_key
+    )
     save_heatmap_metrics_cache(cfg.output_dir, family_names, risky_scales, metrics)
 
 
@@ -828,7 +919,12 @@ def _family_order_from_summary(summary_df, requested):
     return seen
 
 
-def regenerate_plots_from_disk(output_dir, families_filter):
+def regenerate_plots_from_disk(
+    output_dir,
+    families_filter,
+    heatmap_layout=DEFAULT_HEATMAP_LAYOUT,
+    risky_scales=None,
+):
     """Rebuild figures from ``summary.csv`` + ``population_diagnostics.csv`` (+ optional heatmap cache)."""
     summary_path = os.path.join(output_dir, "summary.csv")
     pop_path = os.path.join(output_dir, "population_diagnostics.csv")
@@ -861,11 +957,21 @@ def regenerate_plots_from_disk(output_dir, families_filter):
                 "Warning: heatmap cache families differ from summary.csv families; "
                 "heatmap uses cached family order."
             )
+        plot_scales = list(DEFAULT_RISKY_SCALES) if risky_scales is None else list(risky_scales)
+        metrics, plot_scales, interpolated = select_heatmap_scale_slice(
+            cache["metrics"], c_scales, plot_scales
+        )
+        if interpolated:
+            print(
+                "Heatmap α slice interpolated from cache scales "
+                f"{[round(x, 4) for x in c_scales]} -> {[round(x, 4) for x in plot_scales]}"
+            )
         plot_metric_grouped_heatmaps_from_metrics(
-            cache["metrics"],
+            metrics,
             c_families,
-            c_scales,
+            plot_scales,
             os.path.join(output_dir, "policy_metric_heatmaps_family_x_risky_scale.pdf"),
+            layout_key=heatmap_layout,
         )
     else:
         print(
@@ -905,10 +1011,19 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=0.05)
     parser.add_argument("--or-risky-scale", type=float, default=0.60)
     parser.add_argument(
+        "--heatmap-layout",
+        type=str,
+        default=DEFAULT_HEATMAP_LAYOUT,
+        choices=sorted(_HEATMAP_LAYOUTS),
+        help="Heatmap panel grid key: 1x3 (risky P(Go) + non-reactive return/collision) "
+        "or 2x3 (safe/risky P(Go) + fixed/reactive return & collision).",
+    )
+    parser.add_argument(
         "--risky-scales",
         type=str,
-        default="",
+        default=",".join(str(x) for x in DEFAULT_RISKY_SCALES),
         help="Comma-separated α scales for heatmaps (or_safe_scale = or_risky_scale = α). "
+        f"Default: {', '.join(str(x) for x in DEFAULT_RISKY_SCALES)}. "
         "Empty = np.linspace(0,1, --risky-scale-steps).",
     )
     parser.add_argument(
@@ -951,7 +1066,12 @@ def main():
             requested = []
         else:
             requested = [x.strip() for x in args.families.split(",") if x.strip()]
-        regenerate_plots_from_disk(args.output_dir, requested)
+        regenerate_plots_from_disk(
+            args.output_dir,
+            requested,
+            heatmap_layout=args.heatmap_layout,
+            risky_scales=parse_risky_scales(args.risky_scales, args.risky_scale_steps),
+        )
         return
 
     cfg = Config(
@@ -989,12 +1109,7 @@ def main():
     family_names = requested_families
     os.makedirs(cfg.output_dir, exist_ok=True)
 
-    risky_scales = [x.strip() for x in args.risky_scales.split(",") if x.strip()]
-    if risky_scales:
-        risky_scales = [float(x) for x in risky_scales]
-    else:
-        n_s = max(2, int(args.risky_scale_steps))
-        risky_scales = list(np.linspace(0.0, 1.0, n_s, dtype=np.float64))
+    risky_scales = parse_risky_scales(args.risky_scales, args.risky_scale_steps)
 
     # Replay/reactive training + eval
     summary_df = run_or_family_sweep(cfg, family_names)
@@ -1018,6 +1133,7 @@ def main():
         family_names=family_names,
         risky_scales=risky_scales,
         out_path=os.path.join(cfg.output_dir, "policy_metric_heatmaps_family_x_risky_scale.pdf"),
+        layout_key=args.heatmap_layout,
     )
 
     root = os.path.join(cfg.output_dir, "or", "risky_population_family")

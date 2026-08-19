@@ -163,12 +163,12 @@ elif [[ "${STRATEGY}" == "prioritized" ]]; then
   echo "  score_transform=${SCORE_TRANSFORM}"
 fi
 echo "  seeds=${SEED_LIST[*]}"
-echo "  wandb=${WANDB_ENTITY}/${WANDB_PROJECT}  group=${EXP_NAME}-seed-*"
+echo "  wandb=${WANDB_ENTITY}/${WANDB_PROJECT}  group=${EXP_NAME}"
 echo "===================================="
 
 for SEED in "${SEED_LIST[@]}"; do
   echo ""
-  echo ">>> seed=${SEED}  group=${EXP_NAME}-seed-${SEED}"
+  echo ">>> seed=${SEED}  group=${EXP_NAME}"
 
   CMD=(
     puffer train_pbt puffer_drive_pbt
@@ -182,7 +182,7 @@ for SEED in "${SEED_LIST[@]}"; do
     --eval.human-replay-eval True
     --wandb
     --wandb-entity "${WANDB_ENTITY}"
-    --wandb-group "${EXP_NAME}-seed-${SEED}"
+    --wandb-group "${EXP_NAME}"
     --wandb-project "${WANDB_PROJECT}"
   )
 
