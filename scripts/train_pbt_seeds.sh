@@ -7,6 +7,11 @@
 #   MODE=reactive STRATEGY=uniform POP_PATH=/data/puffer/popul_lane_nominal ./scripts/train_pbt_seeds.sh 1
 #   MODE=record STRATEGY=curriculum SEEDS="42" CURRICULUM_STEPS=100 ./scripts/train_pbt_seeds.sh 0
 #
+# Checkpoints land in /data/puffer/experiments/{replay|reactive}_{strategy}_{pop_short}/
+# so analyze/zero_shot.sh can pick them up as FOLDER, e.g.:
+#   TRAIN_MODE=reactive STRATEGY=uniform ./analyze/zero_shot.sh 0
+#   ./analyze/zero_shot.sh 0 replay_prioritized_nominal popul_lane_nominal
+#
 # Env:
 #   MODE              record | reactive          (default: record)
 #   STRATEGY          uniform | prioritized | curriculum  (default: prioritized)
@@ -17,8 +22,10 @@
 #   CURRICULUM_STEPS  default 10000 (curriculum only)
 #   NUM_COMBINATION   default 10
 #   SCORE_TRANSFORM   default rank_low (prioritized only)
-#   DATA_DIR          default /data/puffer/experiments/${EXP_NAME}-wandb/
-#   EXP_NAME          default {mode}-{strategy}-{pop_basename}
+#   DATA_DIR          default /data/puffer/experiments/${EXP_NAME}/
+#   EXP_NAME          default {replay|reactive}_{strategy}_{pop_short}
+#                     pop_short: popul_lane_nominal → nominal, popul_mix → mix
+#                     (same FOLDER as analyze/zero_shot.sh)
 #   SEEDS             default "42 3 11"
 #   WANDB_ENTITY      default cilab-ma
 #   WANDB_PROJECT     default puffer-drive-icra
@@ -32,7 +39,7 @@ CURRICULUM_STEPS="${CURRICULUM_STEPS:-10000}"
 SCORE_TRANSFORM="${SCORE_TRANSFORM:-rank_low}"
 WANDB_ENTITY="${WANDB_ENTITY:-cilab-ma}"
 WANDB_PROJECT="${WANDB_PROJECT:-puffer-drive-icra}"
-read -r -a SEED_LIST <<< "${SEEDS:-42 3 11}"
+read -r -a SEED_LIST <<< "${SEEDS:-42 3 11 0}"
 
 if command -v python >/dev/null 2>&1; then
   PYTHON=python
@@ -71,10 +78,14 @@ else
 fi
 POP_PATH="${POP_PATH%/}"
 POP_NAME="$(basename "${POP_PATH}")"
+# popul_lane_nominal → nominal, popul_mix → mix, popul_curriculum → curriculum
+pop_body="${POP_NAME#popul_}"
+POP_SHORT="${pop_body##*_}"
 TYPES_PATH="${TYPES_PATH:-${POP_PATH}/saved/difficulty_types.npy}"
 
-EXP_NAME="${EXP_NAME:-${MODE}-${STRATEGY}-${POP_NAME}}"
-DATA_DIR="${DATA_DIR:-/data/puffer/experiments/${EXP_NAME}-wandb/}"
+# Match analyze/zero_shot.sh FOLDER: replay_uniform_nominal, reactive_prioritized_mix, ...
+EXP_NAME="${EXP_NAME:-${PBT_MODE}_${STRATEGY}_${POP_SHORT}}"
+DATA_DIR="${DATA_DIR:-/data/puffer/experiments/${EXP_NAME}/}"
 
 # --- preflight ---
 if [[ ! -d "${POP_PATH}" ]]; then
@@ -152,12 +163,12 @@ elif [[ "${STRATEGY}" == "prioritized" ]]; then
   echo "  score_transform=${SCORE_TRANSFORM}"
 fi
 echo "  seeds=${SEED_LIST[*]}"
-echo "  wandb=${WANDB_ENTITY}/${WANDB_PROJECT}  group=${EXP_NAME}-seed-*"
+echo "  wandb=${WANDB_ENTITY}/${WANDB_PROJECT}  group=${EXP_NAME}"
 echo "===================================="
 
 for SEED in "${SEED_LIST[@]}"; do
   echo ""
-  echo ">>> seed=${SEED}  group=${EXP_NAME}-seed-${SEED}"
+  echo ">>> seed=${SEED}  group=${EXP_NAME}"
 
   CMD=(
     puffer train_pbt puffer_drive_pbt
@@ -171,7 +182,7 @@ for SEED in "${SEED_LIST[@]}"; do
     --eval.human-replay-eval True
     --wandb
     --wandb-entity "${WANDB_ENTITY}"
-    --wandb-group "${EXP_NAME}-seed-${SEED}"
+    --wandb-group "${EXP_NAME}"
     --wandb-project "${WANDB_PROJECT}"
   )
 
@@ -189,3 +200,6 @@ done
 echo ""
 echo "All seeds finished. Checkpoints under: ${DATA_DIR}"
 echo "Experiment: ${EXP_NAME}"
+echo "Zero-shot:"
+echo "  TRAIN_MODE=${MODE} EVAL_MODE=both STRATEGY=${STRATEGY} ./analyze/zero_shot.sh ${GPU_ID}"
+echo "  ./analyze/zero_shot.sh ${GPU_ID} ${EXP_NAME} ${POP_NAME}"
