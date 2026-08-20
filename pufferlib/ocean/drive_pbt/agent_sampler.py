@@ -18,6 +18,7 @@ class AgentSampler:
         staleness_transform="power",
         staleness_temperature=1.0,
         num_maps=0, # number of maps
+        rng=None,
     ):
         if strategy not in ("prioritized", "uniform"):
             raise ValueError(
@@ -28,6 +29,7 @@ class AgentSampler:
         self.num_maps = int(num_maps)
         self.strategy = strategy
         self.pbt_mode = pbt_mode
+        self.rng = rng if rng is not None else np.random.default_rng()
 
         self.score_transform = score_transform
         self.temperature = temperature
@@ -177,7 +179,7 @@ class AgentSampler:
             weights = np.ones(self.num_combination, dtype=np.float64) / self.num_combination
 
         weights = weights / weights.sum()  # float 오차로 합이 1이 아닐 경우 재정규화
-        population_idx = np.random.choice(self.num_combination, p=weights)
+        population_idx = self.rng.choice(self.num_combination, p=weights)
 
         return int(population_idx)
 
@@ -186,9 +188,9 @@ class AgentSampler:
         s = weights.sum()
 
         if s == 0: # all seen,
-            population_idx = np.random.randint(self.num_combination)
+            population_idx = self.rng.integers(self.num_combination)
         else:
-            population_idx = np.random.choice(self.num_combination, p=weights / s) 
+            population_idx = self.rng.choice(self.num_combination, p=weights / s)
 
         return int(population_idx)
 
@@ -198,7 +200,9 @@ class AgentSampler:
         sampled_population = np.full(num_sampled_maps, -1, dtype=np.int64)
 
         if self.strategy == "uniform":
-            sampled_population = np.random.randint(0, self.num_combination, num_sampled_maps)
+            sampled_population = self.rng.integers(
+                0, self.num_combination, num_sampled_maps
+            )
             return sampled_population, {}
 
         # "prioritized": select one population member for each unique map.
@@ -212,7 +216,7 @@ class AgentSampler:
         population_per_map = np.full(self.num_maps, -1, dtype=np.int64)
 
         for map_idx in np.unique(map_indices):
-            if global_proportion_seen >= self.rho and np.random.rand() < global_proportion_seen:
+            if global_proportion_seen >= self.rho and self.rng.random() < global_proportion_seen:
                 population_per_map[map_idx] = self._sample_replay_policy(int(map_idx))
             else:
                 population_per_map[map_idx] = self._sample_unseen_policy(int(map_idx))
@@ -278,7 +282,7 @@ class AgentSampler:
                 masked_scores[unseen > 0] = -float("inf")
             max_val = masked_scores.max()
             candidates = np.flatnonzero(np.isclose(masked_scores, max_val)) if np.isfinite(max_val) else np.arange(len(masked_scores))
-            weights[np.random.choice(candidates)] = 1.0
+            weights[self.rng.choice(candidates)] = 1.0
         elif transform == "eps_greedy":
             weights = np.zeros_like(scores)
             weights[scores.argmax()] = 1.0 - self.eps

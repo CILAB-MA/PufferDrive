@@ -128,6 +128,8 @@ class Drive_PBT(pufferlib.PufferEnv):
         scenario_log_path=None,
     ):
         # env
+        self.seed = int(seed)
+        self.rng = np.random.default_rng(self.seed)
         self.dt = dt
         self.render_mode = render_mode
         self.num_maps = num_maps
@@ -243,6 +245,7 @@ class Drive_PBT(pufferlib.PufferEnv):
             goal_behavior=self.goal_behavior,
             goal_target_distance=self.goal_target_distance,
             sequential_map_sampling=sequential_map_sampling,
+            seed=self.seed,
         )
         # agent_offsets[-1] works in both cases, just making it explicit that num_agents is ignored if sequential_map_sampling is True
         self.num_agents = num_agents if not sequential_map_sampling else agent_offsets[-1]
@@ -494,6 +497,7 @@ class Drive_PBT(pufferlib.PufferEnv):
                 curriculum_steps=curriculum_steps,
                 pbt_mode=self.pbt_mode,
                 num_maps=num_maps,
+                rng=self.rng,
             )
         if strategy in ("prioritized", "uniform"):
             return AgentSampler(
@@ -502,6 +506,7 @@ class Drive_PBT(pufferlib.PufferEnv):
                 pbt_mode=self.pbt_mode,
                 score_transform=score_transform,
                 num_maps=num_maps,
+                rng=self.rng,
             )
         raise ValueError(
             f"Unknown pbt.strategy={strategy!r}; "
@@ -768,6 +773,9 @@ class Drive_PBT(pufferlib.PufferEnv):
         self._last_raw_return_metrics = raw_return_metrics
 
     def reset(self, seed=0):
+        self.seed = int(seed)
+        self.rng = np.random.default_rng(self.seed)
+        self.agent_sampler.rng = self.rng
         binding.vec_reset(self.c_envs, seed)
         self.tick = 0
         self._episode_return.fill(0.0)
@@ -812,6 +820,7 @@ class Drive_PBT(pufferlib.PufferEnv):
             partner_resampled = True
             self.tick = 0
             binding.vec_close(self.c_envs)
+            map_seed = int(self.rng.integers(0, 2**31 - 1))
             agent_offsets, map_ids, num_envs, ego_indices = binding.shared(
                 num_agents=self.num_agents,
                 num_maps=self.num_maps,
@@ -826,6 +835,7 @@ class Drive_PBT(pufferlib.PufferEnv):
                 aggressive_speed=self.aggressive_speed,
                 map_dir=self.map_dir,
                 sequential_map_sampling=False,  # Always use random sampling with replacement
+                seed=map_seed,
             )
             self.agent_offsets = agent_offsets
             self.map_ids = map_ids
@@ -839,7 +849,7 @@ class Drive_PBT(pufferlib.PufferEnv):
             self._ego_index_set = set(self.ego_indices.tolist())
 
             env_ids = []
-            seed = np.random.randint(0, 2**32 - 1)
+            seed = int(self.rng.integers(0, 2**31 - 1))
             for i in range(num_envs):
                 cur = agent_offsets[i]
                 nxt = agent_offsets[i + 1]

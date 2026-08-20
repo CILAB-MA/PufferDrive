@@ -56,11 +56,13 @@ class CurriculumSampler:
         pbt_mode="replay",
         num_maps=0,
         strategy="curriculum",
+        rng=None,
     ):
         self.num_combination = int(num_combination)
         self.num_maps = int(num_maps)
         self.pbt_mode = pbt_mode
         self.strategy = strategy
+        self.rng = rng if rng is not None else np.random.default_rng()
         self.curriculum_steps = max(1, int(curriculum_steps))
 
         self.difficulty_types = np.asarray(difficulty_types, dtype=np.int64).reshape(-1)
@@ -108,7 +110,7 @@ class CurriculumSampler:
         num_sampled_maps = map_indices.size
 
         pool, progress, n_unlocked, unlocked_types = self._current_pool()
-        sampled_population = np.random.choice(
+        sampled_population = self.rng.choice(
             pool,
             size=num_sampled_maps,
             replace=True,

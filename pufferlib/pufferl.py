@@ -60,6 +60,23 @@ signal.signal(signal.SIGINT, lambda sig, frame: os._exit(0))
 ADVANTAGE_CUDA = shutil.which("nvcc") is not None
 
 
+def seed_everything(seed):
+    """Seed process-global RNGs before environments and policies are created."""
+    seed = int(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
+def prepare_reproducibility(args):
+    """Use train.seed as the single run seed, including vector construction."""
+    seed = int(args["train"]["seed"])
+    args["vec"]["seed"] = seed
+    seed_everything(seed)
+    return seed
+
+
 class PuffeRL:
     def __init__(self, config, vecenv, policy, logger=None, other_policies=None):
         # Backend perf optimization
@@ -67,11 +84,8 @@ class PuffeRL:
         torch.backends.cudnn.deterministic = config["torch_deterministic"]
         torch.backends.cudnn.benchmark = True
 
-        # Reproducibility
+        # Process RNGs are seeded before environment and policy construction.
         seed = config["seed"]
-        # random.seed(seed)
-        # np.random.seed(seed)
-        # torch.manual_seed(seed)
 
         # Vecenv info
         vecenv.async_reset(seed)
@@ -1368,6 +1382,7 @@ class WandbLogger:
 
 def train(env_name, args=None, vecenv=None, policy=None, logger=None):
     args = args or load_config(env_name)
+    prepare_reproducibility(args)
 
     # Assume TorchRun DDP is used if LOCAL_RANK is set
     if "LOCAL_RANK" in os.environ:
@@ -1436,6 +1451,7 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
 
 def train_pbt(env_name, args=None, vecenv=None, policy=None, logger=None, config=None):
     args = args or load_config(env_name, config_dir=config)
+    prepare_reproducibility(args)
 
     # Assume TorchRun DDP is used if LOCAL_RANK is set
     if "LOCAL_RANK" in os.environ:

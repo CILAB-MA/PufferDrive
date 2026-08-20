@@ -80,8 +80,15 @@ static PyObject *my_shared(PyObject *self, PyObject *args, PyObject *kwargs) {
     int goal_behavior = unpack(kwargs, "goal_behavior");
     float goal_target_distance = unpack(kwargs, "goal_target_distance");
     int sequential_map_sampling = unpack(kwargs, "sequential_map_sampling");
-    clock_gettime(CLOCK_REALTIME, &ts);
-    srand(ts.tv_nsec);
+    PyObject *seed_obj = PyDict_GetItemString(kwargs, "seed");
+    unsigned int shared_rng;
+    if (seed_obj) {
+        shared_rng = (unsigned int)PyLong_AsUnsignedLongMask(seed_obj);
+    } else {
+        // Preserve legacy behavior for non-PBT callers that do not pass a seed.
+        clock_gettime(CLOCK_REALTIME, &ts);
+        shared_rng = (unsigned int)ts.tv_nsec;
+    }
     int total_agent_count = 0;
     int env_count = 0;
     int max_envs = sequential_map_sampling ? num_maps : num_agents;
@@ -94,7 +101,7 @@ static PyObject *my_shared(PyObject *self, PyObject *args, PyObject *kwargs) {
     while (sequential_map_sampling ? map_idx < max_envs : total_agent_count < num_agents && env_count < max_envs) {
         char map_file[512];
         // Take the next map in sequence or a random map
-        int map_id = sequential_map_sampling ? map_idx++ : rand() % num_maps;
+        int map_id = sequential_map_sampling ? map_idx++ : (int)(rand_r(&shared_rng) % (unsigned int)num_maps);
         Drive *env = calloc(1, sizeof(Drive));
         env->init_mode = init_mode;
         env->control_mode = control_mode;
