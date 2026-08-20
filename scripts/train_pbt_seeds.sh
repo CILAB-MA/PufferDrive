@@ -32,6 +32,7 @@
 set -euo pipefail
 
 GPU_ID="${1:-0}"
+SEEDS_ARG="${2:-}"
 MODE="${MODE:-record}"
 STRATEGY="${STRATEGY:-prioritized}"
 NUM_COMBINATION="${NUM_COMBINATION:-10}"
@@ -39,7 +40,7 @@ CURRICULUM_STEPS="${CURRICULUM_STEPS:-10000}"
 SCORE_TRANSFORM="${SCORE_TRANSFORM:-rank_low}"
 WANDB_ENTITY="${WANDB_ENTITY:-cilab-ma}"
 WANDB_PROJECT="${WANDB_PROJECT:-puffer-drive-icra}"
-read -r -a SEED_LIST <<< "${SEEDS:-42 3 11 0}"
+read -r -a SEED_LIST <<< "${SEEDS_ARG:-${SEEDS:-42 3 11 0}}"
 
 if command -v python >/dev/null 2>&1; then
   PYTHON=python
