@@ -10,8 +10,8 @@ import numpy as np
 import torch
 
 METHODS = {
-    "record": "replay_0.25",
-    "reactive": "reactive_0.25",
+    "record": "record-uniform-popul_lane_nominal-wandb",
+    "reactive": "reactive-uniform-popul_lane_nominal-wandb",
     "selfplay": "selfplay",
 }
 PRETTY = {"record": "ReCord", "reactive": "Reactive", "selfplay": "Self-play"}
