@@ -221,7 +221,7 @@ class AgentSampler:
         wandb_metrics = {
             "sampling_summary/global_proportion_seen": global_proportion_seen,
         }
-        wandb_metrics.update(self._sampling_weight_summary_metrics(population_per_map))
+        # wandb_metrics.update(self._sampling_weight_summary_metrics(population_per_map))
 
         self._update_staleness(population_per_map)
         return sampled_population, wandb_metrics
