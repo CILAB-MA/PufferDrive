@@ -60,6 +60,31 @@ signal.signal(signal.SIGINT, lambda sig, frame: os._exit(0))
 ADVANTAGE_CUDA = shutil.which("nvcc") is not None
 
 
+def _make_optimizer(policy, config):
+    """One optimizer per policy (MEP population members must not share optimizers)."""
+    if config["optimizer"] == "adam":
+        return torch.optim.Adam(
+            policy.parameters(),
+            lr=config["learning_rate"],
+            betas=(config["adam_beta1"], config["adam_beta2"]),
+            eps=config["adam_eps"],
+        )
+    if config["optimizer"] == "muon":
+        from heavyball import ForeachMuon
+
+        warnings.filterwarnings(action="ignore", category=UserWarning, module=r"heavyball.*")
+        import heavyball.utils
+
+        heavyball.utils.compile_mode = config["compile_mode"] if config["compile"] else None
+        return ForeachMuon(
+            policy.parameters(),
+            lr=config["learning_rate"],
+            betas=(config["adam_beta1"], config["adam_beta2"]),
+            eps=config["adam_eps"],
+        )
+    raise ValueError(f"Unknown optimizer: {config['optimizer']}")
+
+
 class PuffeRL:
     def __init__(self, config, vecenv, policy, logger=None, other_policies=None):
         # Backend perf optimization
@@ -193,29 +218,7 @@ class PuffeRL:
                 self.other_policies = [torch.compile(other_policy, mode=config["compile_mode"]) for other_policy in self.other_policies]
                 self.other_policies_forward_eval = [torch.compile(other_policy, mode=config["compile_mode"]) for other_policy in self.other_policies]
         # Optimizer
-        if config["optimizer"] == "adam":
-            optimizer = torch.optim.Adam(
-                self.policy.parameters(),
-                lr=config["learning_rate"],
-                betas=(config["adam_beta1"], config["adam_beta2"]),
-                eps=config["adam_eps"],
-            )
-        elif config["optimizer"] == "muon":
-            from heavyball import ForeachMuon
-
-            warnings.filterwarnings(action="ignore", category=UserWarning, module=r"heavyball.*")
-            import heavyball.utils
-
-            heavyball.utils.compile_mode = config["compile_mode"] if config["compile"] else None
-            optimizer = ForeachMuon(
-                self.policy.parameters(),
-                lr=config["learning_rate"],
-                betas=(config["adam_beta1"], config["adam_beta2"]),
-                eps=config["adam_eps"],
-            )
-        else:
-            raise ValueError(f"Unknown optimizer: {config['optimizer']}")
-
+        optimizer = _make_optimizer(self.policy, config)
         self.optimizer = optimizer
 
         # Logging
@@ -241,6 +244,19 @@ class PuffeRL:
         self.vecenv = vecenv
         self.epoch = 0
         self.global_step = 0
+
+        # MEP only for ``generate_population`` (use_mep=True). Off for train / train_pbt.
+        self.use_mep = bool(config.get("use_mep", False))
+        if self.use_mep:
+            self.mep_entropy_coef = float(config.get("mep_entropy_coef", 0.0) or 0.0)
+            self.mep_eps = float(config.get("mep_eps", 1e-8) or 1e-8)
+            self.mep_reference_policies = []
+            self.population_member_id = None
+            self.population_iteration = None
+            self.mep_stats = defaultdict(list)
+            self._mep_ref_lstm_h = None
+            self._mep_ref_lstm_c = None
+
         self.last_log_step = 0
         self.last_log_time = time.time()
         self.start_time = time.time()
@@ -264,6 +280,104 @@ class PuffeRL:
             return 0
 
         return (self.global_step - self.last_log_step) / (time.time() - self.last_log_time)
+
+    def bind_population_member(self, member_id, current_policy, reference_policies, optimizer, scheduler=None):
+        """Switch the trainable policy for one MEP round-robin member (self-play + frozen refs)."""
+        if not self.use_mep:
+            raise pufferlib.APIUsageError("bind_population_member requires config use_mep=True")
+        self.population_member_id = int(member_id)
+        self.uncompiled_policy = current_policy
+        self.policy = current_policy
+        self.mep_reference_policies = list(reference_policies or [])
+        current_policy.train()
+        for p in current_policy.parameters():
+            p.requires_grad_(True)
+        for ref in self.mep_reference_policies:
+            ref.eval()
+            for p in ref.parameters():
+                p.requires_grad_(False)
+        self.optimizer = optimizer
+        if scheduler is not None:
+            self.scheduler = scheduler
+        device = self.config["device"]
+        if self.config.get("use_rnn"):
+            for k in self.lstm_h:
+                self.lstm_h[k] = torch.zeros(self.lstm_h[k].shape, device=device)
+                self.lstm_c[k] = torch.zeros(self.lstm_c[k].shape, device=device)
+        self._mep_ref_lstm_h = None
+        self._mep_ref_lstm_c = None
+
+    def _ensure_mep_ref_lstm(self, device):
+        """Independent detached LSTM states per reference policy (same keys as ego lstm)."""
+        n_refs = len(self.mep_reference_policies)
+        if n_refs == 0 or not self.config.get("use_rnn"):
+            self._mep_ref_lstm_h = []
+            self._mep_ref_lstm_c = []
+            return
+        need_new = (
+            self._mep_ref_lstm_h is None
+            or len(self._mep_ref_lstm_h) != n_refs
+            or any(k not in self._mep_ref_lstm_h[0] for k in self.lstm_h)
+        )
+        if need_new:
+            self._mep_ref_lstm_h = []
+            self._mep_ref_lstm_c = []
+            for _ in range(n_refs):
+                self._mep_ref_lstm_h.append({k: torch.zeros_like(v) for k, v in self.lstm_h.items()})
+                self._mep_ref_lstm_c.append({k: torch.zeros_like(v) for k, v in self.lstm_c.items()})
+            return
+        for i in range(n_refs):
+            for k in self.lstm_h:
+                self._mep_ref_lstm_h[i][k].zero_()
+                self._mep_ref_lstm_c[i][k].zero_()
+
+    def _mep_reference_logits(self, o_device, env_id, r, d, mask):
+        """Forward frozen population members on the current obs (no grad)."""
+        ref_logits = []
+        if not self.mep_reference_policies:
+            return ref_logits
+        use_rnn = bool(self.config.get("use_rnn"))
+        for j, ref in enumerate(self.mep_reference_policies):
+            ref_state = dict(reward=r, done=d, env_id=env_id, mask=mask)
+            if use_rnn:
+                ref_state["lstm_h"] = self._mep_ref_lstm_h[j][env_id.start]
+                ref_state["lstm_c"] = self._mep_ref_lstm_c[j][env_id.start]
+            logits_j, _ = ref.forward_eval(o_device, ref_state)
+            if use_rnn:
+                self._mep_ref_lstm_h[j][env_id.start] = ref_state["lstm_h"].detach()
+                self._mep_ref_lstm_c[j][env_id.start] = ref_state["lstm_c"].detach()
+            ref_logits.append(logits_j)
+        return ref_logits
+
+    def _apply_mep_rollout_reward(self, r_env, current_logits, action, o_device, env_id, d, mask):
+        """r_aug = r_env + beta * (-log mixture_prob). Identity when mep_entropy_coef==0."""
+        coef = self.mep_entropy_coef
+        if coef == 0.0:
+            self.mep_stats["env_reward"].append(float(r_env.mean().item()))
+            self.mep_stats["mep_bonus"].append(0.0)
+            self.mep_stats["augmented_reward"].append(float(r_env.mean().item()))
+            self.mep_stats["mixture_entropy"].append(0.0)
+            self.mep_stats["pairwise_js"].append(0.0)
+            return r_env
+        import pufferlib.mep as mep
+
+        ref_logits = self._mep_reference_logits(o_device, env_id, r_env, d, mask)
+        aug, stats = mep.mep_reward_components(
+            current_logits,
+            ref_logits,
+            action,
+            r_env,
+            mep_entropy_coef=coef,
+            mep_eps=self.mep_eps,
+        )
+        self.mep_stats["env_reward"].append(float(stats["env_reward"].mean().item()))
+        bonus = stats["mep_bonus"]
+        self.mep_stats["mep_bonus"].append(float(bonus.mean().item()))
+        self.mep_stats["mep_bonus_std"].append(float(bonus.std().item()) if bonus.numel() > 1 else 0.0)
+        self.mep_stats["augmented_reward"].append(float(stats["augmented_reward"].mean().item()))
+        self.mep_stats["mixture_entropy"].append(float(stats["mixture_entropy"].mean().item()))
+        self.mep_stats["pairwise_js"].append(float(stats["pairwise_js"].mean().item()))
+        return aug
 
     def _sync_other_lstm(self, other_indices, key, device, force_reset=False):
         """Match other-policy LSTM buffers to env other_indices; reset on resample."""
@@ -579,6 +693,8 @@ class PuffeRL:
             for k in self.lstm_h:
                 self.lstm_h[k] = torch.zeros(self.lstm_h[k].shape, device=device)
                 self.lstm_c[k] = torch.zeros(self.lstm_c[k].shape, device=device)
+            if self.use_mep and self.mep_entropy_coef != 0.0 and self.mep_reference_policies:
+                self._ensure_mep_ref_lstm(device)
 
         self.full_rows = 0
         while self.full_rows < self.segments:
@@ -613,6 +729,11 @@ class PuffeRL:
                 logits, value = self.policy.forward_eval(o_device, state)
                 action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
                 r = torch.clamp(r, -1, 1)
+                # MEP ENT_VERSION=3: only when generate_population set use_mep=True.
+                if self.use_mep:
+                    r = self._apply_mep_rollout_reward(
+                        r, logits, action, o_device, env_id, d, mask
+                    )
 
             profile("eval_copy", epoch)
             with torch.no_grad():
@@ -815,15 +936,19 @@ class PuffeRL:
             self.losses = losses
             self.print_dashboard()
             self.stats = defaultdict(list)
+            if self.use_mep:
+                self.mep_stats = defaultdict(list)
             self.last_log_time = time.time()
             self.last_log_step = self.global_step
             profile.clear()
 
         if self.epoch % config["checkpoint_interval"] == 0 or done_training:
-            self.save_checkpoint()
-            self.msg = f"Checkpoint saved at update {self.epoch}"
+            # MEP population saves are handled by generate_population (_save_population_member).
+            if not self.use_mep:
+                self.save_checkpoint()
+                self.msg = f"Checkpoint saved at update {self.epoch}"
 
-            if self.render and self.epoch % self.render_interval == 0:
+            if (not self.use_mep) and self.render and self.epoch % self.render_interval == 0:
                 model_dir = os.path.join(self.config["data_dir"], f"{self.config['env']}_{self.logger.run_id}")
                 model_files = glob.glob(os.path.join(model_dir, "model_*.pt"))
 
@@ -852,7 +977,8 @@ class PuffeRL:
                         print(f"Failed to export model weights: {e}")
 
         if (
-            self.epoch > 1
+            not self.use_mep
+            and self.epoch > 1
             and self.config["eval"]["wosac_realism_eval"]
             and (((self.epoch - 1) % self.config["eval"]["eval_interval"] == 0) or done_training)
         ):
@@ -863,7 +989,8 @@ class PuffeRL:
             pufferlib.utils.run_wosac_eval_in_subprocess(config, self.logger, self.global_step)
 
         if (
-            self.epoch > 1
+            not self.use_mep
+            and self.epoch > 1
             and self.config["eval"]["human_replay_eval"]
             and (((self.epoch - 1) % self.config["eval"]["eval_interval"] == 0) or done_training)
         ):
@@ -901,6 +1028,25 @@ class PuffeRL:
 
         device = config["device"]
         agent_steps = int(dist_sum(self.global_step, device))
+        pop_logs = {}
+        if self.use_mep:
+            if self.population_member_id is not None:
+                pop_logs["population/member_id"] = int(self.population_member_id)
+            if self.population_iteration is not None:
+                pop_logs["population/iteration"] = int(self.population_iteration)
+            if self.mep_stats:
+                def _mmean(key):
+                    vs = self.mep_stats.get(key) or []
+                    return float(np.mean(vs)) if vs else 0.0
+
+                pop_logs["population/env_reward_mean"] = _mmean("env_reward")
+                pop_logs["population/mep_bonus_mean"] = _mmean("mep_bonus")
+                stds = self.mep_stats.get("mep_bonus_std") or []
+                pop_logs["population/mep_bonus_std"] = float(np.mean(stds)) if stds else 0.0
+                pop_logs["population/augmented_reward_mean"] = _mmean("augmented_reward")
+                pop_logs["population/mixture_entropy"] = _mmean("mixture_entropy")
+                pop_logs["population/pairwise_js"] = _mmean("pairwise_js")
+
         logs = {
             "SPS": dist_sum(self.sps, device),
             "agent_steps": agent_steps,
@@ -910,6 +1056,7 @@ class PuffeRL:
             **{f"environment/{k}": v for k, v in self.stats.items()},
             **{f"losses/{k}": v for k, v in self.losses.items()},
             **{f"performance/{k}": v["elapsed"] for k, v in self.profile},
+            **pop_logs,
             # **{f'environment/{k}': dist_mean(v, device) for k, v in self.stats.items()},
             # **{f'losses/{k}': dist_mean(v, device) for k, v in self.losses.items()},
             # **{f'performance/{k}': dist_sum(v['elapsed'], device) for k, v in self.profile},
@@ -1433,6 +1580,186 @@ def train(env_name, args=None, vecenv=None, policy=None, logger=None):
     model_path = pufferl.close()
     pufferl.logger.close(model_path)
     return all_logs
+
+
+def _save_population_member(
+    policy,
+    data_dir,
+    env_name,
+    run_id,
+    epoch,
+    *,
+    optimizer=None,
+    global_step=0,
+    export_flat=True,
+):
+    """Save like ``PuffeRL.save_checkpoint`` + ``close``.
+
+    Layout under ``data_dir`` (same as normal train)::
+
+        {data_dir}/{env}_{run_id}/model_{env}_{epoch:06d}.pt
+        {data_dir}/{env}_{run_id}/trainer_state.pt
+        {data_dir}/{env}_{run_id}.pt          # flat export for population loading
+    """
+    os.makedirs(data_dir, exist_ok=True)
+    run_dir = os.path.join(data_dir, f"{env_name}_{run_id}")
+    os.makedirs(run_dir, exist_ok=True)
+
+    model_name = f"model_{env_name}_{int(epoch):06d}.pt"
+    model_path = os.path.join(run_dir, model_name)
+    if not os.path.exists(model_path):
+        torch.save(policy.state_dict(), model_path)
+
+    state = {
+        "optimizer_state_dict": optimizer.state_dict() if optimizer is not None else None,
+        "global_step": int(global_step),
+        "agent_step": int(global_step),
+        "update": int(epoch),
+        "model_name": model_name,
+        "run_id": run_id,
+    }
+    state_path = os.path.join(run_dir, "trainer_state.pt")
+    torch.save(state, state_path + ".tmp")
+    os.rename(state_path + ".tmp", state_path)
+
+    flat_path = os.path.join(data_dir, f"{env_name}_{run_id}.pt")
+    if export_flat:
+        shutil.copy(model_path, flat_path)
+    return model_path, flat_path
+
+
+def generate_population(env_name, args=None, vecenv=None, logger=None, config=None):
+    args = args or load_config(env_name, config_dir=config)
+    pbt = args.setdefault("pbt", {})
+    pop_size = int(pbt.get("population_size", 4) or 4)
+    if pop_size < 1:
+        raise pufferlib.APIUsageError("pbt.population_size must be >= 1")
+    mep_coef = float(pbt.get("mep_entropy_coef", 0.01))
+    mep_eps = float(pbt.get("mep_eps", 1e-8) or 1e-8)
+    seed_stride = int(pbt.get("population_seed_stride", 1) or 1)
+    total_ts = int(pbt.get("population_total_timesteps") or args["train"]["total_timesteps"])
+    update_steps = pbt.get("population_update_steps", 0) or 0
+    try:
+        update_steps = int(update_steps)
+    except (TypeError, ValueError):
+        update_steps = 0
+
+    # Self-play evaluate() path — not PBT reactive/replay.
+    args["train"]["use_pbt"] = False
+    args["train"]["compile"] = False
+    args["train"]["use_mep"] = True
+    args["train"]["mep_entropy_coef"] = mep_coef
+    args["train"]["mep_eps"] = mep_eps
+    args["train"]["total_timesteps"] = total_ts
+    # Avoid CosineAnnealingLR stepping every PPO update against a too-small T_max;
+    # MEP uses one optimizer step schedule per member update in the outer loop instead.
+    args["train"]["anneal_lr"] = False
+    args["train"]["render"] = False
+    args["load_model_path"] = None
+    args["load_id"] = None
+
+    vecenv = vecenv or load_env(env_name, args)
+    base_seed = int(args["train"].get("seed", 42))
+    population = []
+    for i in range(pop_size):
+        seed = base_seed + i * seed_stride
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+        population.append(load_policy(args, vecenv, env_name))
+
+    if logger is None:
+        if args.get("neptune"):
+            logger = NeptuneLogger(args)
+        elif args.get("wandb"):
+            logger = WandbLogger(args)
+
+    train_config = dict(
+        **args["train"],
+        env=env_name,
+        eval=args.get("eval", {}),
+        use_mep=True,
+        mep_entropy_coef=mep_coef,
+        mep_eps=mep_eps,
+    )
+    pufferl = PuffeRL(train_config, vecenv, population[0], logger)
+    optimizers = [_make_optimizer(population[i], train_config) if i else pufferl.optimizer for i in range(pop_size)]
+    if update_steps <= 0:
+        update_steps = int(pufferl.config["batch_size"])
+    num_iters = max(1, total_ts // max(pop_size * update_steps, 1))
+    # Keep a no-op / identity scheduler object so train() anneal_lr=False path is enough;
+    # still attach per-member optimizers correctly.
+    pufferl.scheduler = torch.optim.lr_scheduler.LambdaLR(optimizers[0], lr_lambda=lambda _: 1.0)
+    member_schedulers = [
+        torch.optim.lr_scheduler.LambdaLR(optimizers[i], lr_lambda=lambda _: 1.0)
+        for i in range(pop_size)
+    ]
+    member_schedulers[0] = pufferl.scheduler
+
+    # Same root as normal train checkpoints (train.data_dir / default.ini).
+    data_dir = train_config["data_dir"]
+    os.makedirs(data_dir, exist_ok=True)
+    base_run_id = str(pufferl.logger.run_id)
+    member_run_ids = [f"{base_run_id}_m{i:02d}" for i in range(pop_size)]
+    print(
+        f"MEP generate_population: K={pop_size} iters={num_iters} "
+        f"update_steps={update_steps} mep_entropy_coef={mep_coef} "
+        f"data_dir={data_dir} run_ids={member_run_ids}"
+    )
+
+    member_update_counts = [0] * pop_size
+    flat_exports = [None] * pop_size
+    for pop_iter in range(num_iters):
+        order = np.random.permutation(pop_size)
+        print(f"Population iteration {pop_iter + 1}/{num_iters} order={order.tolist()}")
+        pufferl.population_iteration = pop_iter
+        for i in order:
+            refs = [population[j] for j in range(pop_size) if j != i]
+            pufferl.bind_population_member(i, population[i], refs, optimizers[i], member_schedulers[i])
+            step0 = pufferl.global_step
+            while pufferl.global_step - step0 < update_steps:
+                if train_config["device"] == "cuda":
+                    torch.compiler.cudagraph_mark_step_begin()
+                pufferl.evaluate()
+                if train_config["device"] == "cuda":
+                    torch.compiler.cudagraph_mark_step_begin()
+                pufferl.train()
+            member_update_counts[i] += 1
+            _, flat_exports[i] = _save_population_member(
+                population[i],
+                data_dir,
+                env_name,
+                member_run_ids[i],
+                member_update_counts[i],
+                optimizer=optimizers[i],
+                global_step=pufferl.global_step,
+            )
+
+    for i, pol in enumerate(population):
+        _, flat_exports[i] = _save_population_member(
+            pol,
+            data_dir,
+            env_name,
+            member_run_ids[i],
+            member_update_counts[i],
+            optimizer=optimizers[i],
+            global_step=pufferl.global_step,
+        )
+    print(f"Saved MEP population ({pop_size}) under {data_dir}")
+    for i, flat in enumerate(flat_exports):
+        print(f"  member {i}: {flat}  (ckpts in {env_name}_{member_run_ids[i]}/)")
+    print(f"Round-robin update counts: {member_update_counts}")
+    if any(c != num_iters for c in member_update_counts):
+        print("Warning: round-robin update counts are not uniform across members.")
+
+    pufferl.utilization.stop()
+    vecenv.close()
+    if logger is not None:
+        logger.close(flat_exports[0] or os.path.join(data_dir, f"{env_name}_{member_run_ids[0]}.pt"))
+    return population
+
 
 def train_pbt(env_name, args=None, vecenv=None, policy=None, logger=None, config=None):
     args = args or load_config(env_name, config_dir=config)
@@ -2407,7 +2734,24 @@ def load_env(env_name, args):
     if env_name == "puffer_drive":
         env_kwargs = {**args["env"]}
     elif env_name == "puffer_drive_pbt":
-        env_kwargs = {**args["env"], **args.get("pbt", {})}
+        # [pbt] also holds generate_population / collect keys that Drive_PBT does not accept.
+        _pbt_env_skip = {
+            "population_size",
+            "population_total_timesteps",
+            "population_update_steps",
+            "mep_entropy_coef",
+            "mep_eps",
+            "use_mep",
+            "population_seed_stride",
+            "num_collect_rollout",
+            "collect_start_idx",
+            "collect_end_idx",
+            "collect_order_path",
+            "collect_num_checkpoints",
+            "skip_collect_smoke_test",
+        }
+        pbt_env = {k: v for k, v in args.get("pbt", {}).items() if k not in _pbt_env_skip}
+        env_kwargs = {**args["env"], **pbt_env}
     else:
         return pufferlib.vector.make(make_env, env_kwargs={**args["env"]}, **args["vec"])
 
@@ -2552,7 +2896,7 @@ def load_config(env_name, config_dir=None):
 
 
 def main():
-    err = "Usage: puffer [train, eval, sweep, controlled_exp, autotune, profile, export, sanity] [env_name] [optional args]. --help for more info"
+    err = "Usage: puffer [train, train_pbt, generate_population, eval, sweep, zeroshot, controlled_exp, autotune, profile, export, sanity] [env_name] [optional args]. --help for more info"
     if len(sys.argv) < 3:
         raise pufferlib.APIUsageError(err)
 
@@ -2560,9 +2904,11 @@ def main():
     env_name = sys.argv.pop(1)
     if mode == "train":
         train(env_name=env_name)
-    if mode == "train_pbt":
+    elif mode == "train_pbt":
         config_dir = "pufferlib/ocean/drive_pbt"
         train_pbt(env_name=env_name, config=config_dir)
+    elif mode == "generate_population":
+        generate_population(env_name=env_name)
     elif mode == "eval":
         eval(env_name=env_name)
     elif mode == "sweep":
