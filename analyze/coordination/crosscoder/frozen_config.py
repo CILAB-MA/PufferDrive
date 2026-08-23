@@ -29,3 +29,16 @@ RESULTS_MECHANISM = RESULTS_BASE / "crosscoder_mechanism"
 SPLIT_PATH = RESULTS_10K / "config" / "train_dev_split.json"
 # Historical immutable trees (read-only reference):
 #   /data/puffer/results/crosscoder{,_10k,_mechanism}/
+_HIST_SPLIT = Path("/data/puffer/results/crosscoder_10k/config/train_dev_split.json")
+
+
+def resolve_split_path() -> Path:
+    """Frozen train/dev map split (seed=0, 9k/1k). Prefer active tree, else historical."""
+    if SPLIT_PATH.is_file():
+        return SPLIT_PATH
+    if _HIST_SPLIT.is_file():
+        return _HIST_SPLIT
+    raise FileNotFoundError(
+        f"Missing train_dev_split.json at {SPLIT_PATH} "
+        f"(and historical {_HIST_SPLIT}). Copy the frozen split or re-run 10k pipeline."
+    )

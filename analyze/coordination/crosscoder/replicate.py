@@ -22,7 +22,7 @@ if str(_COORD) not in sys.path:
     sys.path.insert(0, str(_COORD))
 
 from crosscoder.collect import EGO_MODES, flatten_pack, load_named_pair, normalize_ego_mode  
-from crosscoder.frozen_config import (  
+from crosscoder.frozen_config import (
     FROZEN_DICT,
     FROZEN_K,
     FROZEN_LAMBDA,
@@ -30,7 +30,7 @@ from crosscoder.frozen_config import (
     REC_DIR,
     RESULTS_MECHANISM,
     SEED_ORDER,
-    SPLIT_PATH,
+    resolve_split_path,
 )
 from crosscoder.metrics import (
     bootstrap_ci,
@@ -317,7 +317,9 @@ def _mask_pack(pack: dict, scene_mask: np.ndarray) -> dict:
 
 def subspace(args, root: Path, pairs_doc: dict, acts_root: Path) -> dict:
     """Consensus U at K=FROZEN_K from train/dev; eval D_U on val."""
-    split = json.loads(SPLIT_PATH.read_text())
+    split_path = resolve_split_path()
+    split = json.loads(split_path.read_text())
+    print(f"  subspace split={split_path}", flush=True)
     dev_ids = np.asarray(split["dev_scene_ids"], dtype=np.int64)
     train_dir, val_dir = _split_dirs(acts_root)
     k = int(FROZEN_K)
