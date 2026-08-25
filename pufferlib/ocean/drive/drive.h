@@ -350,6 +350,10 @@ struct Drive {
     int *tracks_to_predict_indices;
     int init_mode;
     int control_mode;
+    /* When set (human PBT train): mark all but ego_ratio of controllable
+     * vehicles as experts so they follow WOMD traj via move_expert. */
+    int partners_as_experts;
+    float ego_ratio;
 };
 
 static inline int is_ego_local(Drive *env, int i) {
@@ -1326,6 +1330,72 @@ bool should_control_agent(Drive *env, int agent_idx) {
     return distance_to_goal >= MIN_DISTANCE_TO_GOAL;
 }
 
+/* Controllable RL candidates for partners_as_experts (ignores capacity). */
+static bool is_controllable_candidate(Drive *env, int agent_idx) {
+    Entity *entity = &env->entities[agent_idx];
+    if (entity->traj_valid == NULL || entity->traj_valid[env->init_steps] != 1)
+        return false;
+    if (entity->mark_as_expert)
+        return false;
+
+    if (env->control_mode == CONTROL_SDC_ONLY)
+        return agent_idx == env->sdc_track_index;
+
+    bool is_vehicle = (entity->type == VEHICLE);
+    bool is_ped_or_bike = (entity->type == PEDESTRIAN || entity->type == CYCLIST);
+    bool type_is_valid = false;
+    switch (env->control_mode) {
+    case CONTROL_WOSAC:
+        return (is_vehicle || is_ped_or_bike);
+    case CONTROL_VEHICLES:
+        type_is_valid = is_vehicle;
+        break;
+    default:
+        type_is_valid = (is_vehicle || is_ped_or_bike);
+        break;
+    }
+    if (!type_is_valid)
+        return false;
+
+    if (entity->traj_heading == NULL || entity->traj_x == NULL || entity->traj_y == NULL)
+        return false;
+    float cos_heading = cosf(entity->traj_heading[0]);
+    float sin_heading = sinf(entity->traj_heading[0]);
+    float goal_dx = entity->goal_position_x - entity->traj_x[0];
+    float goal_dy = entity->goal_position_y - entity->traj_y[0];
+    float local_goal_x = goal_dx * cos_heading + goal_dy * sin_heading;
+    float local_goal_y = -goal_dx * sin_heading + goal_dy * cos_heading;
+    float distance_to_goal = relative_distance_2d(0, 0, local_goal_x, local_goal_y);
+    return distance_to_goal >= MIN_DISTANCE_TO_GOAL;
+}
+
+/* Mark all but ego_ratio of controllable vehicles as experts (WOMD traj partners). */
+static void mark_non_ego_partners_as_experts(Drive *env) {
+    int candidates[MAX_AGENTS];
+    int n = 0;
+    for (int i = 0; i < env->num_objects && n < MAX_AGENTS; i++) {
+        if (is_controllable_candidate(env, i))
+            candidates[n++] = i;
+    }
+    if (n <= 0)
+        return;
+
+    int n_ego = (int)(env->ego_ratio * (float)n);
+    if (n_ego < 1)
+        n_ego = 1;
+    if (n_ego > n)
+        n_ego = n;
+
+    for (int j = 0; j < n_ego; j++) {
+        int r = j + (rand() % (n - j));
+        int t = candidates[j];
+        candidates[j] = candidates[r];
+        candidates[r] = t;
+    }
+    for (int j = n_ego; j < n; j++)
+        env->entities[candidates[j]].mark_as_expert = 1;
+}
+
 void set_active_agents(Drive *env) {
 
     // Initialize
@@ -1342,10 +1412,13 @@ void set_active_agents(Drive *env) {
         env->num_agents = MAX_AGENTS;
     }
 
-    // If we have a SDC index (WOMD), initialize it first:
+    if (env->partners_as_experts)
+        mark_non_ego_partners_as_experts(env);
+
+    // If we have a SDC index (WOMD), initialize it first (unless demoted to expert partner):
     int sdc_index = env->sdc_track_index;
 
-    if (sdc_index >= 0) {
+    if (sdc_index >= 0 && !(env->partners_as_experts && env->entities[sdc_index].mark_as_expert)) {
         active_agent_indices[0] = sdc_index;
         env->num_actors++;
         env->active_agent_count++;
@@ -1355,8 +1428,8 @@ void set_active_agents(Drive *env) {
     // Iterate through entities to find agents to create and/or control
     for (int i = 0; i < env->num_objects && env->num_actors < MAX_AGENTS; i++) {
 
-        // Skip if its the SDC
-        if (i == sdc_index) {
+        // Skip if its the SDC already force-added as active
+        if (i == sdc_index && !(env->partners_as_experts && env->entities[sdc_index].mark_as_expert)) {
             continue;
         }
 

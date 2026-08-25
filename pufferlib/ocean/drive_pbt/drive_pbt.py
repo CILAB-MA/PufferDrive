@@ -115,9 +115,9 @@ class Drive_PBT(pufferlib.PufferEnv):
         control_mode="control_vehicles",
         map_dir="resources/drive/binaries/training",
         sequential_map_sampling=False,
-        pbt_mode="reactive", # reactive or replay
-        population_path=None, # for replay
-        ego_ratio=0.0, # for replay
+        pbt_mode="reactive",  # reactive | replay | human
+        population_path=None, # for replay / reactive
+        ego_ratio=0.0, # for replay / human
         strategy="prioritized",  # prioritized, uniform, curriculum
         curriculum_types=None,
         curriculum_types_path=None,
@@ -152,6 +152,9 @@ class Drive_PBT(pufferlib.PufferEnv):
         self.termination_mode = termination_mode
         self.resample_frequency = resample_frequency
         self.dynamics_model = dynamics_model
+        self.pbt_mode = pbt_mode
+        # human: non-ego controllable vehicles follow WOMD traj via move_expert
+        self.partners_as_experts = 1 if pbt_mode == "human" else 0
         # Observation space calculation
         self.ego_features = {"classic": binding.EGO_FEATURES_CLASSIC, "jerk": binding.EGO_FEATURES_JERK}.get(
             dynamics_model
@@ -236,6 +239,7 @@ class Drive_PBT(pufferlib.PufferEnv):
             num_agents=num_agents,
             num_maps=num_maps,
             ego_ratio=ego_ratio,
+            partners_as_experts=self.partners_as_experts,
             init_mode=self.init_mode,
             control_mode=self.control_mode,
             init_steps=self.init_steps,
@@ -300,67 +304,84 @@ class Drive_PBT(pufferlib.PufferEnv):
                 control_mode=self.control_mode,
                 map_dir=map_dir,
                 scenario_log_path=self.scenario_log_path or "",
+                partners_as_experts=self.partners_as_experts,
+                ego_ratio=ego_ratio,
             )
             env_ids.append(env_id)
         self.c_envs = binding.vectorize(*env_ids)
         self.ego_ratio = ego_ratio
         self.population_path = population_path
-        self.pbt_mode = pbt_mode
         self.strategy = strategy
-        # PLR learns assignment scores; uniform/curriculum only sample.
-        self._score_tracking_enabled = strategy == "prioritized"
-        saved_dir = os.path.join(self.population_path, "saved")
-        fp_gid = os.path.join(saved_dir, "global_ids.npy")
-        self.global_ids = np.load(fp_gid, mmap_mode="r")
-        valid_global_ids = np.asarray(self.global_ids)[np.asarray(self.global_ids) >= 0]
+        # PLR learns assignment scores; uniform/curriculum only sample. Human has no partner corpus.
+        self._score_tracking_enabled = (
+            self.pbt_mode != "human" and strategy == "prioritized"
+        )
+        self._last_sampling_metrics = {}
+        self._last_raw_return_metrics = {}
 
-        if pbt_mode in ("replay", "reactive"):
-            self._load_corpus_layout(saved_dir)
+        if self.pbt_mode == "human":
+            # Partners are WOMD traj experts; no population corpus / combination sampling.
+            self.global_ids = None
+            self.num_combination = 0
+            self._episode_return = np.zeros(self.num_agents, dtype=np.float32)
+        else:
+            if not self.population_path:
+                raise ValueError(f"population_path is required for pbt_mode={self.pbt_mode!r}")
+            saved_dir = os.path.join(self.population_path, "saved")
+            fp_gid = os.path.join(saved_dir, "global_ids.npy")
+            self.global_ids = np.load(fp_gid, mmap_mode="r")
 
-        if pbt_mode == "replay":
-            fp_actions = os.path.join(saved_dir, "other_actions_actions.npy")
-            self.other_actions = np.load(fp_actions, mmap_mode="r")
-            self.combination_index = self._resolve_combination_index(
-                num_combination, int(self.other_actions.shape[0]), source=fp_actions
-            )
-            self.num_combination = int(self.combination_index.size)
-            self.replay_actions = np.zeros(
-                (self.num_agents, self.resample_frequency, 1), dtype=np.int32
-            )
-            self._init_partner_tracking(strategy, score_transform, curriculum_types,
-                                       curriculum_types_path, curriculum_steps)
-        elif pbt_mode == "reactive":
-            policy_files = resolve_reactive_policy_files(population_path)
-            populations = [name for _, name in policy_files]
-            self.num_other_policies = len(populations)
-            if self.num_other_policies < 1:
-                raise FileNotFoundError(f"No reactive policies resolved under {population_path}")
-            fp_pk = os.path.join(saved_dir, "population_keys.npy")
-            self.population_keys = np.load(fp_pk, mmap_mode="r")
-            if self.population_keys.ndim != 2:
-                raise ValueError(
-                    f"{fp_pk}: expected shape (num_combination, num_agents), "
-                    f"got {self.population_keys.shape}"
+            if pbt_mode in ("replay", "reactive"):
+                self._load_corpus_layout(saved_dir)
+
+            if pbt_mode == "replay":
+                fp_actions = os.path.join(saved_dir, "other_actions_actions.npy")
+                self.other_actions = np.load(fp_actions, mmap_mode="r")
+                self.combination_index = self._resolve_combination_index(
+                    num_combination, int(self.other_actions.shape[0]), source=fp_actions
                 )
-            if int(self.population_keys.shape[1]) != int(self.actions_agent_offsets[-1]):
-                raise ValueError(
-                    f"{fp_pk}: agent dim {self.population_keys.shape[1]} != "
-                    f"offsets[-1] {int(self.actions_agent_offsets[-1])}"
+                self.num_combination = int(self.combination_index.size)
+                self.replay_actions = np.zeros(
+                    (self.num_agents, self.resample_frequency, 1), dtype=np.int32
                 )
-            self.combination_index = self._resolve_combination_index(
-                num_combination, int(self.population_keys.shape[0]), source=fp_pk
-            )
-            self.num_combination = int(self.combination_index.size)
-            self.population_key_to_policy_idx = self._build_population_key_to_policy_idx(
-                saved_dir, populations
-            )
-            n_other = int(self.other_indices_arr.size)
-            self.policy_per_slot_flatten = np.full(n_other, -1, dtype=np.int64)
-            self.policy_per_slot = [
-                np.array([], dtype=np.int64) for _ in range(self.num_other_policies)
-            ]
-            self._init_partner_tracking(strategy, score_transform, curriculum_types,
-                                       curriculum_types_path, curriculum_steps)
+                self._init_partner_tracking(strategy, score_transform, curriculum_types,
+                                           curriculum_types_path, curriculum_steps)
+            elif pbt_mode == "reactive":
+                policy_files = resolve_reactive_policy_files(population_path)
+                populations = [name for _, name in policy_files]
+                self.num_other_policies = len(populations)
+                if self.num_other_policies < 1:
+                    raise FileNotFoundError(f"No reactive policies resolved under {population_path}")
+                fp_pk = os.path.join(saved_dir, "population_keys.npy")
+                self.population_keys = np.load(fp_pk, mmap_mode="r")
+                if self.population_keys.ndim != 2:
+                    raise ValueError(
+                        f"{fp_pk}: expected shape (num_combination, num_agents), "
+                        f"got {self.population_keys.shape}"
+                    )
+                if int(self.population_keys.shape[1]) != int(self.actions_agent_offsets[-1]):
+                    raise ValueError(
+                        f"{fp_pk}: agent dim {self.population_keys.shape[1]} != "
+                        f"offsets[-1] {int(self.actions_agent_offsets[-1])}"
+                    )
+                self.combination_index = self._resolve_combination_index(
+                    num_combination, int(self.population_keys.shape[0]), source=fp_pk
+                )
+                self.num_combination = int(self.combination_index.size)
+                self.population_key_to_policy_idx = self._build_population_key_to_policy_idx(
+                    saved_dir, populations
+                )
+                n_other = int(self.other_indices_arr.size)
+                self.policy_per_slot_flatten = np.full(n_other, -1, dtype=np.int64)
+                self.policy_per_slot = [
+                    np.array([], dtype=np.int64) for _ in range(self.num_other_policies)
+                ]
+                self._init_partner_tracking(strategy, score_transform, curriculum_types,
+                                           curriculum_types_path, curriculum_steps)
+            else:
+                raise ValueError(
+                    f"Unknown pbt_mode={pbt_mode!r}; expected one of: reactive, replay, human"
+                )
 
     @staticmethod
     def _resolve_combination_index(requested, corpus_size, source=""):
@@ -536,6 +557,9 @@ class Drive_PBT(pufferlib.PufferEnv):
 
     def _reset_other_indices(self):
         """Episode/rollout start (after vec_reset): metrics, slot identity, LUT, policy assignment."""
+        if self.pbt_mode == "human":
+            # No partner corpus; experts are assigned in C via partners_as_experts.
+            return
         # init metrics
         self.minimum_distance.fill(np.inf)
         self.minimum_ego_idx.fill(-1)
@@ -816,6 +840,7 @@ class Drive_PBT(pufferlib.PufferEnv):
                 num_agents=self.num_agents,
                 num_maps=self.num_maps,
                 ego_ratio=self.ego_ratio,
+                partners_as_experts=self.partners_as_experts,
                 init_mode=self.init_mode,
                 control_mode=self.control_mode,
                 init_steps=self.init_steps,
@@ -881,6 +906,8 @@ class Drive_PBT(pufferlib.PufferEnv):
                     control_mode=self.control_mode,
                     map_dir=self.map_dir,
                     scenario_log_path=self.scenario_log_path or "",
+                    partners_as_experts=self.partners_as_experts,
+                    ego_ratio=self.ego_ratio,
                 )
                 env_ids.append(env_id)
             self.c_envs = binding.vectorize(*env_ids)

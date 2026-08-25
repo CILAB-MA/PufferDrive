@@ -6,16 +6,19 @@
 #   MODE=record STRATEGY=prioritized ./scripts/train_pbt_seeds.sh 0
 #   MODE=reactive STRATEGY=uniform POP_PATH=/data/puffer/popul_lane_nominal ./scripts/train_pbt_seeds.sh 1
 #   MODE=record STRATEGY=curriculum SEEDS="42" CURRICULUM_STEPS=100 ./scripts/train_pbt_seeds.sh 0
+#   MODE=human SEEDS="42" ./scripts/train_pbt_seeds.sh 0
 #
-# Checkpoints land in /data/puffer/experiments/{replay|reactive}_{strategy}_{pop_short}/
+# Checkpoints land in /data/puffer/experiments/{replay|reactive|human}_{strategy}_{pop_short}/
 # so analyze/zero_shot.sh can pick them up as FOLDER, e.g.:
 #   TRAIN_MODE=reactive STRATEGY=uniform ./analyze/zero_shot.sh 0
 #   ./analyze/zero_shot.sh 0 replay_prioritized_nominal popul_lane_nominal
 #
 # Env:
-#   MODE              record | reactive          (default: record)
+#   MODE              record | reactive | human   (default: record)
+#                     human = ego RL + WOMD traj partners (move_expert); no action corpus
 #   STRATEGY          uniform | prioritized | curriculum  (default: prioritized)
-#   POP_PATH          population corpus dir
+#                     (unused for partner sampling in human mode; kept for EXP_NAME parity)
+#   POP_PATH          population corpus dir (record/reactive); unused for human partners
 #                     default: curriculum → /data/puffer/popul_curriculum
 #                              else       → /data/puffer/popul_lane_nominal
 #   TYPES_PATH        difficulty types (.npy/.json); default $POP_PATH/saved/difficulty_types.npy
@@ -23,7 +26,7 @@
 #   NUM_COMBINATION   default 10
 #   SCORE_TRANSFORM   default rank_low (prioritized only)
 #   DATA_DIR          default /data/puffer/experiments/${EXP_NAME}/
-#   EXP_NAME          default {replay|reactive}_{strategy}_{pop_short}
+#   EXP_NAME          default {replay|reactive|human}_{strategy}_{pop_short}
 #                     pop_short: popul_lane_nominal → nominal, popul_mix → mix
 #                     (same FOLDER as analyze/zero_shot.sh)
 #   SEEDS             default "42 3 11"
@@ -54,8 +57,9 @@ fi
 case "${MODE}" in
   record) PBT_MODE="replay" ;;
   reactive) PBT_MODE="reactive" ;;
+  human) PBT_MODE="human" ;;
   *)
-    echo "MODE must be record or reactive (got: ${MODE})" >&2
+    echo "MODE must be record, reactive, or human (got: ${MODE})" >&2
     exit 1
     ;;
 esac
@@ -89,13 +93,15 @@ EXP_NAME="${EXP_NAME:-${PBT_MODE}_${STRATEGY}_${POP_SHORT}}"
 DATA_DIR="${DATA_DIR:-/data/puffer/experiments/${EXP_NAME}/}"
 
 # --- preflight ---
-if [[ ! -d "${POP_PATH}" ]]; then
-  echo "Population directory not found: ${POP_PATH}" >&2
-  exit 1
-fi
-if [[ ! -f "${POP_PATH}/saved/global_ids.npy" ]]; then
-  echo "Missing ${POP_PATH}/saved/global_ids.npy" >&2
-  exit 1
+if [[ "${MODE}" != "human" ]]; then
+  if [[ ! -d "${POP_PATH}" ]]; then
+    echo "Population directory not found: ${POP_PATH}" >&2
+    exit 1
+  fi
+  if [[ ! -f "${POP_PATH}/saved/global_ids.npy" ]]; then
+    echo "Missing ${POP_PATH}/saved/global_ids.npy" >&2
+    exit 1
+  fi
 fi
 
 if [[ "${MODE}" == "record" ]]; then
@@ -104,7 +110,7 @@ if [[ "${MODE}" == "record" ]]; then
     echo "  (collect + merge, e.g. analyze/data_concat.py)" >&2
     exit 1
   fi
-else
+elif [[ "${MODE}" == "reactive" ]]; then
   if [[ ! -f "${POP_PATH}/saved/population_keys.npy" ]]; then
     echo "Reactive mode requires ${POP_PATH}/saved/population_keys.npy" >&2
     exit 1
@@ -140,7 +146,7 @@ PY
   fi
 fi
 
-if [[ "${STRATEGY}" == "curriculum" ]]; then
+if [[ "${MODE}" != "human" && "${STRATEGY}" == "curriculum" ]]; then
   if [[ ! -f "${TYPES_PATH}" ]]; then
     echo "Missing ${TYPES_PATH}" >&2
     echo "Collect then merge first:" >&2
@@ -154,13 +160,17 @@ echo "========== Drive-PBT train =========="
 echo "  exp=${EXP_NAME}"
 echo "  mode=${MODE} (pbt_mode=${PBT_MODE})"
 echo "  strategy=${STRATEGY}"
-echo "  population=${POP_PATH}"
+if [[ "${MODE}" == "human" ]]; then
+  echo "  partners=WOMD traj (move_expert); population corpus unused"
+else
+  echo "  population=${POP_PATH}"
+  echo "  num_combination=${NUM_COMBINATION}"
+fi
 echo "  data_dir=${DATA_DIR}"
-echo "  num_combination=${NUM_COMBINATION}"
-if [[ "${STRATEGY}" == "curriculum" ]]; then
+if [[ "${MODE}" != "human" && "${STRATEGY}" == "curriculum" ]]; then
   echo "  types=${TYPES_PATH}"
   echo "  curriculum_steps=${CURRICULUM_STEPS}"
-elif [[ "${STRATEGY}" == "prioritized" ]]; then
+elif [[ "${MODE}" != "human" && "${STRATEGY}" == "prioritized" ]]; then
   echo "  score_transform=${SCORE_TRANSFORM}"
 fi
 echo "  seeds=${SEED_LIST[*]}"
@@ -174,9 +184,7 @@ for SEED in "${SEED_LIST[@]}"; do
   CMD=(
     puffer train_pbt puffer_drive_pbt
     --pbt.pbt-mode "${PBT_MODE}"
-    --pbt.population-path "${POP_PATH}"
     --pbt.strategy "${STRATEGY}"
-    --pbt.num-combination "${NUM_COMBINATION}"
     --train.data-dir "${DATA_DIR}"
     --train.seed "${SEED}"
     --vec.seed "${SEED}"
@@ -187,10 +195,15 @@ for SEED in "${SEED_LIST[@]}"; do
     --wandb-project "${WANDB_PROJECT}"
   )
 
-  if [[ "${STRATEGY}" == "prioritized" ]]; then
+  if [[ "${MODE}" != "human" ]]; then
+    CMD+=(--pbt.population-path "${POP_PATH}")
+    CMD+=(--pbt.num-combination "${NUM_COMBINATION}")
+  fi
+
+  if [[ "${MODE}" != "human" && "${STRATEGY}" == "prioritized" ]]; then
     CMD+=(--pbt.score-transform "${SCORE_TRANSFORM}")
   fi
-  if [[ "${STRATEGY}" == "curriculum" ]]; then
+  if [[ "${MODE}" != "human" && "${STRATEGY}" == "curriculum" ]]; then
     CMD+=(--pbt.curriculum-types-path "${TYPES_PATH}")
     CMD+=(--pbt.curriculum-steps "${CURRICULUM_STEPS}")
   fi
@@ -201,6 +214,11 @@ done
 echo ""
 echo "All seeds finished. Checkpoints under: ${DATA_DIR}"
 echo "Experiment: ${EXP_NAME}"
-echo "Zero-shot:"
-echo "  TRAIN_MODE=${MODE} EVAL_MODE=both STRATEGY=${STRATEGY} ./analyze/zero_shot.sh ${GPU_ID}"
-echo "  ./analyze/zero_shot.sh ${GPU_ID} ${EXP_NAME} ${POP_NAME}"
+if [[ "${MODE}" == "human" ]]; then
+  echo "Log-replay eval:"
+  echo "  ./analyze/logreplay.sh ${GPU_ID} ${EXP_NAME}"
+else
+  echo "Zero-shot:"
+  echo "  TRAIN_MODE=${MODE} EVAL_MODE=both STRATEGY=${STRATEGY} ./analyze/zero_shot.sh ${GPU_ID}"
+  echo "  ./analyze/zero_shot.sh ${GPU_ID} ${EXP_NAME} ${POP_NAME}"
+fi

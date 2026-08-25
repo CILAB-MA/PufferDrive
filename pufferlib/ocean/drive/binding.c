@@ -73,6 +73,10 @@ static PyObject *my_shared(PyObject *self, PyObject *args, PyObject *kwargs) {
     PyObject *ego_ratio_obj = PyDict_GetItemString(kwargs, "ego_ratio");
     float ego_ratio = ego_ratio_obj ? (float)PyFloat_AsDouble(ego_ratio_obj) : 0.0f;
     int ego_num_agents = (int)(ego_ratio * (float)num_agents);
+    int partners_as_experts = 0;
+    if (kwargs && PyDict_GetItemString(kwargs, "partners_as_experts")) {
+        partners_as_experts = (int)unpack(kwargs, "partners_as_experts");
+    }
     int num_maps = unpack(kwargs, "num_maps");
     int init_mode = unpack(kwargs, "init_mode");
     int control_mode = unpack(kwargs, "control_mode");
@@ -101,6 +105,8 @@ static PyObject *my_shared(PyObject *self, PyObject *args, PyObject *kwargs) {
         env->init_steps = init_steps;
         env->goal_behavior = goal_behavior;
         env->goal_target_distance = goal_target_distance;
+        env->partners_as_experts = partners_as_experts;
+        env->ego_ratio = ego_ratio;
         snprintf(map_file, sizeof(map_file), "%s/map_%03d.bin", map_dir, map_id);
         env->entities = load_map_binary(map_file, env);
         set_active_agents(env);
@@ -162,26 +168,38 @@ static PyObject *my_shared(PyObject *self, PyObject *args, PyObject *kwargs) {
     if (!sequential_map_sampling && total_agent_count >= num_agents) {
         total_agent_count = num_agents;
     }
-    int n_ego = ego_num_agents < total_agent_count ? ego_num_agents : total_agent_count;
-    if (n_ego > 0 && total_agent_count > 0) {
-        int *indices = (int *)malloc((size_t)total_agent_count * sizeof(int));
-        if (indices) {
-            for (int i = 0; i < total_agent_count; i++)
-                indices[i] = i;
-            for (int j = 0; j < n_ego; j++) {
-                int r = j + (rand() % (total_agent_count - j));
-                int t = indices[j];
-                indices[j] = indices[r];
-                indices[r] = t;
-                if (PyList_Append(ego_indices_list, PyLong_FromLong(indices[j])) < 0) {
-                    free(indices);
-                    Py_DECREF(ego_indices_list);
-                    Py_DECREF(agent_offsets);
-                    Py_DECREF(map_ids);
-                    return NULL;
-                }
+    if (partners_as_experts) {
+        /* Every active slot is an RL ego; partners are experts outside the buffer. */
+        for (int i = 0; i < total_agent_count; i++) {
+            if (PyList_Append(ego_indices_list, PyLong_FromLong(i)) < 0) {
+                Py_DECREF(ego_indices_list);
+                Py_DECREF(agent_offsets);
+                Py_DECREF(map_ids);
+                return NULL;
             }
-            free(indices);
+        }
+    } else {
+        int n_ego = ego_num_agents < total_agent_count ? ego_num_agents : total_agent_count;
+        if (n_ego > 0 && total_agent_count > 0) {
+            int *indices = (int *)malloc((size_t)total_agent_count * sizeof(int));
+            if (indices) {
+                for (int i = 0; i < total_agent_count; i++)
+                    indices[i] = i;
+                for (int j = 0; j < n_ego; j++) {
+                    int r = j + (rand() % (total_agent_count - j));
+                    int t = indices[j];
+                    indices[j] = indices[r];
+                    indices[r] = t;
+                    if (PyList_Append(ego_indices_list, PyLong_FromLong(indices[j])) < 0) {
+                        free(indices);
+                        Py_DECREF(ego_indices_list);
+                        Py_DECREF(agent_offsets);
+                        Py_DECREF(map_ids);
+                        return NULL;
+                    }
+                }
+                free(indices);
+            }
         }
     }
     PyObject *final_total_agent_count = PyLong_FromLong(total_agent_count);
@@ -272,6 +290,14 @@ static int my_init(Env *env, PyObject *args, PyObject *kwargs) {
         for (Py_ssize_t j = 0; j < n; j++) {
             env->ego_local_indices[env->num_ego_local++] = (int)PyLong_AsLong(PyList_GetItem(ego_local_obj, j));
         }
+    }
+    env->partners_as_experts = 0;
+    env->ego_ratio = 0.0f;
+    if (kwargs && PyDict_GetItemString(kwargs, "partners_as_experts")) {
+        env->partners_as_experts = (int)unpack(kwargs, "partners_as_experts");
+    }
+    if (kwargs && PyDict_GetItemString(kwargs, "ego_ratio")) {
+        env->ego_ratio = (float)PyFloat_AsDouble(PyDict_GetItemString(kwargs, "ego_ratio"));
     }
     init(env);
     return 0;

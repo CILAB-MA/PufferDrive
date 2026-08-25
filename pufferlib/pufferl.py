@@ -1469,8 +1469,18 @@ class WandbLogger:
     def __init__(self, args, load_id=None, resume="allow"):
         import wandb
 
+        if load_id:
+            run_id = load_id
+        elif hasattr(wandb.util, "generate_id"):
+            run_id = wandb.util.generate_id()
+        else:
+            # wandb>=0.19 moved generate_id off wandb.util
+            from wandb.sdk.lib import runid
+
+            run_id = runid.generate_id()
+
         wandb.init(
-            id=load_id or wandb.util.generate_id(),
+            id=run_id,
             entity=args.get("wandb_entity") or None,
             project=args["wandb_project"],
             group=args["wandb_group"],
@@ -1825,7 +1835,7 @@ def train_pbt(env_name, args=None, vecenv=None, policy=None, logger=None, config
             torch.compiler.cudagraph_mark_step_begin()
         if args["pbt"]["pbt_mode"] == "reactive":
             pufferl.evaluate_pbt()
-        elif args["pbt"]["pbt_mode"] == "replay":
+        elif args["pbt"]["pbt_mode"] in ("replay", "human"):
             pufferl.evaluate_pbt_replay()
         if train_config["device"] == "cuda":
             torch.compiler.cudagraph_mark_step_begin()
@@ -1842,7 +1852,7 @@ def train_pbt(env_name, args=None, vecenv=None, policy=None, logger=None, config
     while i < 32 or not stats:
         if args["pbt"]["pbt_mode"] == "reactive":
             stats = pufferl.evaluate_pbt()
-        elif args["pbt"]["pbt_mode"] == "replay":
+        elif args["pbt"]["pbt_mode"] in ("replay", "human"):
             stats = pufferl.evaluate_pbt_replay()
         i += 1
     logs = pufferl.mean_and_log()
@@ -2856,13 +2866,17 @@ def load_config(env_name, config_dir=None):
         p = configparser.ConfigParser()
         p.read(puffer_default_config)
     else:
+        matches = []
         for path in glob.glob(puffer_config_dir, recursive=True):
-            p = configparser.ConfigParser()
-            p.read([puffer_default_config, path])
-            if env_name in p["base"]["env_name"].split():
-                break
-        else:
+            candidate = configparser.ConfigParser()
+            candidate.read([puffer_default_config, path])
+            if "base" in candidate and env_name in candidate["base"]["env_name"].split():
+                matches.append((path, candidate))
+        if not matches:
             raise pufferlib.APIUsageError("No config for env_name {}".format(env_name))
+        # Prefer replay/ defaults when multiple inis share env_name (e.g. human/).
+        matches.sort(key=lambda item: (0 if "/replay/" in item[0].replace("\\", "/") else 1, item[0]))
+        p = matches[0][1]
 
     # Dynamic help menu from config
     def puffer_type(value):
