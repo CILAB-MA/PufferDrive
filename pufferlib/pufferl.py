@@ -1065,11 +1065,39 @@ class PuffeRL:
         if torch.distributed.is_initialized():
             if torch.distributed.get_rank() != 0:
                 self.logger.log(logs, agent_steps)
+                self._append_sps_log(logs)
                 return logs
             else:
                 return None
         self.logger.log(logs, agent_steps)
+        self._append_sps_log(logs)
         return logs
+
+    def _append_sps_log(self, logs):
+        """Append SPS row to PUFFER_SPS_LOG / config sps_log_path (jsonl)."""
+        path = self.config.get("sps_log_path") or os.environ.get("PUFFER_SPS_LOG")
+        if not path:
+            return
+        parent = os.path.dirname(os.path.abspath(path))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        row = {
+            "SPS": float(logs.get("SPS", 0.0) or 0.0),
+            "agent_steps": int(logs.get("agent_steps", 0) or 0),
+            "uptime": float(logs.get("uptime", 0.0) or 0.0),
+            "epoch": int(logs.get("epoch", 0) or 0),
+            "seed": self.config.get("seed"),
+            "pbt_mode": self.config.get("pbt_mode"),
+            "wall_time": time.time(),
+        }
+        for k, v in logs.items():
+            if isinstance(k, str) and k.startswith("performance/"):
+                try:
+                    row[k] = float(v)
+                except (TypeError, ValueError):
+                    pass
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     def close(self):
         self.vecenv.close()
@@ -1676,13 +1704,11 @@ def generate_population(env_name, args=None, vecenv=None, logger=None, config=No
         elif args.get("wandb"):
             logger = WandbLogger(args)
 
+    # use_mep / mep_* already set on args["train"] above; do not pass again.
     train_config = dict(
         **args["train"],
         env=env_name,
         eval=args.get("eval", {}),
-        use_mep=True,
-        mep_entropy_coef=mep_coef,
-        mep_eps=mep_eps,
     )
     pufferl = PuffeRL(train_config, vecenv, population[0], logger)
     optimizers = [_make_optimizer(population[i], train_config) if i else pufferl.optimizer for i in range(pop_size)]

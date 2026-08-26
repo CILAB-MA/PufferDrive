@@ -80,8 +80,15 @@ static PyObject *my_shared(PyObject *self, PyObject *args, PyObject *kwargs) {
     int goal_behavior = unpack(kwargs, "goal_behavior");
     float goal_target_distance = unpack(kwargs, "goal_target_distance");
     int sequential_map_sampling = unpack(kwargs, "sequential_map_sampling");
-    clock_gettime(CLOCK_REALTIME, &ts);
-    srand(ts.tv_nsec);
+    // Prefer caller seed so map packing / ego shuffle is reproducible across runs.
+    // Fall back to wall-clock nsec when seed is omitted (legacy behavior).
+    PyObject *seed_obj = kwargs ? PyDict_GetItemString(kwargs, "seed") : NULL;
+    if (seed_obj && PyLong_Check(seed_obj)) {
+        srand((unsigned)PyLong_AsLong(seed_obj));
+    } else {
+        clock_gettime(CLOCK_REALTIME, &ts);
+        srand((unsigned)ts.tv_nsec);
+    }
     int total_agent_count = 0;
     int env_count = 0;
     int max_envs = sequential_map_sampling ? num_maps : num_agents;

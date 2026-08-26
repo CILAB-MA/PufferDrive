@@ -230,6 +230,9 @@ class Drive_PBT(pufferlib.PufferEnv):
             )
         self.max_controlled_agents = int(max_controlled_agents)
 
+        self._map_sample_seed = int(seed)
+        self._resample_count = 0
+
         # Iterate through all maps to count total agents that can be initialized for each map
         agent_offsets, map_ids, num_envs, ego_indices = binding.shared(
             map_dir=map_dir,
@@ -243,6 +246,7 @@ class Drive_PBT(pufferlib.PufferEnv):
             goal_behavior=self.goal_behavior,
             goal_target_distance=self.goal_target_distance,
             sequential_map_sampling=sequential_map_sampling,
+            seed=self._map_sample_seed,
         )
         # agent_offsets[-1] works in both cases, just making it explicit that num_agents is ignored if sequential_map_sampling is True
         self.num_agents = num_agents if not sequential_map_sampling else agent_offsets[-1]
@@ -812,6 +816,9 @@ class Drive_PBT(pufferlib.PufferEnv):
             partner_resampled = True
             self.tick = 0
             binding.vec_close(self.c_envs)
+            self._resample_count += 1
+            # Deterministic map pack + env_init seed from train seed and resample index.
+            seed = int(self._map_sample_seed + self._resample_count * 10007) & 0x7FFFFFFF
             agent_offsets, map_ids, num_envs, ego_indices = binding.shared(
                 num_agents=self.num_agents,
                 num_maps=self.num_maps,
@@ -826,6 +833,7 @@ class Drive_PBT(pufferlib.PufferEnv):
                 aggressive_speed=self.aggressive_speed,
                 map_dir=self.map_dir,
                 sequential_map_sampling=False,  # Always use random sampling with replacement
+                seed=seed,
             )
             self.agent_offsets = agent_offsets
             self.map_ids = map_ids
@@ -839,7 +847,6 @@ class Drive_PBT(pufferlib.PufferEnv):
             self._ego_index_set = set(self.ego_indices.tolist())
 
             env_ids = []
-            seed = np.random.randint(0, 2**32 - 1)
             for i in range(num_envs):
                 cur = agent_offsets[i]
                 nxt = agent_offsets[i + 1]
