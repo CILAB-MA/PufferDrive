@@ -162,11 +162,13 @@ struct Log {
     float n;
     float lane_alignment_rate;
     float speed_at_goal;
+    float time_to_goal;
     float active_agent_count;
     float expert_static_agent_count;
     float static_agent_count;
     // only record first agent
     float ego_speed_at_goal;
+    float ego_time_to_goal;
     float ego_lane_alignment_rate;
     float ego_offroad_rate;
     float ego_collision_rate;
@@ -400,6 +402,7 @@ void add_log(Drive *env) {
         int lane_aligned = env->logs[i].lane_alignment_rate;
         env->log.lane_alignment_rate += lane_aligned;
         env->log.speed_at_goal += env->logs[i].speed_at_goal;
+        env->log.time_to_goal += env->logs[i].time_to_goal;
         env->log.episode_length += env->logs[i].episode_length;
         env->log.episode_return += env->logs[i].episode_return;
         // ego_local_indices from Python when num_ego_local > 0; legacy i==0 only when
@@ -413,6 +416,7 @@ void add_log(Drive *env) {
             env->log.ego_offroad_rate += offroad;
             env->log.ego_collision_rate += collided;
             env->log.ego_speed_at_goal += env->logs[i].speed_at_goal;
+            env->log.ego_time_to_goal += env->logs[i].time_to_goal;
             env->log.ego_lane_alignment_rate += lane_aligned;
             env->log.ego_collisions_per_agent += collisions_per_agent;
             env->log.ego_offroad_per_agent += offroad_per_agent;
@@ -2291,10 +2295,12 @@ void c_step(Drive *env) {
                 env->logs[i].episode_return = env->reward_goal;
                 env->entities[agent_idx].stopped = 1;
                 env->entities[agent_idx].vx = env->entities[agent_idx].vy = 0.0f;
+                env->entities[agent_idx].current_goal_reached = 1;
                 env->entities[agent_idx].goals_reached_this_episode += 1.0f;
             }
             env->entities[agent_idx].metrics_array[REACHED_GOAL_IDX] = 1.0f;
             env->logs[i].speed_at_goal = current_speed;
+            env->logs[i].time_to_goal = (float)env->timestep * env->dt;
             
         }
 

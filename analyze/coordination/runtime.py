@@ -172,6 +172,20 @@ def load_checkpoint(path: str, device: str | torch.device = "cpu") -> dict:
     return {k.replace("module.", ""): v for k, v in state_dict.items()}
 
 
+DRIVE_MAP_DIRS = {
+    "training": "/data/puffer/resources/drive/binaries/training",
+    "validation": "/data/puffer/resources/drive/binaries/validation",
+}
+
+
+def resolve_drive_map_dir(data_mode: str, map_dir: str | None = None) -> str:
+    if map_dir:
+        return str(map_dir)
+    if data_mode not in DRIVE_MAP_DIRS:
+        raise ValueError(f"data_mode must be training|validation, got {data_mode!r}")
+    return DRIVE_MAP_DIRS[data_mode]
+
+
 def build_human_replay_drive_args(
     config_path: str | None = None,
     *,
@@ -179,6 +193,7 @@ def build_human_replay_drive_args(
     device: str = "cuda",
     data_mode: str = "training",
     map_start: int = 0,
+    map_dir: str | None = None,
 ) -> dict:
     from pufferlib.pufferl import load_config
 
@@ -202,8 +217,14 @@ def build_human_replay_drive_args(
             "support (see binding.c's map_idx). Only map_start=0 works today."
         )
 
-    map_section = args.get(data_mode) or args["eval"]
-    args["env"]["map_dir"] = map_section["map_dir"]
+    if data_mode not in ("training", "validation"):
+        raise ValueError(f"data_mode must be training|validation, got {data_mode!r}")
+    map_section = args.get(data_mode) or {}
+    args["env"]["map_dir"] = (
+        str(map_dir)
+        if map_dir
+        else (map_section.get("map_dir") or resolve_drive_map_dir(data_mode))
+    )
     args["env"]["num_maps"] = num_maps
     args["env"]["sequential_map_sampling"] = True
     args["env"]["episode_length"] = 91
