@@ -664,6 +664,25 @@ class HumanReplayEvaluator:
         self.config = config
         self.sim_steps = 91
 
+    @staticmethod
+    def _ego_indices_from_infos(infos, *, num_agents_stride: int = 0) -> list[int]:
+        """Controlled ego agent index per map (SDC under ``control_sdc_only``)."""
+        if not isinstance(infos, list):
+            infos = [infos] if infos else []
+        ego_indices: list[int] = []
+        for env_i, info in enumerate(infos):
+            if not isinstance(info, dict):
+                continue
+            raw_egos = info.get("ego_indices")
+            if raw_egos:
+                ego_indices.extend(int(idx) + num_agents_stride * env_i for idx in raw_egos)
+                continue
+            ao = info.get("agent_offsets")
+            if ao is None or len(ao) < 2:
+                continue
+            ego_indices.extend(int(ao[j]) + num_agents_stride * env_i for j in range(len(ao) - 1))
+        return ego_indices
+
     def rollout(self, args, puffer_env, policy):
         """Roll out policy in env with human replays. Store statistics.
 
@@ -677,9 +696,9 @@ class HumanReplayEvaluator:
             policy: Trained policy to evaluate
 
         Returns:
-            dict: Aggregated metrics including:
-                - avg_collisions_per_agent: Average collisions per agent
-                - avg_offroad_per_agent: Average offroad events per agent
+            dict: Aggregated metrics including env log fields (``speed_at_goal``,
+                ``time_to_goal``, ``ego_speed_at_goal``, ``ego_time_to_goal``) plus
+                ``ego_speed`` (episode-mean normalized speed from obs).
         """
         import numpy as np
         import torch
@@ -688,7 +707,20 @@ class HumanReplayEvaluator:
         num_agents = puffer_env.observation_space.shape[0]
         device = args["train"]["device"]
 
-        obs, info = puffer_env.reset()
+        obs, reset_info = puffer_env.reset()
+        infos = reset_info if isinstance(reset_info, list) else [reset_info]
+        num_agents_stride = int(args.get("env", {}).get("num_agents", num_agents))
+        ego_indices = self._ego_indices_from_infos(
+            infos, num_agents_stride=num_agents_stride
+        )
+        if not ego_indices:
+            driver = getattr(puffer_env, "driver_env", None)
+            ao = getattr(driver, "agent_offsets", None) if driver is not None else None
+            if ao is not None and len(ao) > 1:
+                ego_indices = [int(ao[j]) for j in range(len(ao) - 1)]
+            else:
+                ego_indices = [0]
+
         state = {}
         if args["train"]["use_rnn"]:
             state = dict(
@@ -696,10 +728,14 @@ class HumanReplayEvaluator:
                 lstm_c=torch.zeros(num_agents, policy.hidden_size, device=device),
             )
 
+        ego_speed = 0.0
         for time_idx in range(self.sim_steps):
             # Step policy
             with torch.no_grad():
                 ob_tensor = torch.as_tensor(obs).to(device)
+                if ego_indices:
+                    ob_ego = ob_tensor[ego_indices]
+                    ego_speed += float(ob_ego[:, 2].mean())
                 logits, value = policy.forward_eval(ob_tensor, state)
                 action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
                 action_np = action.cpu().numpy().reshape(puffer_env.action_space.shape)
@@ -711,6 +747,8 @@ class HumanReplayEvaluator:
 
             if len(info_list) > 0:  # Happens at the end of episode
                 results = info_list[0]
+                if ego_indices:
+                    results["ego_speed"] = ego_speed / (time_idx + 1)
                 return results
 
 
@@ -945,7 +983,7 @@ class OtherReplayEvaluator:
                 results["ego_speed"] = ego_speed.item()
                 res_dict = {f"{args['load_multiple_model_path'][0][-11:-3]}_vs_{args['load_multiple_model_path'][1][-11:-3]}": results}
                 print(res_dict)
-                self.save_result(f"/data/puffer/results/{self.mode}/zeroshot.json", res_dict)
+                self.save_result(f"/data/puffer/results/{self.exp}/{self.mode}/zeroshot.json", res_dict)
                 return results
 
     def build_global_ids(self, agent_offsets, map_ids, entity_ids, num_maps):
