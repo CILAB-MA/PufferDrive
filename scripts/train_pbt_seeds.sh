@@ -13,7 +13,7 @@
 #   ./analyze/zero_shot.sh 0 replay_prioritized_nominal popul_lane_nominal
 #
 # Env:
-#   MODE              record | reactive          (default: record)
+#   MODE              record | reactive | mixed   (default: record)
 #   STRATEGY          uniform | prioritized | curriculum  (default: prioritized)
 #   POP_PATH          population corpus dir
 #                     default: curriculum → /data/puffer/popul_curriculum
@@ -54,8 +54,12 @@ fi
 case "${MODE}" in
   record) PBT_MODE="replay" ;;
   reactive) PBT_MODE="reactive" ;;
+  mixed)
+    PBT_MODE="mixed"
+    PARTNER_REPLAY_PROB="${PARTNER_REPLAY_PROB:-0.5}"
+    ;;
   *)
-    echo "MODE must be record or reactive (got: ${MODE})" >&2
+    echo "MODE must be record, reactive, or mixed (got: ${MODE})" >&2
     exit 1
     ;;
 esac
@@ -104,7 +108,7 @@ if [[ "${MODE}" == "record" ]]; then
     echo "  (collect + merge, e.g. analyze/data_concat.py)" >&2
     exit 1
   fi
-else
+elif [[ "${MODE}" == "reactive" ]]; then
   if [[ ! -f "${POP_PATH}/saved/population_keys.npy" ]]; then
     echo "Reactive mode requires ${POP_PATH}/saved/population_keys.npy" >&2
     exit 1
@@ -138,6 +142,43 @@ PY
     echo "Reactive mode requires *.pt in ${POP_PATH} or a population_manifest.json" >&2
     exit 1
   fi
+else
+  if [[ ! -f "${POP_PATH}/saved/other_actions_actions.npy" ]]; then
+    echo "Mixed mode requires ${POP_PATH}/saved/other_actions_actions.npy" >&2
+    exit 1
+  fi
+  if [[ ! -f "${POP_PATH}/saved/population_keys.npy" ]]; then
+    echo "Mixed mode requires ${POP_PATH}/saved/population_keys.npy" >&2
+    exit 1
+  fi
+  MANIFEST="${POP_PATH}/saved/population_manifest.json"
+  if [[ ! -f "${MANIFEST}" ]]; then
+    MANIFEST="${POP_PATH}/population_manifest.json"
+  fi
+  if [[ -f "${MANIFEST}" ]]; then
+    if ! "${PYTHON}" - "${MANIFEST}" "${POP_PATH}" <<'PY'
+import json, os, sys
+man_path, pop = sys.argv[1], sys.argv[2]
+with open(man_path) as f:
+    keys = json.load(f).get("keys") or []
+if not keys:
+    raise SystemExit(1)
+for e in keys:
+    ckpt = e["checkpoint"]
+    src = os.path.join(e.get("population") or pop, ckpt)
+    alt = os.path.join(pop, ckpt)
+    if not (os.path.isfile(src) or os.path.isfile(alt)):
+        print(f"Missing reactive checkpoint: {src}", file=sys.stderr)
+        raise SystemExit(1)
+PY
+    then
+      echo "Mixed manifest checkpoints missing (see above)" >&2
+      exit 1
+    fi
+  elif ! compgen -G "${POP_PATH}/*.pt" > /dev/null; then
+    echo "Mixed mode requires *.pt in ${POP_PATH} or a population_manifest.json" >&2
+    exit 1
+  fi
 fi
 
 if [[ "${STRATEGY}" == "curriculum" ]]; then
@@ -153,6 +194,9 @@ fi
 echo "========== Drive-PBT train =========="
 echo "  exp=${EXP_NAME}"
 echo "  mode=${MODE} (pbt_mode=${PBT_MODE})"
+if [[ "${MODE}" == "mixed" ]]; then
+  echo "  partner_replay_prob=${PARTNER_REPLAY_PROB}"
+fi
 echo "  strategy=${STRATEGY}"
 echo "  population=${POP_PATH}"
 echo "  data_dir=${DATA_DIR}"
@@ -186,6 +230,10 @@ for SEED in "${SEED_LIST[@]}"; do
     --wandb-group "${EXP_NAME}"
     --wandb-project "${WANDB_PROJECT}"
   )
+
+  if [[ "${MODE}" == "mixed" ]]; then
+    CMD+=(--pbt.partner-replay-prob "${PARTNER_REPLAY_PROB}")
+  fi
 
   if [[ "${STRATEGY}" == "prioritized" ]]; then
     CMD+=(--pbt.score-transform "${SCORE_TRANSFORM}")

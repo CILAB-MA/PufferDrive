@@ -8,7 +8,7 @@ class AgentSampler:
         self,
         num_combination,  # shared sampling axis: corpus rows (replay actions / reactive pop_keys)
         strategy="prioritized", # options: ["prioritized", "uniform"]
-        pbt_mode="replay", # options: ["replay", "reactive"]
+        pbt_mode="replay",  # options: ["replay", "reactive", "mixed"]
         score_transform="power",
         temperature=1.0,
         eps=0.05,

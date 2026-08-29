@@ -168,7 +168,7 @@ class PuffeRL:
                 self.num_other_per_env = int(self.num_agents_per_env  * (1 - self.ego_ratio))
                 self.lstm_h = {i * self.num_agents_per_env: torch.zeros(num_ego, h, device=device) for i in range(total_agents // self.num_agents_per_env)}
                 self.lstm_c = {i * self.num_agents_per_env: torch.zeros(num_ego, h, device=device) for i in range(total_agents // self.num_agents_per_env)}
-                if config["pbt_mode"] == "reactive":
+                if config["pbt_mode"] in ("reactive", "mixed"):
                     self.other_lstm_cs = []
                     self.other_lstm_hs = []
                     self.num_other_policies = len(other_policies)
@@ -202,7 +202,7 @@ class PuffeRL:
         # Torch compile
         self.uncompiled_policy = policy
         self.policy = policy
-        if config["use_pbt"] and config["pbt_mode"] == "reactive":
+        if config["use_pbt"] and config["pbt_mode"] in ("reactive", "mixed"):
             # Torch compile (other)
             self.uncompiled_other_policy = other_policies
             self.other_policies = []
@@ -1778,9 +1778,9 @@ def train_pbt(env_name, args=None, vecenv=None, policy=None, logger=None, config
     vecenv = vecenv or load_env(env_name, args)
     policy = policy or load_policy(args, vecenv, env_name)
 
-    # if the pbt train mode is reactive, load other policies (manifest-aware)
+    # if the pbt train mode is reactive/mixed, load other policies (manifest-aware)
     policies = None
-    if args["pbt"]["pbt_mode"] == "reactive":
+    if args["pbt"]["pbt_mode"] in ("reactive", "mixed"):
         from pufferlib.ocean.drive_pbt.drive_pbt import resolve_reactive_policy_files
 
         policy_files = resolve_reactive_policy_files(args["pbt"]["population_path"])
@@ -1823,7 +1823,7 @@ def train_pbt(env_name, args=None, vecenv=None, policy=None, logger=None, config
     while pufferl.global_step < train_config["total_timesteps"]:
         if train_config["device"] == "cuda":
             torch.compiler.cudagraph_mark_step_begin()
-        if args["pbt"]["pbt_mode"] == "reactive":
+        if args["pbt"]["pbt_mode"] in ("reactive", "mixed"):
             pufferl.evaluate_pbt()
         elif args["pbt"]["pbt_mode"] == "replay":
             pufferl.evaluate_pbt_replay()
@@ -1840,7 +1840,7 @@ def train_pbt(env_name, args=None, vecenv=None, policy=None, logger=None, config
     i = 0
     stats = {}
     while i < 32 or not stats:
-        if args["pbt"]["pbt_mode"] == "reactive":
+        if args["pbt"]["pbt_mode"] in ("reactive", "mixed"):
             stats = pufferl.evaluate_pbt()
         elif args["pbt"]["pbt_mode"] == "replay":
             stats = pufferl.evaluate_pbt_replay()

@@ -115,7 +115,8 @@ class Drive_PBT(pufferlib.PufferEnv):
         control_mode="control_vehicles",
         map_dir="resources/drive/binaries/training",
         sequential_map_sampling=False,
-        pbt_mode="reactive", # reactive or replay
+        pbt_mode="reactive",  # reactive, replay, or mixed
+        partner_replay_prob=0.5,  # mixed: per-env P(replay partners)
         population_path=None, # for replay
         ego_ratio=0.0, # for replay
         strategy="prioritized",  # prioritized, uniform, curriculum
@@ -306,6 +307,11 @@ class Drive_PBT(pufferlib.PufferEnv):
         self.ego_ratio = ego_ratio
         self.population_path = population_path
         self.pbt_mode = pbt_mode
+        self.partner_replay_prob = float(partner_replay_prob)
+        if not (0.0 <= self.partner_replay_prob <= 1.0):
+            raise ValueError(
+                f"partner_replay_prob must be in [0, 1], got {self.partner_replay_prob}"
+            )
         self.strategy = strategy
         # PLR learns assignment scores; uniform/curriculum only sample.
         self._score_tracking_enabled = strategy == "prioritized"
@@ -314,7 +320,7 @@ class Drive_PBT(pufferlib.PufferEnv):
         self.global_ids = np.load(fp_gid, mmap_mode="r")
         valid_global_ids = np.asarray(self.global_ids)[np.asarray(self.global_ids) >= 0]
 
-        if pbt_mode in ("replay", "reactive"):
+        if pbt_mode in ("replay", "reactive", "mixed"):
             self._load_corpus_layout(saved_dir)
 
         if pbt_mode == "replay":
@@ -327,6 +333,53 @@ class Drive_PBT(pufferlib.PufferEnv):
             self.replay_actions = np.zeros(
                 (self.num_agents, self.resample_frequency, 1), dtype=np.int32
             )
+            self._init_partner_tracking(strategy, score_transform, curriculum_types,
+                                       curriculum_types_path, curriculum_steps)
+        elif pbt_mode == "mixed":
+            fp_actions = os.path.join(saved_dir, "other_actions_actions.npy")
+            fp_pk = os.path.join(saved_dir, "population_keys.npy")
+            self.other_actions = np.load(fp_actions, mmap_mode="r")
+            self.population_keys = np.load(fp_pk, mmap_mode="r")
+            replay_rows = int(self.other_actions.shape[0])
+            reactive_rows = int(self.population_keys.shape[0])
+            if replay_rows != reactive_rows:
+                raise ValueError(
+                    f"Mixed mode requires matching corpus rows: "
+                    f"other_actions.shape[0]={replay_rows} != "
+                    f"population_keys.shape[0]={reactive_rows}"
+                )
+            if self.population_keys.ndim != 2:
+                raise ValueError(
+                    f"{fp_pk}: expected shape (num_combination, num_agents), "
+                    f"got {self.population_keys.shape}"
+                )
+            if int(self.population_keys.shape[1]) != int(self.actions_agent_offsets[-1]):
+                raise ValueError(
+                    f"{fp_pk}: agent dim {self.population_keys.shape[1]} != "
+                    f"offsets[-1] {int(self.actions_agent_offsets[-1])}"
+                )
+            self.combination_index = self._resolve_combination_index(
+                num_combination, replay_rows, source=f"{fp_actions} / {fp_pk}"
+            )
+            self.num_combination = int(self.combination_index.size)
+            self.replay_actions = np.zeros(
+                (self.num_agents, self.resample_frequency, 1), dtype=np.int32
+            )
+            policy_files = resolve_reactive_policy_files(population_path)
+            populations = [name for _, name in policy_files]
+            self.num_other_policies = len(populations)
+            if self.num_other_policies < 1:
+                raise FileNotFoundError(f"No reactive policies resolved under {population_path}")
+            self.population_key_to_policy_idx = self._build_population_key_to_policy_idx(
+                saved_dir, populations
+            )
+            n_other = int(self.other_indices_arr.size)
+            self.policy_per_slot_flatten = np.full(n_other, -1, dtype=np.int64)
+            self.policy_per_slot = [
+                np.array([], dtype=np.int64) for _ in range(self.num_other_policies)
+            ]
+            self.env_is_replay = np.zeros(self.num_envs, dtype=bool)
+            self.slot_is_replay = np.zeros(n_other, dtype=bool)
             self._init_partner_tracking(strategy, score_transform, curriculum_types,
                                        curriculum_types_path, curriculum_steps)
         elif pbt_mode == "reactive":
@@ -361,6 +414,10 @@ class Drive_PBT(pufferlib.PufferEnv):
             ]
             self._init_partner_tracking(strategy, score_transform, curriculum_types,
                                        curriculum_types_path, curriculum_steps)
+        else:
+            raise ValueError(
+                f"pbt_mode must be one of replay, reactive, mixed; got {pbt_mode!r}"
+            )
 
     @staticmethod
     def _resolve_combination_index(requested, corpus_size, source=""):
@@ -544,9 +601,9 @@ class Drive_PBT(pufferlib.PufferEnv):
 
         self._init_minimum_map_idx(self.map_ids)
         self.rollout_flatten.fill(-1)
-        if self.pbt_mode == "replay":
+        if self.pbt_mode in ("replay", "mixed"):
             self.replay_actions.fill(-1)
-        elif self.pbt_mode == "reactive":
+        if self.pbt_mode in ("reactive", "mixed"):
             self.policy_per_slot_flatten.fill(-1)
 
         # assign other indices
@@ -596,13 +653,31 @@ class Drive_PBT(pufferlib.PufferEnv):
             self._set_reactive_per_slot(flat)
         elif self.pbt_mode == "replay":
             self._set_replay_per_slot(flat)
+        elif self.pbt_mode == "mixed":
+            self._sample_env_partner_modes()
+            self._set_replay_per_slot(flat, env_mask=self.env_is_replay)
+            self._set_reactive_per_slot(flat, env_mask=~self.env_is_replay)
 
-    def _set_reactive_per_slot(self, flat):
+    def _sample_env_partner_modes(self):
+        """Per resample: each parallel env independently picks replay vs reactive partners."""
+        self.env_is_replay = np.random.rand(self.num_envs) < self.partner_replay_prob
+        env_per_other = self._env_per_agent()[self.other_indices_arr]
+        self.slot_is_replay = self.env_is_replay[env_per_other]
+
+    def _set_reactive_per_slot(self, flat, env_mask=None):
         """Resolve population_keys for the selected corpus row into live policy slots."""
         agent_policy = np.full(self.num_agents, -1, dtype=np.int64)
         agent_ind = 0
         lut = self.population_key_to_policy_idx
-        for map_id, combination_idx in zip(self.minimum_map_idx, flat):
+        for env_i, (map_id, combination_idx) in enumerate(zip(self.minimum_map_idx, flat)):
+            if env_mask is not None and not env_mask[env_i]:
+                map_indices = int(np.where(self.actions_map_id == int(map_id))[0][0])
+                lo = int(self.actions_agent_offsets[map_indices])
+                hi = int(self.actions_agent_offsets[map_indices + 1])
+                agent_ind += hi - lo
+                continue
+            map_id = int(map_id)
+            combination_idx = int(combination_idx)
             map_id = int(map_id)
             combination_idx = int(combination_idx)
             map_indices = int(np.where(self.actions_map_id == map_id)[0][0])
@@ -629,10 +704,16 @@ class Drive_PBT(pufferlib.PufferEnv):
             for policy_idx in range(self.num_other_policies)
         ]
 
-    def _set_replay_per_slot(self, flat):
+    def _set_replay_per_slot(self, flat, env_mask=None):
         """Copy the selected replay record trajectories into the action buffer."""
         agent_ind = 0
-        for map_id, combination_idx in zip(self.minimum_map_idx, flat):
+        for env_i, (map_id, combination_idx) in enumerate(zip(self.minimum_map_idx, flat)):
+            if env_mask is not None and not env_mask[env_i]:
+                map_indices = int(np.where(self.actions_map_id == int(map_id))[0][0])
+                lo = int(self.actions_agent_offsets[map_indices])
+                hi = int(self.actions_agent_offsets[map_indices + 1])
+                agent_ind += hi - lo
+                continue
             map_id = int(map_id)
             combination_idx = int(combination_idx)
             map_indices = int(np.where(self.actions_map_id == map_id)[0][0])
@@ -776,9 +857,12 @@ class Drive_PBT(pufferlib.PufferEnv):
         if self._score_tracking_enabled:
             self._update_minimum_distance()
         info = [{"agent_offsets": self.agent_offsets, "map_ids": self.map_ids, "num_envs": self.num_envs, "ego_indices": self.ego_indices}]
-        if self.pbt_mode == "reactive":
+        if self.pbt_mode in ("reactive", "mixed"):
             info[0]["other_indices"] = self.policy_per_slot
             info[0]["combination_ids"] = self.combination_ids.copy()
+        if self.pbt_mode == "mixed":
+            info[0]["env_is_replay"] = self.env_is_replay.copy()
+            info[0]["mixed_replay_frac"] = float(self.slot_is_replay.mean())
         info[0]["partner_resampled"] = partner_resampled
         if self._last_sampling_metrics:
             info[0].update(self._sampling_info_groups())
@@ -788,8 +872,13 @@ class Drive_PBT(pufferlib.PufferEnv):
         self.terminals[:] = 0
         self.actions[:] = actions
         if self.pbt_mode == "replay":
-            self.actions[self.other_indices_arr] = self.replay_actions[self.other_indices_arr, self.tick, :]
-            # self.actions[:] = self.replay_actions[:, self.tick, :]
+            self.actions[self.other_indices_arr] = self.replay_actions[
+                self.other_indices_arr, self.tick, :
+            ]
+        elif self.pbt_mode == "mixed":
+            replay_slots = self.other_indices_arr[self.slot_is_replay]
+            if replay_slots.size:
+                self.actions[replay_slots] = self.replay_actions[replay_slots, self.tick, :]
         binding.vec_step(self.c_envs)
         if self._score_tracking_enabled: # TODO: 현재는 Return 기반만 구현되어 있음
             self._update_minimum_distance()
@@ -897,9 +986,12 @@ class Drive_PBT(pufferlib.PufferEnv):
             info[0]["map_ids"] = self.map_ids
             info[0]["num_envs"] = self.num_envs
             info[0]["ego_indices"] = self.ego_indices
-        if self.pbt_mode == "reactive":
+        if self.pbt_mode in ("reactive", "mixed"):
             info[0]["other_indices"] = self.policy_per_slot
             info[0]["combination_ids"] = self.combination_ids.copy()
+        if self.pbt_mode == "mixed":
+            info[0]["env_is_replay"] = self.env_is_replay.copy()
+            info[0]["mixed_replay_frac"] = float(self.slot_is_replay.mean())
         info[0]["partner_resampled"] = partner_resampled
         if self._last_sampling_metrics:
             info[0].update(self._sampling_info_groups())
