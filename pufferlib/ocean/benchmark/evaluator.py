@@ -697,8 +697,8 @@ class HumanReplayEvaluator:
 
         Returns:
             dict: Aggregated metrics including env log fields (``speed_at_goal``,
-                ``time_to_goal``, ``ego_speed_at_goal``, ``ego_time_to_goal``) plus
-                ``ego_speed`` (episode-mean normalized speed from obs).
+                ``ego_speed_at_goal``) plus ``ego_speed`` (episode-mean normalized
+                speed from obs).
         """
         import numpy as np
         import torch

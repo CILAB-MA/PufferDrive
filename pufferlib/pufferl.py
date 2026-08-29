@@ -1932,7 +1932,8 @@ def eval(env_name, args=None, vecenv=None, policy=None):
         args["vec"] = dict(backend=backend, num_envs=1)
         args["env"]["control_mode"] = args["eval"]["human_replay_control_mode"]
         args["env"]["episode_length"] = 91  # WOMD scenario length
-        args["env"]["termination_mode"] = 0 # Should be 0 for human replay evaluation
+        args["env"]["termination_mode"] = 0  # terminate at episode_length
+        args["env"]["goal_behavior"] = 0  # respawn/remove (not wosac stop)
         vecenv = vecenv or load_env(env_name, args)
         policy = policy or load_policy(args, vecenv, env_name)
 
@@ -2361,6 +2362,8 @@ def zero_shot(env_name, args=None, vecenv=None, policies=None):
     args["vec"] = dict(backend=backend, num_envs=1)
     # args["env"]["control_mode"] = args["eval"]["human_replay_control_mode"]
     args["env"]["episode_length"] = 91  # WOMD scenario length
+    args["env"]["termination_mode"] = 0
+    args["env"]["goal_behavior"] = 0
     args2 = args.copy()
 
     if (

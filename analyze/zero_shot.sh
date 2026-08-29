@@ -7,23 +7,52 @@
 #   EVAL_MODE   replay | reactive-play | both
 #               zero-shot protocol: frozen-other replay vs live reactive-play
 #   UNSEEN_MODE unseen_other_rewards | unseen_other_seeds | all
+#   DATA_MODE   training | validation  (default: validation — eval map corpus)
+#   MAP_DIR     absolute path; overrides DATA_MODE
 #
 # Usage:
 #   STRATEGY=uniform POP_PATH=lane_nominal ./analyze/zero_shot.sh 0
 #   TRAIN_MODE=record STRATEGY=uniform EVAL_MODE=replay ./analyze/zero_shot.sh 0
 #   MODE=reactive STRATEGY=uniform EVAL_MODE=both ./analyze/zero_shot.sh 0
 #   ./analyze/zero_shot.sh 0 replay_uniform_nominal popul_lane_nominal unseen_other_seeds both
+#   DATA_MODE=validation ./analyze/zero_shot.sh 0 human_uniform_nominal popul_nominal all both
+#   DATA_MODE=training ./analyze/zero_shot.sh 0 human_uniform_nominal popul_nominal all both
 #
 # Defaults:
 #   TRAIN_MODE=all   → record + reactive ego
 #   UNSEEN_MODE=all  → unseen_other_rewards + unseen_other_seeds
 #   EVAL_MODE=both   → replay + reactive-play
+#   DATA_MODE=validation → /data/puffer/resources/drive/binaries/validation
 #
 # POP_PATH: suffix after popul_ (lane_nominal | mix | curriculum | ...)
 #   → /data/puffer/popul_${POP_PATH}
 # FOLDER (arg 2) pins a single ego dir and skips the TRAIN_MODE loop.
 set -euo pipefail
 GPU_ID=${1:-0}
+DRIVE_BINARIES_ROOT="${DRIVE_BINARIES_ROOT:-/data/puffer/resources/drive/binaries}"
+
+resolve_map_dir() {
+  if [[ -n "${MAP_DIR:-}" ]]; then
+    echo "${MAP_DIR}"
+    return
+  fi
+  local mode="${DATA_MODE:-validation}"
+  case "${mode}" in
+    training|validation)
+      echo "${DRIVE_BINARIES_ROOT}/${mode}"
+      ;;
+    *)
+      echo "DATA_MODE must be training or validation (got: ${mode})" >&2
+      exit 1
+      ;;
+  esac
+}
+
+EVAL_MAP_DIR="$(resolve_map_dir)"
+if [[ ! -d "${EVAL_MAP_DIR}" ]]; then
+  echo "Missing map_dir: ${EVAL_MAP_DIR}" >&2
+  exit 1
+fi
 
 # train_pbt_seeds.sh MODE=record|reactive
 TRAIN_MODE="${TRAIN_MODE:-${MODE:-all}}"
@@ -131,7 +160,9 @@ run_zeroshot() {
       "/data/puffer/experiments/${FOLDER}/puffer_drive_${ego_id}.pt" \
       "/data/puffer/${POPULATION_MODE}/${UNSEEN_MODE}/puffer_drive_${other_id}.pt" \
     --zero-shot-mode "${zsm}" \
+    --eval.map-dir "${EVAL_MAP_DIR}" \
     --env.termination-mode "0" \
+    --env.goal-behavior "0" \
     --pbt.pbt-mode "replay" \
     "${extra[@]}"
 }
@@ -168,6 +199,7 @@ run_one() {
 
   echo "========== zeroshot =========="
   echo "  train_mode=${tm}  eval_mode=${eval_one}  unseen=${UNSEEN_MODE}"
+  echo "  map_dir=${EVAL_MAP_DIR}  data_mode=${DATA_MODE:-validation}"
   echo "  folder=${FOLDER}"
   echo "  others=/data/puffer/${POPULATION_MODE}/${UNSEEN_MODE}"
   echo "  egos=${EGOS[*]-}"
@@ -208,7 +240,7 @@ run_one() {
   done
 }
 
-echo "TRAIN_MODE=${TRAIN_MODE_LIST[*]}  EVAL_MODE=${EVAL_LIST[*]}  UNSEEN=${UNSEEN_LIST[*]}  POP=${POP_NAME}  STRATEGY=${STRATEGY}"
+echo "TRAIN_MODE=${TRAIN_MODE_LIST[*]}  EVAL_MODE=${EVAL_LIST[*]}  UNSEEN=${UNSEEN_LIST[*]}  POP=${POP_NAME}  STRATEGY=${STRATEGY}  MAP=${EVAL_MAP_DIR}"
 
 for tm in "${TRAIN_MODE_LIST[@]}"; do
   if [[ -n "${FOLDER_ARG}" ]]; then

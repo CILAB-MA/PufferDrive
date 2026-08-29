@@ -292,10 +292,8 @@ static int my_log(PyObject *dict, Log *log) {
     assign_to_dict(dict, "goals_sampled_this_episode", log->goals_sampled_this_episode);
     assign_to_dict(dict, "goals_reached_this_episode", log->goals_reached_this_episode);
     assign_to_dict(dict, "speed_at_goal", log->speed_at_goal);
-    assign_to_dict(dict, "time_to_goal", log->time_to_goal);
     // ego log
     assign_to_dict(dict, "ego_speed_at_goal", log->ego_speed_at_goal);
-    assign_to_dict(dict, "ego_time_to_goal", log->ego_time_to_goal);
     assign_to_dict(dict, "ego_lane_alignment_rate", log->ego_lane_alignment_rate);
     assign_to_dict(dict, "ego_offroad_rate", log->ego_offroad_rate);
     assign_to_dict(dict, "ego_collision_rate", log->ego_collision_rate);

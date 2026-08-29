@@ -3,21 +3,50 @@
 #
 # TRAIN_MODE  record | reactive | all
 #             same as scripts/train_pbt_seeds.sh MODE (MODE= is accepted as an alias)
+#   DATA_MODE   training | validation  (default: validation — eval map corpus)
+#   MAP_DIR     absolute path; overrides DATA_MODE
 #
 # Usage:
 #   STRATEGY=uniform POP_PATH=lane_nominal ./analyze/logreplay.sh 0
 #   TRAIN_MODE=record STRATEGY=uniform ./analyze/logreplay.sh 0
 #   MODE=reactive STRATEGY=uniform ./analyze/logreplay.sh 0
 #   ./analyze/logreplay.sh 0 replay_uniform_nominal
+#   DATA_MODE=validation ./analyze/logreplay.sh 0 human_uniform_nominal
+#   DATA_MODE=training ./analyze/logreplay.sh 0 human_uniform_nominal
 #
 # Defaults:
 #   TRAIN_MODE=all → record + reactive ego
+#   DATA_MODE=validation → /data/puffer/resources/drive/binaries/validation
 #
 # POP_PATH: suffix after popul_ (lane_nominal | mix | curriculum | ...)
 # FOLDER (arg 2) pins a single ego dir and skips the TRAIN_MODE loop.
 set -euo pipefail
 GPU_ID=${1:-0}
 NUM_MAPS="${NUM_MAPS:-10000}"
+DRIVE_BINARIES_ROOT="${DRIVE_BINARIES_ROOT:-/data/puffer/resources/drive/binaries}"
+
+resolve_map_dir() {
+  if [[ -n "${MAP_DIR:-}" ]]; then
+    echo "${MAP_DIR}"
+    return
+  fi
+  local mode="${DATA_MODE:-validation}"
+  case "${mode}" in
+    training|validation)
+      echo "${DRIVE_BINARIES_ROOT}/${mode}"
+      ;;
+    *)
+      echo "DATA_MODE must be training or validation (got: ${mode})" >&2
+      exit 1
+      ;;
+  esac
+}
+
+EVAL_MAP_DIR="$(resolve_map_dir)"
+if [[ ! -d "${EVAL_MAP_DIR}" ]]; then
+  echo "Missing map_dir: ${EVAL_MAP_DIR}" >&2
+  exit 1
+fi
 
 # train_pbt_seeds.sh MODE=record|reactive
 TRAIN_MODE="${TRAIN_MODE:-${MODE:-all}}"
@@ -104,6 +133,7 @@ run_one() {
 
   echo "========== log-replay =========="
   echo "  train_mode=${tm}  folder=${FOLDER}"
+  echo "  map_dir=${EVAL_MAP_DIR}  data_mode=${DATA_MODE:-validation}"
   echo "  num_maps=${NUM_MAPS}"
   echo "  egos=${EGOS[*]-}"
   echo "================================"
@@ -118,13 +148,15 @@ run_one() {
     CUDA_VISIBLE_DEVICES=$GPU_ID puffer eval puffer_drive \
       --eval.human-replay-eval True \
       --eval.human-replay-save-results True \
+      --eval.map-dir "${EVAL_MAP_DIR}" \
       --env.termination-mode "0" \
+      --env.goal-behavior "0" \
       --eval.wosac-num-maps "${NUM_MAPS}" \
       --load-model-path "/data/puffer/experiments/${FOLDER}/puffer_drive_${EGO}.pt"
   done
 }
 
-echo "TRAIN_MODE=${TRAIN_MODE_LIST[*]}  POP=${POP_NAME}  STRATEGY=${STRATEGY}"
+echo "TRAIN_MODE=${TRAIN_MODE_LIST[*]}  POP=${POP_NAME}  STRATEGY=${STRATEGY}  MAP=${EVAL_MAP_DIR}"
 
 for tm in "${TRAIN_MODE_LIST[@]}"; do
   if [[ -n "${FOLDER_ARG}" ]]; then

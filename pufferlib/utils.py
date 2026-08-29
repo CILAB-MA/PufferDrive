@@ -43,6 +43,8 @@ def run_human_replay_eval_in_subprocess(config, logger, global_step):
             str(eval_config["human_replay_control_mode"]),
             "--env.termination-mode",
             "0",
+            "--env.goal-behavior",
+            "0",
             "--eval.human-replay-save-results",
             "False",
         ]
