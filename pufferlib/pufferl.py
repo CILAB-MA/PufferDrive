@@ -103,8 +103,15 @@ class PuffeRL:
         obs_space = vecenv.single_observation_space
         atn_space = vecenv.single_action_space
         total_agents = vecenv.num_agents
-        if config["use_pbt"]:
-            total_agents = int(vecenv.num_agents_per_env * config["ego_ratio"]) * vecenv.num_environments
+        # PBT: only ego_ratio of each env's agents are learners (human partners are
+        # in-buffer log-replay; replay/reactive partners are population).
+        if config.get("use_pbt"):
+            self.ego_ratio = float(config["ego_ratio"])
+            total_agents = int(
+                vecenv.num_agents_per_env * self.ego_ratio
+            ) * vecenv.num_environments
+        else:
+            self.ego_ratio = 1.0
         self.total_agents = total_agents
 
         # Experience
@@ -162,10 +169,9 @@ class PuffeRL:
             self.lstm_h = {i * n: torch.zeros(n, h, device=device) for i in range(total_agents // n)}
             self.lstm_c = {i * n: torch.zeros(n, h, device=device) for i in range(total_agents // n)}
             if config["use_pbt"]:
-                self.ego_ratio = config["ego_ratio"] # This should be divided with the segments & n
                 num_ego = int(n * self.ego_ratio)
-                self.num_ego_per_env = int(self.num_agents_per_env  * self.ego_ratio)
-                self.num_other_per_env = int(self.num_agents_per_env  * (1 - self.ego_ratio))
+                self.num_ego_per_env = int(self.num_agents_per_env * self.ego_ratio)
+                self.num_other_per_env = int(self.num_agents_per_env * (1.0 - self.ego_ratio))
                 self.lstm_h = {i * self.num_agents_per_env: torch.zeros(num_ego, h, device=device) for i in range(total_agents // self.num_agents_per_env)}
                 self.lstm_c = {i * self.num_agents_per_env: torch.zeros(num_ego, h, device=device) for i in range(total_agents // self.num_agents_per_env)}
                 if config["pbt_mode"] == "reactive":
@@ -2874,8 +2880,26 @@ def load_config(env_name, config_dir=None):
                 matches.append((path, candidate))
         if not matches:
             raise pufferlib.APIUsageError("No config for env_name {}".format(env_name))
-        # Prefer replay/ defaults when multiple inis share env_name (e.g. human/).
-        matches.sort(key=lambda item: (0 if "/replay/" in item[0].replace("\\", "/") else 1, item[0]))
+        # Prefer the ini folder matching --pbt.pbt-mode when present (human/replay/reactive).
+        pbt_mode = None
+        for i, a in enumerate(sys.argv):
+            if a in ("--pbt.pbt-mode", "--pbt.pbt_mode") and i + 1 < len(sys.argv):
+                pbt_mode = sys.argv[i + 1]
+                break
+            if a.startswith("--pbt.pbt-mode=") or a.startswith("--pbt.pbt_mode="):
+                pbt_mode = a.split("=", 1)[1]
+                break
+
+        def _ini_rank(item: tuple) -> tuple:
+            path = item[0]
+            pnorm = path.replace("\\", "/")
+            if pbt_mode and f"/{pbt_mode}/" in pnorm:
+                return (0, path)
+            if "/replay/" in pnorm:
+                return (1, path)
+            return (2, path)
+
+        matches.sort(key=_ini_rank)
         p = matches[0][1]
 
     # Dynamic help menu from config

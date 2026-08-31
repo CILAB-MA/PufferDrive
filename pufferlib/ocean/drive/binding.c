@@ -72,7 +72,6 @@ static PyObject *my_shared(PyObject *self, PyObject *args, PyObject *kwargs) {
     int num_agents = unpack(kwargs, "num_agents");
     PyObject *ego_ratio_obj = PyDict_GetItemString(kwargs, "ego_ratio");
     float ego_ratio = ego_ratio_obj ? (float)PyFloat_AsDouble(ego_ratio_obj) : 0.0f;
-    int ego_num_agents = (int)(ego_ratio * (float)num_agents);
     int partners_as_experts = 0;
     if (kwargs && PyDict_GetItemString(kwargs, "partners_as_experts")) {
         partners_as_experts = (int)unpack(kwargs, "partners_as_experts");
@@ -168,39 +167,38 @@ static PyObject *my_shared(PyObject *self, PyObject *args, PyObject *kwargs) {
     if (!sequential_map_sampling && total_agent_count >= num_agents) {
         total_agent_count = num_agents;
     }
-    if (partners_as_experts) {
-        /* Every active slot is an RL ego; partners are experts outside the buffer. */
-        for (int i = 0; i < total_agent_count; i++) {
-            if (PyList_Append(ego_indices_list, PyLong_FromLong(i)) < 0) {
+    /* ego_ratio of packed slots are learning egos (replay / reactive / human).
+     * Exact global count keeps PuffeRL LSTM / total_agents sizing aligned.
+     * Human partners_as_experts: remaining slots stay in-buffer and follow WOMD
+     * traj in c_step (log-replay). Maps with zero egos are OK — partners still
+     * move_expert via partners_as_experts && !is_ego_local. */
+    int n_ego = (int)(ego_ratio * (float)total_agent_count);
+    if (n_ego > total_agent_count)
+        n_ego = total_agent_count;
+    if (n_ego > 0 && total_agent_count > 0) {
+        int *indices = (int *)malloc((size_t)total_agent_count * sizeof(int));
+        if (!indices) {
+            Py_DECREF(ego_indices_list);
+            Py_DECREF(agent_offsets);
+            Py_DECREF(map_ids);
+            return NULL;
+        }
+        for (int i = 0; i < total_agent_count; i++)
+            indices[i] = i;
+        for (int j = 0; j < n_ego; j++) {
+            int r = j + (rand() % (total_agent_count - j));
+            int t = indices[j];
+            indices[j] = indices[r];
+            indices[r] = t;
+            if (PyList_Append(ego_indices_list, PyLong_FromLong(indices[j])) < 0) {
+                free(indices);
                 Py_DECREF(ego_indices_list);
                 Py_DECREF(agent_offsets);
                 Py_DECREF(map_ids);
                 return NULL;
             }
         }
-    } else {
-        int n_ego = ego_num_agents < total_agent_count ? ego_num_agents : total_agent_count;
-        if (n_ego > 0 && total_agent_count > 0) {
-            int *indices = (int *)malloc((size_t)total_agent_count * sizeof(int));
-            if (indices) {
-                for (int i = 0; i < total_agent_count; i++)
-                    indices[i] = i;
-                for (int j = 0; j < n_ego; j++) {
-                    int r = j + (rand() % (total_agent_count - j));
-                    int t = indices[j];
-                    indices[j] = indices[r];
-                    indices[r] = t;
-                    if (PyList_Append(ego_indices_list, PyLong_FromLong(indices[j])) < 0) {
-                        free(indices);
-                        Py_DECREF(ego_indices_list);
-                        Py_DECREF(agent_offsets);
-                        Py_DECREF(map_ids);
-                        return NULL;
-                    }
-                }
-                free(indices);
-            }
-        }
+        free(indices);
     }
     PyObject *final_total_agent_count = PyLong_FromLong(total_agent_count);
     PyList_SetItem(agent_offsets, env_count, final_total_agent_count);

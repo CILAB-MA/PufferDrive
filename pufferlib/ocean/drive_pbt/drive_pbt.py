@@ -153,7 +153,7 @@ class Drive_PBT(pufferlib.PufferEnv):
         self.resample_frequency = resample_frequency
         self.dynamics_model = dynamics_model
         self.pbt_mode = pbt_mode
-        # human: non-ego controllable vehicles follow WOMD traj via move_expert
+        # human: non-ego buffer slots follow WOMD traj via move_expert (log-replay)
         self.partners_as_experts = 1 if pbt_mode == "human" else 0
         # Observation space calculation
         self.ego_features = {"classic": binding.EGO_FEATURES_CLASSIC, "jerk": binding.EGO_FEATURES_JERK}.get(
@@ -320,7 +320,7 @@ class Drive_PBT(pufferlib.PufferEnv):
         self._last_raw_return_metrics = {}
 
         if self.pbt_mode == "human":
-            # Partners are WOMD traj experts; no population corpus / combination sampling.
+            # Partners are in-buffer WOMD log-replay; no population corpus / combination sampling.
             self.global_ids = None
             self.num_combination = 0
             self._episode_return = np.zeros(self.num_agents, dtype=np.float32)
@@ -558,7 +558,7 @@ class Drive_PBT(pufferlib.PufferEnv):
     def _reset_other_indices(self):
         """Episode/rollout start (after vec_reset): metrics, slot identity, LUT, policy assignment."""
         if self.pbt_mode == "human":
-            # No partner corpus; experts are assigned in C via partners_as_experts.
+            # Partners are in-buffer log-replay (C move_expert); no population corpus.
             return
         # init metrics
         self.minimum_distance.fill(np.inf)
