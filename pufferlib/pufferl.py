@@ -555,64 +555,72 @@ class PuffeRL:
                     if self.num_other_per_env > 0:
                         for n in range(self.num_other_policies):
                             other = np.asarray(info_i["other_indices"][n], dtype=np.int64)
-                            other_indices[n].extend((other + offset))
+                            if other.size:
+                                other_indices[n].extend((other + offset))
 
-            # ego_indices = self.ego_indices.reshape(-1)
             profile("eval_misc", epoch)
             env_id = slice(env_id[0], env_id[-1] + 1)
             done_mask = d + t  # TODO: Handle truncations separately
 
-            if config["use_rnn"]:
-                self._sync_other_lstm(other_indices, env_id.start, device, force_reset=partner_resampled)
+            # Mixed/replay: only reactive partner slots appear in other_indices.
+            # Skip empty policy slots so partner inference scales with replay ratio.
+            active_policies = [
+                (policy_idx, np.asarray(idx, dtype=np.int64))
+                for policy_idx, idx in enumerate(other_indices)
+                if len(idx) > 0
+            ]
+
+            if config["use_rnn"] and active_policies:
+                self._sync_other_lstm(
+                    [idx for _, idx in active_policies],
+                    env_id.start,
+                    device,
+                    force_reset=partner_resampled,
+                )
 
             profile("eval_copy", epoch)
-            o = torch.as_tensor(o)
-            r = torch.as_tensor(r).to(device)  # , non_blocking=True)
-            d = torch.as_tensor(d).to(device)  # , non_blocking=True)
-            o_ego = o[ego_indices]
-            o_ego_device = o_ego.to(device)
-            r_ego = r[ego_indices]
-            d_ego = d[ego_indices]
-            mask_ego = mask[ego_indices]
-            o_others = []
-            r_others = []
-            d_others = []
-            mask_others = []
+            ego_idx = np.asarray(ego_indices, dtype=np.int64)
+            o_ego_device = torch.as_tensor(o[ego_idx], device=device)
+            r_ego = torch.as_tensor(r[ego_idx], device=device)
+            d_ego = torch.as_tensor(d[ego_idx], device=device)
+            mask_ego = mask[ego_idx]
             self.global_step += int(mask_ego.sum())
-            for other_idx in other_indices:
-                o_others.append(o[other_idx].to(device))
-                r_others.append(r[other_idx])
-                d_others.append(d[other_idx])
-                mask_others.append(mask[other_idx])
-                
+
             profile("eval_forward", epoch)
+            action_others = {}
+            other_states = {}
+            logits_by_policy = {}
             with torch.no_grad(), self.amp_context:
-                other_states = []
                 ego_state = dict(
                     reward=r_ego,
                     done=d_ego,
                     env_id=env_id,
                     mask=mask_ego,
                 )
-                for i, other_mask in enumerate(mask_others):
-                    other_state = dict(
-                        reward=r_others[i],
-                        done=d_others[i],
-                        env_id=env_id,
-                        mask=mask_others[i],
-                    )
-                    other_states.append(other_state)
                 if config["use_rnn"]:
                     ego_state["lstm_h"] = self.lstm_h[env_id.start]
                     ego_state["lstm_c"] = self.lstm_c[env_id.start]
-                    action_others = []
-                    for i in range(len(other_states)):
-                        other_state = other_states[i]
-                        other_state["lstm_h"] = self.other_lstm_hs[i][env_id.start]
-                        other_state["lstm_c"] = self.other_lstm_cs[i][env_id.start]
-                        logits_other, _ = self.other_policies[i].forward_eval(o_others[i], other_state)
+                for policy_idx, other_idx in active_policies:
+                    o_other = torch.as_tensor(o[other_idx], device=device)
+                    r_other = torch.as_tensor(r[other_idx], device=device)
+                    d_other = torch.as_tensor(d[other_idx], device=device)
+                    mask_other = mask[other_idx]
+                    other_state = dict(
+                        reward=r_other,
+                        done=d_other,
+                        env_id=env_id,
+                        mask=mask_other,
+                    )
+                    if config["use_rnn"]:
+                        other_state["lstm_h"] = self.other_lstm_hs[policy_idx][env_id.start]
+                        other_state["lstm_c"] = self.other_lstm_cs[policy_idx][env_id.start]
+                        logits_other, _ = self.other_policies[policy_idx].forward_eval(
+                            o_other, other_state
+                        )
                         action_other, _, _ = pufferlib.pytorch.sample_logits(logits_other)
-                        action_others.append(action_other)
+                        action_others[policy_idx] = action_other
+                        other_states[policy_idx] = other_state
+                        logits_by_policy[policy_idx] = logits_other
                 logits_ego, value_ego = self.policy.forward_eval(o_ego_device, ego_state)
                 action_ego, logprob_ego, _ = pufferlib.pytorch.sample_logits(logits_ego)
 
@@ -622,16 +630,16 @@ class PuffeRL:
                 if config["use_rnn"]:
                     self.lstm_h[env_id.start] = ego_state["lstm_h"]
                     self.lstm_c[env_id.start] = ego_state["lstm_c"]
-                    for i in range(len(action_others)):
-                        self.other_lstm_hs[i][env_id.start] = other_states[i]["lstm_h"]
-                        self.other_lstm_cs[i][env_id.start] = other_states[i]["lstm_c"]
+                    for policy_idx, _ in active_policies:
+                        self.other_lstm_hs[policy_idx][env_id.start] = other_states[policy_idx]["lstm_h"]
+                        self.other_lstm_cs[policy_idx][env_id.start] = other_states[policy_idx]["lstm_c"]
 
                 # Fast path for fully vectorized envs
                 l = self.ep_lengths[env_id.start].item()
                 batch_rows = slice(self.ep_indices[env_id.start].item(), 1 + self.ep_indices[env_id.stop - 1].item())
                 ego_batch_rows = slice(batch_rows.start, batch_rows.stop)
                 if config["cpu_offload"]:
-                    self.observations[ego_batch_rows, l] = o_ego
+                    self.observations[ego_batch_rows, l] = torch.as_tensor(o[ego_idx])
                 else:
                     self.observations[ego_batch_rows, l] = o_ego_device
                 # stack transitions only ego
@@ -655,8 +663,9 @@ class PuffeRL:
                     action_ego = np.clip(action_ego, self.vecenv.action_space.low, self.vecenv.action_space.high)
                 total_actions = self._total_actions_buffer
                 total_actions[ego_indices] = action_ego
-                for i, other_idx in enumerate(other_indices):
-                    action_other = action_others[i]
+                for policy_idx, other_idx in active_policies:
+                    action_other = action_others[policy_idx]
+                    logits_other = logits_by_policy[policy_idx]
                     if isinstance(logits_other, torch.distributions.Normal):
                         action_other = np.clip(action_other, self.vecenv.action_space.low, self.vecenv.action_space.high)
                     total_actions[other_idx] = action_other.cpu().numpy()

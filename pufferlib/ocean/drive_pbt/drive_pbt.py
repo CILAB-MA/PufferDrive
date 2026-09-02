@@ -862,7 +862,9 @@ class Drive_PBT(pufferlib.PufferEnv):
             info[0]["combination_ids"] = self.combination_ids.copy()
         if self.pbt_mode == "mixed":
             info[0]["env_is_replay"] = self.env_is_replay.copy()
+            info[0]["slot_is_replay"] = self.slot_is_replay.copy()
             info[0]["mixed_replay_frac"] = float(self.slot_is_replay.mean())
+            info[0]["reactive_partner_forward_n"] = float((~self.slot_is_replay).sum())
         info[0]["partner_resampled"] = partner_resampled
         if self._last_sampling_metrics:
             info[0].update(self._sampling_info_groups())
@@ -991,7 +993,9 @@ class Drive_PBT(pufferlib.PufferEnv):
             info[0]["combination_ids"] = self.combination_ids.copy()
         if self.pbt_mode == "mixed":
             info[0]["env_is_replay"] = self.env_is_replay.copy()
+            info[0]["slot_is_replay"] = self.slot_is_replay.copy()
             info[0]["mixed_replay_frac"] = float(self.slot_is_replay.mean())
+            info[0]["reactive_partner_forward_n"] = float((~self.slot_is_replay).sum())
         info[0]["partner_resampled"] = partner_resampled
         if self._last_sampling_metrics:
             info[0].update(self._sampling_info_groups())
