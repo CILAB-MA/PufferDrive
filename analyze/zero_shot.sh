@@ -170,11 +170,13 @@ run_zeroshot() {
 }
 
 # Must match evaluator.save_replay / play_replay: path[-11:-3] of other ckpt.
+# other_action_buffer_new: GOAL_REMOVE (goal_behavior=3) buffers; old other_action_buffer was RESPAWN (0).
+OTHER_ACTION_BUFFER_DIR="${OTHER_ACTION_BUFFER_DIR:-other_action_buffer_new}"
 other_buffer_path() {
   local other_id=$1
   local other_ckpt="/data/puffer/${POPULATION_MODE}/${UNSEEN_MODE}/puffer_drive_${other_id}.pt"
   local buf_id=${other_ckpt: -11:8}
-  echo "/data/puffer/experiments/${UNSEEN_MODE}/other_action_buffer/other_actions_${buf_id}.npy"
+  echo "/data/puffer/experiments/${UNSEEN_MODE}/${OTHER_ACTION_BUFFER_DIR}/other_actions_${buf_id}.npy"
 }
 
 # Validation 10k maps → ~60473 agents / ~10000 egos → 50473 other actions.

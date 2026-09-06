@@ -920,7 +920,9 @@ class OtherReplayEvaluator:
         lstm_c=torch.zeros(obs.shape[0] - len(ego_indices), policy2.hidden_size, device=device),
         )
         other_action_buf = np.zeros((other_mask.sum(), self.sim_steps, 1))
-        os.makedirs(f"/data/puffer/experiments/{self.mode}/other_action_buffer", exist_ok=True)
+        # GOAL_REMOVE (goal_behavior=3) buffers; legacy RESPAWN buffers live in other_action_buffer/.
+        buffer_dir = f"/data/puffer/experiments/{self.mode}/other_action_buffer_new"
+        os.makedirs(buffer_dir, exist_ok=True)
         ego_speed_sum = 0.0
         ego_speed_n = 0
         ego_alive = np.ones(len(ego_indices), dtype=bool)
@@ -958,7 +960,10 @@ class OtherReplayEvaluator:
             if len(info_list) > 0:  # Happens at the end of episode
                 results = info_list[0]
                 # Must match ``play_replay`` load key: second path is the "other" policy whose actions we save.
-                np.save(f"/data/puffer/experiments/{self.mode}/other_action_buffer/other_actions_{args['load_multiple_model_path'][1][-11:-3]}.npy", other_action_buf)
+                np.save(
+                    f"{buffer_dir}/other_actions_{args['load_multiple_model_path'][1][-11:-3]}.npy",
+                    other_action_buf,
+                )
                 if ego_speed_n > 0:
                     results["ego_speed"] = ego_speed_sum / ego_speed_n
                 res_dict = {f"{args['load_multiple_model_path'][0][-11:-3]}_vs_selfplay": results}
@@ -995,7 +1000,10 @@ class OtherReplayEvaluator:
         lstm_h=torch.zeros(len(ego_indices), policy1.hidden_size, device=device),
         lstm_c=torch.zeros(len(ego_indices), policy1.hidden_size, device=device),
         )
-        other_action_npy = np.load(f"/data/puffer/experiments/{self.mode}/other_action_buffer/other_actions_{args['load_multiple_model_path'][1][-11:-3]}.npy")
+        other_action_npy = np.load(
+            f"/data/puffer/experiments/{self.mode}/other_action_buffer_new/"
+            f"other_actions_{args['load_multiple_model_path'][1][-11:-3]}.npy"
+        )
         ego_speed_sum = 0.0
         ego_speed_n = 0
         ego_alive = np.ones(len(ego_indices), dtype=bool)
