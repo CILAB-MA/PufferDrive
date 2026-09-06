@@ -26,6 +26,29 @@ _METRIC_FIELD_NAMES = [
 ]
 
 
+def _accumulate_alive_ego_speed(speed_sum, speed_count, ob_ego, alive):
+    """Sum normalized obs speed over still-active egos (skip GOAL_REMOVE zero tails).
+
+    ``ob_ego[:, 2]`` is ``signed_speed / MAX_SPEED``. After GOAL_REMOVE, removed
+    agents keep emitting 0 speed for the rest of the fixed episode; excluding
+    them recovers the pre-remove mean (~0.10) instead of diluting to ~0.05.
+    """
+    alive = np.asarray(alive, dtype=bool).reshape(-1)
+    if alive.size == 0 or not alive.any():
+        return speed_sum, speed_count
+    speeds = np.asarray(ob_ego, dtype=np.float64).reshape(alive.size, -1)[alive, 2]
+    return float(speed_sum) + float(speeds.sum()), int(speed_count) + int(speeds.size)
+
+
+def _mark_done_egos(alive, dones, truncs, ego_indices):
+    """Clear ``alive`` for egos that terminated this step (sticky)."""
+    alive = np.asarray(alive, dtype=bool).copy()
+    done = np.asarray(dones, dtype=bool) | np.asarray(truncs, dtype=bool)
+    ego = np.asarray(ego_indices, dtype=np.int64)
+    alive[done[ego]] = False
+    return alive
+
+
 class WOSACEvaluator:
     """Evaluates policys on the Waymo Open Sim Agent Challenge (WOSAC) in PufferDrive. Info and links in the readme."""
 
@@ -697,8 +720,8 @@ class HumanReplayEvaluator:
 
         Returns:
             dict: Aggregated metrics including env log fields (``speed_at_goal``,
-                ``ego_speed_at_goal``) plus ``ego_speed`` (episode-mean normalized
-                speed from obs).
+                ``ego_speed_at_goal``) plus ``ego_speed`` (mean normalized obs
+                speed over still-active egos; excludes post-GOAL_REMOVE zeros).
         """
         import numpy as np
         import torch
@@ -728,14 +751,18 @@ class HumanReplayEvaluator:
                 lstm_c=torch.zeros(num_agents, policy.hidden_size, device=device),
             )
 
-        ego_speed = 0.0
+        ego_speed_sum = 0.0
+        ego_speed_n = 0
+        ego_alive = np.ones(len(ego_indices), dtype=bool)
         for time_idx in range(self.sim_steps):
             # Step policy
             with torch.no_grad():
                 ob_tensor = torch.as_tensor(obs).to(device)
                 if ego_indices:
                     ob_ego = ob_tensor[ego_indices]
-                    ego_speed += float(ob_ego[:, 2].mean())
+                    ego_speed_sum, ego_speed_n = _accumulate_alive_ego_speed(
+                        ego_speed_sum, ego_speed_n, ob_ego.detach().cpu().numpy(), ego_alive
+                    )
                 logits, value = policy.forward_eval(ob_tensor, state)
                 action, logprob, _ = pufferlib.pytorch.sample_logits(logits)
                 action_np = action.cpu().numpy().reshape(puffer_env.action_space.shape)
@@ -744,11 +771,13 @@ class HumanReplayEvaluator:
                 action_np = np.clip(action_np, puffer_env.action_space.low, puffer_env.action_space.high)
 
             obs, rewards, dones, truncs, info_list = puffer_env.step(action_np)
+            if ego_indices:
+                ego_alive = _mark_done_egos(ego_alive, dones, truncs, ego_indices)
 
             if len(info_list) > 0:  # Happens at the end of episode
                 results = info_list[0]
-                if ego_indices:
-                    results["ego_speed"] = ego_speed / (time_idx + 1)
+                if ego_speed_n > 0:
+                    results["ego_speed"] = ego_speed_sum / ego_speed_n
                 return results
 
 
@@ -812,7 +841,9 @@ class OtherReplayEvaluator:
         lstm_h=torch.zeros(obs.shape[0]- len(ego_indices), policy2.hidden_size, device=device),
         lstm_c=torch.zeros(obs.shape[0] - len(ego_indices), policy2.hidden_size, device=device),
         )
-        ego_speed = 0
+        ego_speed_sum = 0.0
+        ego_speed_n = 0
+        ego_alive = np.ones(len(ego_indices), dtype=bool)
         for time_idx in range(self.sim_steps):
             # Step policy
             with torch.no_grad():
@@ -820,7 +851,9 @@ class OtherReplayEvaluator:
                 ob_tensor = torch.as_tensor(obs).to(device)
                 # ego action
                 ob_ego = ob_tensor[ego_indices]
-                ego_speed += ob_ego[:, 2].mean()
+                ego_speed_sum, ego_speed_n = _accumulate_alive_ego_speed(
+                    ego_speed_sum, ego_speed_n, ob_ego.detach().cpu().numpy(), ego_alive
+                )
                 logits_ego, value_ego = policy1.forward_eval(ob_ego, state_ego)
                 action_ego, logprob_ego, _ = pufferlib.pytorch.sample_logits(logits_ego)
                 action_ego = action_ego.cpu().numpy()
@@ -839,11 +872,12 @@ class OtherReplayEvaluator:
             total_actions[ego_indices] = action_ego
             total_actions[other_mask.cpu().numpy()] = action_other
             obs, rewards, dones, truncs, info_list = puffer_env.step(total_actions)
+            ego_alive = _mark_done_egos(ego_alive, dones, truncs, ego_indices)
 
             if len(info_list) > 0:  # Happens at the end of episode
                 results = info_list[0]
-                ego_speed /= (time_idx + 1)
-                results["ego_speed"] = ego_speed.item()
+                if ego_speed_n > 0:
+                    results["ego_speed"] = ego_speed_sum / ego_speed_n
                 if args['load_multiple_model_path'][1][-11:-3] == args['load_multiple_model_path'][0][-11:-3]:
                     other_name = "selfplay"
                 else:
@@ -887,7 +921,9 @@ class OtherReplayEvaluator:
         )
         other_action_buf = np.zeros((other_mask.sum(), self.sim_steps, 1))
         os.makedirs(f"/data/puffer/experiments/{self.mode}/other_action_buffer", exist_ok=True)
-        ego_speed = 0
+        ego_speed_sum = 0.0
+        ego_speed_n = 0
+        ego_alive = np.ones(len(ego_indices), dtype=bool)
         for time_idx in range(self.sim_steps):
             # Step policy
             with torch.no_grad():
@@ -895,7 +931,9 @@ class OtherReplayEvaluator:
                 ob_tensor = torch.as_tensor(obs).to(device)
                 # ego action
                 ob_ego = ob_tensor[ego_indices]
-                ego_speed += ob_ego[:, 2].mean()
+                ego_speed_sum, ego_speed_n = _accumulate_alive_ego_speed(
+                    ego_speed_sum, ego_speed_n, ob_ego.detach().cpu().numpy(), ego_alive
+                )
                 logits_ego, value_ego = policy1.forward_eval(ob_ego, state_ego)
                 action_ego, logprob_ego, _ = pufferlib.pytorch.sample_logits(logits_ego)
                 action_ego = action_ego.cpu().numpy()
@@ -915,13 +953,14 @@ class OtherReplayEvaluator:
             total_actions[ego_indices] = action_ego
             total_actions[other_mask.cpu().numpy()] = action_other
             obs, rewards, dones, truncs, info_list = puffer_env.step(total_actions)
+            ego_alive = _mark_done_egos(ego_alive, dones, truncs, ego_indices)
 
             if len(info_list) > 0:  # Happens at the end of episode
                 results = info_list[0]
                 # Must match ``play_replay`` load key: second path is the "other" policy whose actions we save.
                 np.save(f"/data/puffer/experiments/{self.mode}/other_action_buffer/other_actions_{args['load_multiple_model_path'][1][-11:-3]}.npy", other_action_buf)
-                ego_speed /= (time_idx + 1)
-                results["ego_speed"] = ego_speed.item()
+                if ego_speed_n > 0:
+                    results["ego_speed"] = ego_speed_sum / ego_speed_n
                 res_dict = {f"{args['load_multiple_model_path'][0][-11:-3]}_vs_selfplay": results}
                 print(res_dict)
                 self.save_result(f"/data/puffer/results/{self.mode}/zeroshot_replay.json", res_dict)
@@ -957,7 +996,9 @@ class OtherReplayEvaluator:
         lstm_c=torch.zeros(len(ego_indices), policy1.hidden_size, device=device),
         )
         other_action_npy = np.load(f"/data/puffer/experiments/{self.mode}/other_action_buffer/other_actions_{args['load_multiple_model_path'][1][-11:-3]}.npy")
-        ego_speed = 0
+        ego_speed_sum = 0.0
+        ego_speed_n = 0
+        ego_alive = np.ones(len(ego_indices), dtype=bool)
         for time_idx in range(self.sim_steps):
             # Step policy
             with torch.no_grad():
@@ -965,7 +1006,9 @@ class OtherReplayEvaluator:
                 ob_tensor = torch.as_tensor(obs).to(device)
                 # ego action
                 ob_ego = ob_tensor[ego_indices]
-                ego_speed += ob_ego[:, 2].mean()
+                ego_speed_sum, ego_speed_n = _accumulate_alive_ego_speed(
+                    ego_speed_sum, ego_speed_n, ob_ego.detach().cpu().numpy(), ego_alive
+                )
                 logits_ego, value_ego = policy1.forward_eval(ob_ego, state_ego)
                 action_ego, logprob_ego, _ = pufferlib.pytorch.sample_logits(logits_ego)
                 action_ego = action_ego.cpu().numpy()
@@ -976,11 +1019,12 @@ class OtherReplayEvaluator:
             total_actions[other_mask.cpu().numpy()] = other_action_npy[:, time_idx]
             total_actions[ego_indices] = action_ego
             obs, rewards, dones, truncs, info_list = puffer_env.step(total_actions)
+            ego_alive = _mark_done_egos(ego_alive, dones, truncs, ego_indices)
 
             if len(info_list) > 0:  # Happens at the end of episode
                 results = info_list[0]
-                ego_speed /= (time_idx + 1)
-                results["ego_speed"] = ego_speed.item()
+                if ego_speed_n > 0:
+                    results["ego_speed"] = ego_speed_sum / ego_speed_n
                 res_dict = {f"{args['load_multiple_model_path'][0][-11:-3]}_vs_{args['load_multiple_model_path'][1][-11:-3]}": results}
                 print(res_dict)
                 self.save_result(f"/data/puffer/results/{self.exp}/{self.mode}/zeroshot.json", res_dict)
