@@ -289,6 +289,7 @@ static int my_log(PyObject *dict, Log *log) {
     assign_to_dict(dict, "lane_alignment_rate", log->lane_alignment_rate);
     assign_to_dict(dict, "offroad_per_agent", log->offroad_per_agent);
     assign_to_dict(dict, "collisions_per_agent", log->collisions_per_agent);
+    assign_to_dict(dict, "at_fault_collision_rate", log->at_fault_collision_rate);
     assign_to_dict(dict, "goals_sampled_this_episode", log->goals_sampled_this_episode);
     assign_to_dict(dict, "goals_reached_this_episode", log->goals_reached_this_episode);
     assign_to_dict(dict, "speed_at_goal", log->speed_at_goal);
@@ -297,6 +298,8 @@ static int my_log(PyObject *dict, Log *log) {
     assign_to_dict(dict, "ego_lane_alignment_rate", log->ego_lane_alignment_rate);
     assign_to_dict(dict, "ego_offroad_rate", log->ego_offroad_rate);
     assign_to_dict(dict, "ego_collision_rate", log->ego_collision_rate);
+    assign_to_dict(dict, "ego_at_fault_collision_rate", log->ego_at_fault_collision_rate);
+    assign_to_dict(dict, "ego_completion_rate", log->ego_completion_rate);
     assign_to_dict(dict, "ego_offroad_per_agent", log->ego_offroad_per_agent);
     assign_to_dict(dict, "ego_collisions_per_agent", log->ego_collisions_per_agent);
     assign_to_dict(dict, "ego_score", log->ego_score);

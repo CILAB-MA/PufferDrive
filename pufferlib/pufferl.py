@@ -1942,7 +1942,7 @@ def eval(env_name, args=None, vecenv=None, policy=None):
         args["env"]["control_mode"] = args["eval"]["human_replay_control_mode"]
         args["env"]["episode_length"] = 91  # WOMD scenario length
         args["env"]["termination_mode"] = 0  # terminate at episode_length
-        args["env"]["goal_behavior"] = 0  # respawn/remove (not wosac stop)
+        args["env"]["goal_behavior"] = 3  # GOAL_REMOVE: clean first-goal eval
         vecenv = vecenv or load_env(env_name, args)
         policy = policy or load_policy(args, vecenv, env_name)
 
@@ -1961,8 +1961,13 @@ def eval(env_name, args=None, vecenv=None, policy=None):
             id_ = args["load_model_path"]
             exp = id_.split("/")[-2]
             map_results = {id_[-11:-3]: results}
-            print(f"EXP {exp}")
-            save_result(f"/data/puffer/results/{exp}/logreplay.json", map_results)
+            results_root = args["eval"].get("results_root") or "/data/puffer/results_new"
+            results_folder = args["eval"].get("results_folder")
+            if not results_folder or results_folder in ("none", "None", ""):
+                results_folder = exp
+            out_path = f"{results_root}/{results_folder}/logreplay.json"
+            print(f"EXP {exp} → {out_path}")
+            save_result(out_path, map_results)
         print("HUMAN_REPLAY_METRICS_END")
 
         return results
@@ -2372,7 +2377,7 @@ def zero_shot(env_name, args=None, vecenv=None, policies=None):
     # args["env"]["control_mode"] = args["eval"]["human_replay_control_mode"]
     args["env"]["episode_length"] = 91  # WOMD scenario length
     args["env"]["termination_mode"] = 0
-    args["env"]["goal_behavior"] = 0
+    args["env"]["goal_behavior"] = 3  # GOAL_REMOVE: clean first-goal eval
     args2 = args.copy()
 
     if (

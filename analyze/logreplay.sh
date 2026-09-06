@@ -17,9 +17,12 @@
 # Defaults:
 #   TRAIN_MODE=all → record + reactive ego
 #   DATA_MODE=validation → /data/puffer/resources/drive/binaries/validation
+#   RESULTS_ROOT=/data/puffer/results_new
 #
 # POP_PATH: suffix after popul_ (lane_nominal | mix | curriculum | ...)
 # FOLDER (arg 2) pins a single ego dir and skips the TRAIN_MODE loop.
+# RESULTS_FOLDER (env, optional): write under ${RESULTS_ROOT}/${RESULTS_FOLDER}
+#   while still loading egos from experiments/${FOLDER}. Defaults to FOLDER.
 set -euo pipefail
 GPU_ID=${1:-0}
 NUM_MAPS="${NUM_MAPS:-10000}"
@@ -100,6 +103,7 @@ resolve_train_mode() {
 }
 
 FOLDER_ARG="${2:-}"
+RESULTS_ROOT="${RESULTS_ROOT:-/data/puffer/results_new}"
 
 case "${TRAIN_MODE}" in
   all|both) TRAIN_MODE_LIST=(record reactive) ;;
@@ -120,6 +124,7 @@ if [[ -n "${FOLDER_ARG}" ]]; then
 fi
 
 run_one() {
+  local results_folder="${RESULTS_FOLDER:-${FOLDER}}"
   local -a EGOS=()
   local f bn id EGO
   shopt -s nullglob
@@ -132,7 +137,8 @@ run_one() {
   shopt -u nullglob
 
   echo "========== log-replay =========="
-  echo "  train_mode=${tm}  folder=${FOLDER}"
+  echo "  train_mode=${tm}  folder=${FOLDER}  results=${results_folder}"
+  echo "  results_root=${RESULTS_ROOT}"
   echo "  map_dir=${EVAL_MAP_DIR}  data_mode=${DATA_MODE:-validation}"
   echo "  num_maps=${NUM_MAPS}"
   echo "  egos=${EGOS[*]-}"
@@ -143,20 +149,24 @@ run_one() {
     return 0
   fi
 
+  mkdir -p "${RESULTS_ROOT}/${results_folder}"
+
   for EGO in "${EGOS[@]}"; do
-    echo "Running log-replay: EGO ${EGO}"
+    echo "Running log-replay: EGO ${EGO} → ${RESULTS_ROOT}/${results_folder}/logreplay.json"
     CUDA_VISIBLE_DEVICES=$GPU_ID puffer eval puffer_drive \
       --eval.human-replay-eval True \
       --eval.human-replay-save-results True \
       --eval.map-dir "${EVAL_MAP_DIR}" \
       --env.termination-mode "0" \
-      --env.goal-behavior "0" \
+      --env.goal-behavior "3" \
       --eval.wosac-num-maps "${NUM_MAPS}" \
+      --eval.results-root "${RESULTS_ROOT}" \
+      --eval.results-folder "${results_folder}" \
       --load-model-path "/data/puffer/experiments/${FOLDER}/puffer_drive_${EGO}.pt"
   done
 }
 
-echo "TRAIN_MODE=${TRAIN_MODE_LIST[*]}  POP=${POP_NAME}  STRATEGY=${STRATEGY}  MAP=${EVAL_MAP_DIR}"
+echo "TRAIN_MODE=${TRAIN_MODE_LIST[*]}  POP=${POP_NAME}  STRATEGY=${STRATEGY}  MAP=${EVAL_MAP_DIR}  RESULTS_ROOT=${RESULTS_ROOT}"
 
 for tm in "${TRAIN_MODE_LIST[@]}"; do
   if [[ -n "${FOLDER_ARG}" ]]; then

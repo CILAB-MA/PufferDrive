@@ -106,6 +106,7 @@
 #define GOAL_RESPAWN 0
 #define GOAL_GENERATE_NEW 1
 #define GOAL_STOP 2
+#define GOAL_REMOVE 3  // eval-only: remove agent after first goal (clean success window)
 
 // Jerk action space (for JERK dynamics model)
 static const float JERK_LONG[4] = {-15.0f, -4.0f, 0.0f, 4.0f};
@@ -155,6 +156,7 @@ struct Log {
     float goals_sampled_this_episode;
     float offroad_rate;
     float collision_rate;
+    float at_fault_collision_rate;
     float completion_rate;
     float offroad_per_agent;
     float collisions_per_agent;
@@ -165,11 +167,12 @@ struct Log {
     float active_agent_count;
     float expert_static_agent_count;
     float static_agent_count;
-    // only record first agent
+    // only record first agent / ego mask
     float ego_speed_at_goal;
     float ego_lane_alignment_rate;
     float ego_offroad_rate;
     float ego_collision_rate;
+    float ego_at_fault_collision_rate;
     float ego_completion_rate;
     float ego_offroad_per_agent;
     float ego_collisions_per_agent;
@@ -216,6 +219,8 @@ struct Entity {
     int respawn_timestep;
     int respawn_count;
     int collided_before_goal;
+    int failure_before_goal;       // collision OR off-road before first goal (eval / clean success)
+    int at_fault_collision_state;  // geometric ego-at-fault sticky flag
     float goals_reached_this_episode;
     float goals_sampled_this_episode;
     int current_goal_reached;
@@ -360,6 +365,22 @@ static inline int is_ego_local(Drive *env, int i) {
     return 0;
 }
 
+// Geometric at-fault heuristic (spiced_self_play): other ahead along heading
+// and ego velocity points toward other.
+static inline int is_at_fault_collision(const Entity *agent, const Entity *other) {
+    float dx = other->x - agent->x;
+    float dy = other->y - agent->y;
+    float forward_dot = dx * agent->heading_x + dy * agent->heading_y;
+    float approach_dot = agent->vx * dx + agent->vy * dy;
+    return (forward_dot > 0.0f && approach_dot > 0.0f) ? 1 : 0;
+}
+
+static inline int is_ego_agent_slot(Drive *env, int i) {
+    return (env->num_ego_local > 0 && is_ego_local(env, i)) ||
+           (env->num_ego_local == 0 && env->control_mode == CONTROL_SDC_ONLY && i == 0) ||
+           (env->num_ego_local == 0 && env->num_ego > 0 && i == 0);
+}
+
 void add_log(Drive *env) {
     for (int i = 0; i < env->active_agent_count; i++) {
         Entity *e = &env->entities[env->active_agent_indices[i]];
@@ -371,6 +392,8 @@ void add_log(Drive *env) {
         env->log.offroad_rate += offroad;
         int collided = env->logs[i].collision_rate;
         env->log.collision_rate += collided;
+        int at_fault = env->logs[i].at_fault_collision_rate;
+        env->log.at_fault_collision_rate += at_fault;
         float offroad_per_agent = env->logs[i].offroad_per_agent;
         env->log.offroad_per_agent += offroad_per_agent;
         float collisions_per_agent = env->logs[i].collisions_per_agent;
@@ -389,12 +412,30 @@ void add_log(Drive *env) {
             threshold = 0.9f; // Require ≥90% completion for 5+ goals
         }
 
-        int collision_occurred =
-            (env->goal_behavior == GOAL_RESPAWN) ? e->collided_before_goal : env->logs[i].collision_rate;
-        if (frac_goal_reached > threshold && !collision_occurred) {
+        int completed = (frac_goal_reached > threshold) ? 1 : 0;
+        int success = 0;
+        if (env->goal_behavior == GOAL_REMOVE) {
+            // Clean first-goal success: reached AND no collision/off-road before goal.
+            success = (completed && !e->failure_before_goal) ? 1 : 0;
+        } else if (env->goal_behavior == GOAL_RESPAWN) {
+            // Preserve training semantics (collision-before-goal only).
+            success = (completed && !e->collided_before_goal) ? 1 : 0;
+        } else {
+            // GOAL_STOP / GOAL_GENERATE_NEW: prior behavior (any episode collision).
+            success = (completed && !collided) ? 1 : 0;
+        }
+
+        if (success) {
             env->log.score += 1.0f;
         }
-        if (!offroad && !collided && frac_goal_reached < 1.0f) {
+        if (completed) {
+            env->log.completion_rate += 1.0f;
+        }
+        if (env->goal_behavior == GOAL_REMOVE) {
+            if (!e->failure_before_goal && frac_goal_reached < 1.0f) {
+                env->log.dnf_rate += 1.0f;
+            }
+        } else if (!offroad && !collided && frac_goal_reached < 1.0f) {
             env->log.dnf_rate += 1.0f;
         }
         int lane_aligned = env->logs[i].lane_alignment_rate;
@@ -406,12 +447,12 @@ void add_log(Drive *env) {
         // num_ego > 0 but ego_local was not passed (old single-ego setups). When num_ego == 0
         // (PBT env with no ego in this map), do not count local 0 as ego.
         // CONTROL_SDC_ONLY (human log-replay): SDC is always local 0 and is the ego.
-        if ((env->num_ego_local > 0 && is_ego_local(env, i)) ||
-            (env->num_ego_local == 0 && env->control_mode == CONTROL_SDC_ONLY && i == 0) ||
-            (env->num_ego_local == 0 && env->num_ego > 0 && i == 0)) {
-            env->log.ego_score += (frac_goal_reached > threshold && !collision_occurred) ? 1.0f : 0.0f;
+        if (is_ego_agent_slot(env, i)) {
+            env->log.ego_score += success ? 1.0f : 0.0f;
+            env->log.ego_completion_rate += completed ? 1.0f : 0.0f;
             env->log.ego_offroad_rate += offroad;
             env->log.ego_collision_rate += collided;
+            env->log.ego_at_fault_collision_rate += at_fault;
             env->log.ego_speed_at_goal += env->logs[i].speed_at_goal;
             env->log.ego_lane_alignment_rate += lane_aligned;
             env->log.ego_collisions_per_agent += collisions_per_agent;
@@ -1034,6 +1075,9 @@ int collision_check(Drive *env, int agent_idx) {
 
     int car_collided_with_index = -1;
 
+    if (agent->removed == 1)
+        return car_collided_with_index; // Skip removed entities
+
     if (agent->respawn_timestep != -1)
         return car_collided_with_index; // Skip respawning entities
 
@@ -1049,6 +1093,8 @@ int collision_check(Drive *env, int agent_idx) {
         if (index == agent_idx)
             continue;
         Entity *entity = &env->entities[index];
+        if (entity->removed == 1)
+            continue; // Skip removed entities
         if (entity->respawn_timestep != -1)
             continue; // Skip respawning entities
         float x1 = entity->x;
@@ -1152,8 +1198,8 @@ void compute_agent_metrics(Drive *env, int agent_idx) {
 
     reset_agent_metrics(env, agent_idx);
 
-    if (agent->x == INVALID_POSITION)
-        return; // invalid agent position
+    if (agent->removed || agent->x == INVALID_POSITION)
+        return; // removed / invalid agent position
 
     int collided = 0;
     float half_length = agent->length / 2.0f;
@@ -1251,6 +1297,10 @@ void compute_agent_metrics(Drive *env, int agent_idx) {
     agent->collision_state = collided;
 
     if (collided == VEHICLE_COLLISION) {
+        Entity *other = &env->entities[car_collided_with_index];
+        if (is_at_fault_collision(agent, other)) {
+            agent->at_fault_collision_state = 1; // sticky until episode reset
+        }
         if (env->collision_behavior == STOP_AGENT && !agent->stopped) {
             agent->stopped = 1;
             agent->vx = agent->vy = 0.0f;
@@ -2140,6 +2190,8 @@ void c_reset(Drive *env) {
         env->entities[agent_idx].respawn_timestep = -1;
         env->entities[agent_idx].respawn_count = 0;
         env->entities[agent_idx].collided_before_goal = 0;
+        env->entities[agent_idx].failure_before_goal = 0;
+        env->entities[agent_idx].at_fault_collision_state = 0;
         env->entities[agent_idx].goals_reached_this_episode = 0.0f;
         // Initialize to 1 because there is one goal in the data file
         env->entities[agent_idx].goals_sampled_this_episode = 1.0f;
@@ -2180,6 +2232,8 @@ void respawn_agent(Drive *env, int agent_idx) {
 
     env->entities[agent_idx].respawn_timestep = env->timestep;
     env->entities[agent_idx].collided_before_goal = 0;
+    env->entities[agent_idx].failure_before_goal = 0;
+    env->entities[agent_idx].at_fault_collision_state = 0;
     env->entities[agent_idx].stopped = 0;
     env->entities[agent_idx].removed = 0;
     env->entities[agent_idx].a_long = 0.0f;
@@ -2192,6 +2246,14 @@ void respawn_agent(Drive *env, int agent_idx) {
 void c_step(Drive *env) {
     memset(env->rewards, 0, env->active_agent_count * sizeof(float));
     memset(env->terminals, 0, env->active_agent_count * sizeof(unsigned char));
+    // Keep already-removed agents terminal (GOAL_REMOVE); do not early-end the env
+    // so fixed-length replay buffers stay aligned (termination_mode=0 eval).
+    for (int i = 0; i < env->active_agent_count; i++) {
+        int agent_idx = env->active_agent_indices[i];
+        if (env->entities[agent_idx].removed) {
+            env->terminals[i] = 1;
+        }
+    }
     env->timestep++;
 
     int originals_remaining = 0;
@@ -2215,6 +2277,8 @@ void c_step(Drive *env) {
         int expert_idx = env->expert_static_agent_indices[i];
         if (env->entities[expert_idx].x == INVALID_POSITION)
             continue;
+        if (env->entities[expert_idx].removed)
+            continue;
         move_expert(env, env->actions, expert_idx);
     }
     // Process actions for all active agents
@@ -2222,6 +2286,8 @@ void c_step(Drive *env) {
         env->logs[i].score = 0.0f;
         env->logs[i].episode_length += 1;
         int agent_idx = env->active_agent_indices[i];
+        if (env->entities[agent_idx].removed)
+            continue;
         env->entities[agent_idx].collision_state = 0;
         float prev_vx = env->entities[agent_idx].vx;
         float prev_vy = env->entities[agent_idx].vy;
@@ -2241,6 +2307,8 @@ void c_step(Drive *env) {
     // Compute rewards
     for (int i = 0; i < env->active_agent_count; i++) {
         int agent_idx = env->active_agent_indices[i];
+        if (env->entities[agent_idx].removed || env->terminals[i])
+            continue;
         env->entities[agent_idx].collision_state = 0;
 
         compute_agent_metrics(env, agent_idx);
@@ -2252,6 +2320,9 @@ void c_step(Drive *env) {
                 env->logs[i].episode_return += env->reward_vehicle_collision;
                 env->logs[i].collision_rate = 1.0f;
                 env->logs[i].collisions_per_agent += 1.0f;
+                if (env->entities[agent_idx].at_fault_collision_state) {
+                    env->logs[i].at_fault_collision_rate = 1.0f;
+                }
             } else if (collision_state == OFFROAD) {
                 env->rewards[i] += env->reward_offroad_collision;
                 env->logs[i].episode_return += env->reward_offroad_collision;
@@ -2260,6 +2331,10 @@ void c_step(Drive *env) {
             }
 
             env->entities[agent_idx].collided_before_goal = 1;
+            // Clean-success failure window: collision OR off-road before first goal.
+            if (!env->entities[agent_idx].current_goal_reached) {
+                env->entities[agent_idx].failure_before_goal = 1;
+            }
         }
 
         float distance_to_goal =
@@ -2286,7 +2361,13 @@ void c_step(Drive *env) {
                 sample_new_goal(env, agent_idx);
                 env->entities[agent_idx].current_goal_reached = 0;
                 env->entities[agent_idx].goals_reached_this_episode += 1.0f;
-            } else { // Zero out the velocity so that the agent stops at the goal
+            } else if (env->goal_behavior == GOAL_REMOVE) {
+                // Mark first-goal reached; physical remove happens below (keeps step budget).
+                env->rewards[i] = env->reward_goal;
+                env->logs[i].episode_return = env->reward_goal;
+                env->entities[agent_idx].current_goal_reached = 1;
+                env->entities[agent_idx].goals_reached_this_episode += 1.0f;
+            } else { // GOAL_STOP (and legacy): stop at goal
                 env->rewards[i] = env->reward_goal;
                 env->logs[i].episode_return = env->reward_goal;
                 env->entities[agent_idx].stopped = 1;
@@ -2325,6 +2406,24 @@ void c_step(Drive *env) {
             if (reached_goal) {
                 env->entities[agent_idx].stopped = 1;
                 env->entities[agent_idx].vx = env->entities[agent_idx].vy = 0.0f;
+            }
+        }
+    } else if (env->goal_behavior == GOAL_REMOVE) {
+        // Eval-only: remove agents that reached their first goal so they no longer
+        // participate in dynamics / collisions / metrics. Episode length is unchanged
+        // (termination_mode=0) to preserve fixed replay/action-buffer alignment.
+        for (int i = 0; i < env->active_agent_count; i++) {
+            int agent_idx = env->active_agent_indices[i];
+            if (env->entities[agent_idx].removed)
+                continue;
+            if (env->entities[agent_idx].current_goal_reached) {
+                env->terminals[i] = 1;
+                env->entities[agent_idx].removed = 1;
+                env->entities[agent_idx].stopped = 1;
+                env->entities[agent_idx].vx = 0.0f;
+                env->entities[agent_idx].vy = 0.0f;
+                env->entities[agent_idx].x = INVALID_POSITION;
+                env->entities[agent_idx].y = INVALID_POSITION;
             }
         }
     }

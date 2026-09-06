@@ -27,6 +27,8 @@
 # POP_PATH: suffix after popul_ (lane_nominal | mix | curriculum | ...)
 #   → /data/puffer/popul_${POP_PATH}
 # FOLDER (arg 2) pins a single ego dir and skips the TRAIN_MODE loop.
+# RESULTS_FOLDER (env, optional): write under /data/puffer/results/${RESULTS_FOLDER}
+#   while still loading egos from experiments/${FOLDER}. Defaults to FOLDER.
 set -euo pipefail
 GPU_ID=${1:-0}
 DRIVE_BINARIES_ROOT="${DRIVE_BINARIES_ROOT:-/data/puffer/resources/drive/binaries}"
@@ -110,7 +112,7 @@ FOLDER_ARG="${2:-}"
 POPULATION_MODE=${3:-${POP_NAME}}
 UNSEEN_MODE="${UNSEEN_MODE:-${4:-all}}"
 EVAL_MODE="${EVAL_MODE:-${5:-both}}"
-RESULTS_ROOT="${6:-/data/puffer/results}"
+RESULTS_ROOT="${6:-/data/puffer/results_new}"
 
 case "${TRAIN_MODE}" in
   all|both) TRAIN_MODE_LIST=(record reactive) ;;
@@ -162,7 +164,7 @@ run_zeroshot() {
     --zero-shot-mode "${zsm}" \
     --eval.map-dir "${EVAL_MAP_DIR}" \
     --env.termination-mode "0" \
-    --env.goal-behavior "0" \
+    --env.goal-behavior "3" \
     --pbt.pbt-mode "replay" \
     "${extra[@]}"
 }
@@ -175,9 +177,36 @@ other_buffer_path() {
   echo "/data/puffer/experiments/${UNSEEN_MODE}/other_action_buffer/other_actions_${buf_id}.npy"
 }
 
+# Validation 10k maps → ~60473 agents / ~10000 egos → 50473 other actions.
+# Override with EXPECTED_OTHER_AGENTS if map corpus changes.
+EXPECTED_OTHER_AGENTS="${EXPECTED_OTHER_AGENTS:-50473}"
+
+# True if buffer exists and first dim matches current eval env other-agent count.
+other_buffer_ok() {
+  local buf_path=$1
+  if [[ ! -f "${buf_path}" ]]; then
+    return 1
+  fi
+  local n
+  n="$(
+    python3 - "${buf_path}" <<'PY'
+import sys
+import numpy as np
+a = np.load(sys.argv[1], mmap_mode="r")
+print(int(a.shape[0]))
+PY
+  )"
+  if [[ "${n}" != "${EXPECTED_OTHER_AGENTS}" ]]; then
+    echo "stale buffer shape=${n} (want ${EXPECTED_OTHER_AGENTS}): ${buf_path}" >&2
+    return 1
+  fi
+  return 0
+}
+
 run_one() {
   local eval_one="$1"
-  local SCENARIO_LOG_DIR="${RESULTS_ROOT}/${FOLDER}/${UNSEEN_MODE}/scenario_logs"
+  local results_folder="${RESULTS_FOLDER:-${FOLDER}}"
+  local SCENARIO_LOG_DIR="${RESULTS_ROOT}/${results_folder}/${UNSEEN_MODE}/scenario_logs"
   mkdir -p "${SCENARIO_LOG_DIR}"
 
   local -a EGOS=() OTHERS=()
@@ -200,7 +229,7 @@ run_one() {
   echo "========== zeroshot =========="
   echo "  train_mode=${tm}  eval_mode=${eval_one}  unseen=${UNSEEN_MODE}"
   echo "  map_dir=${EVAL_MAP_DIR}  data_mode=${DATA_MODE:-validation}"
-  echo "  folder=${FOLDER}"
+  echo "  folder=${FOLDER}  results=${results_folder}"
   echo "  others=/data/puffer/${POPULATION_MODE}/${UNSEEN_MODE}"
   echo "  egos=${EGOS[*]-}"
   echo "  others=${OTHERS[*]-}"
@@ -217,11 +246,16 @@ run_one() {
     REF_EGO="${EGOS[0]}"
     for MP2 in "${OTHERS[@]}"; do
       BUF_PATH=$(other_buffer_path "${MP2}")
-      if [[ -f "${BUF_PATH}" ]]; then
-        echo "skip save-replay: buffer exists other=${MP2} (${BUF_PATH})"
+      if other_buffer_ok "${BUF_PATH}"; then
+        echo "skip save-replay: buffer ok other=${MP2} (${BUF_PATH})"
         continue
       fi
-      echo "save-replay: buffer other=${MP2} (reference ego=${REF_EGO})"
+      if [[ -f "${BUF_PATH}" ]]; then
+        mkdir -p "$(dirname "${BUF_PATH}")/_bad_shape"
+        mv -f "${BUF_PATH}" "$(dirname "${BUF_PATH}")/_bad_shape/$(basename "${BUF_PATH}")"
+        echo "quarantined stale buffer → _bad_shape/$(basename "${BUF_PATH}")"
+      fi
+      echo "save-replay: buffer other=${MP2} (reference ego=${REF_EGO}, expect other_n=${EXPECTED_OTHER_AGENTS})"
       run_zeroshot "${REF_EGO}" "${MP2}" "save-replay"
     done
   fi

@@ -32,6 +32,7 @@ class Drive(pufferlib.PufferEnv):
         reward_lane_dist=0.0,
         aggressive_speed=0.0,
         reward_speed=0.0,
+        # 0:respawn (train default), 1:generate_new, 2:stop, 3:remove (eval-only)
         goal_behavior=0,
         goal_target_distance=10.0,
         goal_radius=2.0,
